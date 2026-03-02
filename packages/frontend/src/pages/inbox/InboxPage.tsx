@@ -24,6 +24,7 @@ import {
   MapPin,
 } from 'lucide-react';
 import { api, apiUpload, ApiError } from '../../lib/api';
+import { getFirstImageFromClipboardData, prepareImageForUpload } from '../../lib/image-upload';
 import { useAuth } from '../../stores/useAuth';
 import { Tooltip } from '../../ui';
 import styles from './InboxPage.module.css';
@@ -746,7 +747,8 @@ export function InboxPage() {
       if (hasFile) {
         // Upload file as media message
         const formData = new FormData();
-        formData.append('file', attachedFile);
+        const uploadFile = await prepareImageForUpload(attachedFile);
+        formData.append('file', uploadFile, uploadFile.name);
         formData.append('conversationId', selectedId);
         if (hasText) {
           formData.append('caption', replyText.trim());
@@ -828,6 +830,15 @@ export function InboxPage() {
       e.preventDefault();
       handleSend();
     }
+  }
+
+  function handleReplyPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const imageFile = getFirstImageFromClipboardData(e.clipboardData);
+    if (!imageFile) return;
+
+    e.preventDefault();
+    setAttachedFile(imageFile);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
   /* ── Update conversation status ── */
@@ -1553,6 +1564,7 @@ export function InboxPage() {
                       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
                     }}
                     onKeyDown={handleReplyKeyDown}
+                    onPaste={handleReplyPaste}
                     rows={1}
                   />
                 </div>

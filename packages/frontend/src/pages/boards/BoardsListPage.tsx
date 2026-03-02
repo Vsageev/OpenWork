@@ -11,6 +11,7 @@ import {
   getPreferredBoardId,
   setPreferredBoardId,
 } from '../../lib/navigation-preferences';
+import { useWorkspace } from '../../stores/WorkspaceContext';
 import styles from './BoardsListPage.module.css';
 
 interface Board {
@@ -36,6 +37,7 @@ export function BoardsListPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const { activeWorkspaceId } = useWorkspace();
   const [boards, setBoards] = useState<Board[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -51,8 +53,11 @@ export function BoardsListPage() {
     setLoading(true);
     setError('');
     try {
-      const params = search ? `?search=${encodeURIComponent(search)}` : '';
-      const data = await api<BoardsResponse>(`/boards${params}`);
+      const qp = new URLSearchParams();
+      if (search) qp.set('search', search);
+      if (activeWorkspaceId) qp.set('workspaceId', activeWorkspaceId);
+      const qs = qp.toString();
+      const data = await api<BoardsResponse>(`/boards${qs ? `?${qs}` : ''}`);
       setBoards(Array.isArray(data.entries) ? data.entries : []);
     } catch (err) {
       setBoards([]);
@@ -61,7 +66,7 @@ export function BoardsListPage() {
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, activeWorkspaceId]);
 
   useEffect(() => {
     fetchBoards();
@@ -92,13 +97,13 @@ export function BoardsListPage() {
   }, [fetchBoards]);
 
   useEffect(() => {
-    if (search || loading || provisioningStarter || error || boards.length > 0) return;
+    if (activeWorkspaceId || search || loading || provisioningStarter || error || boards.length > 0) return;
     void createDefaultBoard();
-  }, [search, loading, provisioningStarter, error, boards.length, createDefaultBoard]);
+  }, [activeWorkspaceId, search, loading, provisioningStarter, error, boards.length, createDefaultBoard]);
 
   useEffect(() => {
     const forceList = searchParams.get('list') === '1';
-    if (forceList || search || loading || provisioningStarter || error || boards.length === 0) return;
+    if (activeWorkspaceId || forceList || search || loading || provisioningStarter || error || boards.length === 0) return;
 
     const preferredBoardId = getPreferredBoardId();
     const targetBoardId =
@@ -107,7 +112,7 @@ export function BoardsListPage() {
         : boards[0].id;
 
     navigate(`/boards/${targetBoardId}`, { replace: true });
-  }, [searchParams, search, loading, provisioningStarter, error, boards, navigate]);
+  }, [activeWorkspaceId, searchParams, search, loading, provisioningStarter, error, boards, navigate]);
 
   async function handleCreate() {
     if (!createName.trim()) return;

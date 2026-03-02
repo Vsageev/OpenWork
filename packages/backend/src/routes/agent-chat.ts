@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
@@ -21,6 +21,38 @@ import {
   isAgentBusy,
   subscribeToRunOutput,
 } from '../services/agent-chat.js';
+
+function attachSocketErrorHandler(request: FastifyRequest, reply: FastifyReply) {
+  reply.raw.socket?.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EPIPE') request.log.error(err);
+  });
+}
+
+function safeSseWrite(request: FastifyRequest, reply: FastifyReply, payload: string) {
+  if (reply.raw.destroyed || reply.raw.writableEnded) return false;
+  try {
+    reply.raw.write(payload);
+    return true;
+  } catch (err) {
+    const socketErr = err as NodeJS.ErrnoException;
+    if (socketErr.code !== 'EPIPE' && socketErr.code !== 'ERR_STREAM_WRITE_AFTER_END') {
+      request.log.error(socketErr);
+    }
+    return false;
+  }
+}
+
+function safeSseEnd(request: FastifyRequest, reply: FastifyReply) {
+  if (reply.raw.destroyed || reply.raw.writableEnded) return;
+  try {
+    reply.raw.end();
+  } catch (err) {
+    const socketErr = err as NodeJS.ErrnoException;
+    if (socketErr.code !== 'EPIPE' && socketErr.code !== 'ERR_STREAM_WRITE_AFTER_END') {
+      request.log.error(socketErr);
+    }
+  }
+}
 
 export async function agentChatRoutes(app: FastifyInstance) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
@@ -260,18 +292,19 @@ export async function agentChatRoutes(app: FastifyInstance) {
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
+      attachSocketErrorHandler(request, reply);
 
       executePrompt(request.params.id, request.body.prompt, request.body.conversationId, {
         onChunk(text) {
-          reply.raw.write(`data: ${JSON.stringify(text)}\n\n`);
+          safeSseWrite(request, reply, `data: ${JSON.stringify(text)}\n\n`);
         },
         onDone(message) {
-          reply.raw.write(`event: done\ndata: ${JSON.stringify({ messageId: message.id })}\n\n`);
-          reply.raw.end();
+          safeSseWrite(request, reply, `event: done\ndata: ${JSON.stringify({ messageId: message.id })}\n\n`);
+          safeSseEnd(request, reply);
         },
         onError(error) {
-          reply.raw.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`);
-          reply.raw.end();
+          safeSseWrite(request, reply, `event: error\ndata: ${JSON.stringify({ error })}\n\n`);
+          safeSseEnd(request, reply);
         },
       });
     },
@@ -313,18 +346,19 @@ export async function agentChatRoutes(app: FastifyInstance) {
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
+      attachSocketErrorHandler(request, reply);
 
       executeRespondToLastMessage(request.params.id, request.body.conversationId, {
         onChunk(text) {
-          reply.raw.write(`data: ${JSON.stringify(text)}\n\n`);
+          safeSseWrite(request, reply, `data: ${JSON.stringify(text)}\n\n`);
         },
         onDone(message) {
-          reply.raw.write(`event: done\ndata: ${JSON.stringify({ messageId: message.id })}\n\n`);
-          reply.raw.end();
+          safeSseWrite(request, reply, `event: done\ndata: ${JSON.stringify({ messageId: message.id })}\n\n`);
+          safeSseEnd(request, reply);
         },
         onError(error) {
-          reply.raw.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`);
-          reply.raw.end();
+          safeSseWrite(request, reply, `event: error\ndata: ${JSON.stringify({ error })}\n\n`);
+          safeSseEnd(request, reply);
         },
       });
     },
@@ -359,29 +393,34 @@ export async function agentChatRoutes(app: FastifyInstance) {
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
+      attachSocketErrorHandler(request, reply);
 
       const subscribed = subscribeToRunOutput(
         request.params.id,
         request.query.conversationId,
         {
           onChunk(text) {
-            reply.raw.write(`data: ${JSON.stringify(text)}\n\n`);
+            safeSseWrite(request, reply, `data: ${JSON.stringify(text)}\n\n`);
           },
           onDone(message) {
-            reply.raw.write(`event: done\ndata: ${JSON.stringify({ messageId: message?.id ?? null })}\n\n`);
-            reply.raw.end();
+            safeSseWrite(
+              request,
+              reply,
+              `event: done\ndata: ${JSON.stringify({ messageId: message?.id ?? null })}\n\n`,
+            );
+            safeSseEnd(request, reply);
           },
           onError(error) {
-            reply.raw.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`);
-            reply.raw.end();
+            safeSseWrite(request, reply, `event: error\ndata: ${JSON.stringify({ error })}\n\n`);
+            safeSseEnd(request, reply);
           },
         },
       );
 
       if (!subscribed) {
         // Race condition: process finished between check and subscribe
-        reply.raw.write(`event: done\ndata: ${JSON.stringify({ messageId: null })}\n\n`);
-        reply.raw.end();
+        safeSseWrite(request, reply, `event: done\ndata: ${JSON.stringify({ messageId: null })}\n\n`);
+        safeSseEnd(request, reply);
       }
     },
   );

@@ -1,4 +1,5 @@
 import { type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Plus,
   Trash2,
@@ -32,10 +33,12 @@ import {
   Layers,
   Pencil,
   Link2,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Button, Badge, Input, Textarea, Select, CronEditor, ApiKeyFormFields, MarkdownContent, Tooltip } from '../ui';
 import { api, apiUpload, ApiError } from '../lib/api';
 import { formatFileSize, formatFileDate, isTextPreviewable, isImagePreviewable, isPreviewable } from '../lib/file-utils';
+import { getFirstImageFromClipboardData, getFirstImageFromFileList, isImageFile, prepareImageForUpload } from '../lib/image-upload';
 import { scrollToFirstError } from '../lib/scroll-to-error';
 import { FilePreviewModal } from '../components/FilePreviewModal';
 import { FileSystemBrowserModal } from '../components/FileSystemBrowserModal';
@@ -46,6 +49,7 @@ import {
   startAgentChatRespondStream,
   useAgentChatStreams,
 } from '../stores/agent-chat-runtime';
+import { useWorkspace } from '../stores/WorkspaceContext';
 import styles from './AgentsPage.module.css';
 
 /* ── Types ── */
@@ -778,6 +782,10 @@ function AgentFiles({ agentId }: { agentId: string }) {
    ══════════════════════════════════════════════════════════ */
 
 export function AgentsPage() {
+  const { activeWorkspaceId } = useWorkspace();
+  const [searchParams] = useSearchParams();
+  const requestedAgentId = searchParams.get('agentId');
+  const requestedConversationId = searchParams.get('conversationId');
   // ── Agent list state ──
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -786,9 +794,16 @@ export function AgentsPage() {
   // ── Agent groups ──
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const [collapsedAgents, setCollapsedAgents] = useState<Set<string> | 'all'>(
-    'all',
-  );
+  const [collapsedAgents, setCollapsedAgents] = useState<Set<string> | 'all'>(() => {
+    try {
+      const raw = localStorage.getItem('agents_page_settings');
+      const settings = raw ? JSON.parse(raw) as { collapsedAgentIds?: string[] | 'all' } : {};
+      if (Array.isArray(settings.collapsedAgentIds)) {
+        return new Set(settings.collapsedAgentIds);
+      }
+    } catch { /* ignore */ }
+    return 'all';
+  });
   const [manageGroupsOpen, setManageGroupsOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -833,6 +848,39 @@ export function AgentsPage() {
 
   // ── Chat / Files tab ──
   const [chatTab, setChatTab] = useState<'chat' | 'files'>('chat');
+
+  // ── Page settings ──
+  const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
+  const [autoCollapse, setAutoCollapse] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem('agents_page_settings');
+      return raw ? (JSON.parse(raw) as { autoCollapse?: boolean }).autoCollapse ?? false : false;
+    } catch {
+      return false;
+    }
+  });
+
+  function toggleAutoCollapse() {
+    setAutoCollapse((prev) => {
+      const next = !prev;
+      try {
+        const raw = localStorage.getItem('agents_page_settings');
+        const existing = raw ? JSON.parse(raw) as object : {};
+        localStorage.setItem('agents_page_settings', JSON.stringify({ ...existing, autoCollapse: next }));
+      } catch { /* ignore */ }
+      return next;
+    });
+  }
+
+  // Persist collapsed agents state
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('agents_page_settings');
+      const existing = raw ? JSON.parse(raw) as object : {};
+      const collapsedAgentIds = collapsedAgents === 'all' ? 'all' : Array.from(collapsedAgents);
+      localStorage.setItem('agents_page_settings', JSON.stringify({ ...existing, collapsedAgentIds }));
+    } catch { /* ignore */ }
+  }, [collapsedAgents]);
 
   // ── Settings modal ──
   const [settingsAgent, setSettingsAgent] = useState<Agent | null>(null);
@@ -886,16 +934,19 @@ export function AgentsPage() {
   /* ── Fetch groups ── */
   const fetchGroups = useCallback(async () => {
     try {
-      const data = await api<{ entries: AgentGroup[] }>('/agent-groups');
+      const qs = activeWorkspaceId ? `?workspaceId=${activeWorkspaceId}` : '';
+      const data = await api<{ entries: AgentGroup[] }>(`/agent-groups${qs}`);
       setGroups(data.entries);
     } catch { /* silently fail */ }
-  }, []);
+  }, [activeWorkspaceId]);
 
   /* ── Fetch agents ── */
   const fetchAgents = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<AgentsResponse>('/agents?limit=100');
+      const qp = new URLSearchParams({ limit: '100' });
+      if (activeWorkspaceId) qp.set('workspaceId', activeWorkspaceId);
+      const data = await api<AgentsResponse>(`/agents?${qp.toString()}`);
       setAgents(data.entries);
       return data.entries;
     } catch {
@@ -904,7 +955,7 @@ export function AgentsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeWorkspaceId]);
 
   /* ── Fetch conversations for an agent ── */
   const fetchConversations = useCallback(async (agentId: string) => {
@@ -1014,6 +1065,34 @@ export function AgentsPage() {
       if (cancelled) return;
       setConvsByAgent(allConvs);
 
+      if (requestedAgentId) {
+        const requestedAgent = entries.find((agent) => agent.id === requestedAgentId);
+        if (requestedAgent) {
+          const requestedConvs = allConvs[requestedAgentId] || [];
+          const requestedConvExists = requestedConversationId
+            ? requestedConvs.some((conv) => conv.id === requestedConversationId)
+            : false;
+          const targetConvId = requestedConvExists ? requestedConversationId : requestedConvs[0]?.id ?? null;
+
+          setActiveAgentId(requestedAgentId);
+          if (targetConvId) {
+            setActiveConvId(targetConvId);
+            const msgData = await api<{ entries: ChatMessage[] }>(
+              `/agents/${requestedAgentId}/chat/messages?conversationId=${targetConvId}`,
+            );
+            if (!cancelled) {
+              setMessages(msgData.entries);
+              isFirstMessageRef.current = msgData.entries.length === 0;
+            }
+          } else {
+            setActiveConvId(null);
+            setMessages([]);
+            isFirstMessageRef.current = true;
+          }
+          return;
+        }
+      }
+
       const latestStreaming = getLatestStreamingAgentChatStream();
       if (latestStreaming) {
         const streamConvs = allConvs[latestStreaming.agentId] || [];
@@ -1066,7 +1145,7 @@ export function AgentsPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [fetchAgents, fetchGroups]);
+  }, [fetchAgents, fetchGroups, requestedAgentId, requestedConversationId]);
 
   useEffect(() => {
     if (agents.length === 0) return;
@@ -1210,6 +1289,13 @@ export function AgentsPage() {
     if (agentId === activeAgentId && convId === activeConvId) {
       void markConversationRead(agentId, convId);
       return;
+    }
+    if (autoCollapse) {
+      setCollapsedAgents(() => {
+        const next = new Set(agents.map((a) => a.id));
+        next.delete(agentId);
+        return next;
+      });
     }
     setActiveAgentId(agentId);
     setActiveConvId(convId);
@@ -1363,39 +1449,8 @@ export function AgentsPage() {
 
   /* ── Image paste/upload ── */
 
-  function compressImage(file: File, maxDim = 1600, quality = 0.82): Promise<Blob> {
-    return new Promise((resolve, reject) => {
-      const img = new window.Image();
-      const url = URL.createObjectURL(file);
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        let { width, height } = img;
-        if (width > maxDim || height > maxDim) {
-          const ratio = Math.min(maxDim / width, maxDim / height);
-          width = Math.round(width * ratio);
-          height = Math.round(height * ratio);
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d')!;
-        ctx.drawImage(img, 0, 0, width, height);
-        canvas.toBlob(
-          (blob) => (blob ? resolve(blob) : reject(new Error('Compression failed'))),
-          'image/jpeg',
-          quality,
-        );
-      };
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error('Failed to load image'));
-      };
-      img.src = url;
-    });
-  }
-
   function stageImage(file: File) {
-    if (!file.type.startsWith('image/')) return;
+    if (!isImageFile(file)) return;
     // Revoke previous preview URL if any
     if (stagedImage) URL.revokeObjectURL(stagedImage.previewUrl);
     const previewUrl = URL.createObjectURL(file);
@@ -1412,11 +1467,11 @@ export function AgentsPage() {
   async function uploadStagedImage(caption: string): Promise<ChatMessage | null> {
     if (!stagedImage || !activeAgentId || !activeConvId) return null;
 
-    const compressed = await compressImage(stagedImage.file);
+    const uploadFile = await prepareImageForUpload(stagedImage.file);
     const fd = new FormData();
     fd.append('conversationId', activeConvId);
     if (caption) fd.append('caption', caption);
-    fd.append('file', compressed, stagedImage.file.name.replace(/\.[^.]+$/, '.jpg'));
+    fd.append('file', uploadFile, uploadFile.name);
 
     const msg = await apiUpload<ChatMessage>(
       `/agents/${activeAgentId}/chat/upload`,
@@ -1427,16 +1482,10 @@ export function AgentsPage() {
   }
 
   function handlePaste(e: ReactClipboardEvent<HTMLTextAreaElement>) {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (file) stageImage(file);
-        return;
-      }
-    }
+    const file = getFirstImageFromClipboardData(e.clipboardData);
+    if (!file) return;
+    e.preventDefault();
+    stageImage(file);
   }
 
   function handleDragOver(e: ReactDragEvent) {
@@ -1457,14 +1506,12 @@ export function AgentsPage() {
     e.preventDefault();
     e.stopPropagation();
     setDraggingOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('image/')) {
-      stageImage(file);
-    }
+    const file = getFirstImageFromFileList(e.dataTransfer.files);
+    if (file) stageImage(file);
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const file = getFirstImageFromFileList(e.target.files);
     if (file) stageImage(file);
     // Reset so the same file can be selected again
     e.target.value = '';
@@ -1902,6 +1949,11 @@ export function AgentsPage() {
           <div className={styles.sidebarHeader}>
             <span className={styles.sidebarTitle}>Agents</span>
             <div style={{ display: 'flex', gap: 4 }}>
+              <Tooltip label="Page settings">
+                <button className={styles.addAgentBtn} onClick={() => setPageSettingsOpen(!pageSettingsOpen)} aria-label="Page settings">
+                  <SlidersHorizontal size={16} />
+                </button>
+              </Tooltip>
               <Tooltip label="Manage groups">
                 <button className={styles.addAgentBtn} onClick={() => setManageGroupsOpen(!manageGroupsOpen)} aria-label="Manage groups">
                   <Layers size={16} />
@@ -1914,6 +1966,31 @@ export function AgentsPage() {
               </Tooltip>
             </div>
           </div>
+
+          {/* Page settings panel */}
+          {pageSettingsOpen && (
+            <div className={styles.manageGroupsPanel}>
+              <div className={styles.manageGroupsHeader}>
+                <span className={styles.manageGroupsTitle}>Settings</span>
+                <button className={styles.modalCloseBtn} onClick={() => setPageSettingsOpen(false)} style={{ width: 24, height: 24 }}>
+                  <X size={14} />
+                </button>
+              </div>
+              <div className={styles.manageGroupsList}>
+                <div className={styles.manageGroupItem}>
+                  <span style={{ flex: 1, fontSize: 13, color: 'var(--color-text)' }}>Auto-collapse chats on open</span>
+                  <button
+                    className={styles.agentGroupIconBtn}
+                    onClick={toggleAutoCollapse}
+                    aria-label="Toggle auto-collapse"
+                    style={{ color: autoCollapse ? 'var(--color-primary)' : undefined }}
+                  >
+                    {autoCollapse ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Manage groups popover */}
           {manageGroupsOpen && (

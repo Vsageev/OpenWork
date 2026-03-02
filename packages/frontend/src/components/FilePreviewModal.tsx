@@ -5,6 +5,7 @@ import { getFileExt, isImagePreviewable } from '../lib/file-utils';
 import styles from './FilePreviewModal.module.css';
 
 const MD_EXTS = new Set(['.md', '.markdown']);
+const HTML_EXTS = new Set(['.html', '.htm']);
 
 interface FilePreviewModalProps {
   fileName: string;
@@ -19,6 +20,7 @@ export function FilePreviewModal({ fileName, downloadUrl, onClose, onDownload }:
   const [loading, setLoading] = useState(true);
 
   const isMarkdown = MD_EXTS.has(getFileExt(fileName));
+  const isHtml = HTML_EXTS.has(getFileExt(fileName));
 
   useEffect(() => {
     let cancelled = false;
@@ -35,6 +37,9 @@ export function FilePreviewModal({ fileName, downloadUrl, onClose, onDownload }:
         if (isImagePreviewable(fileName)) {
           const blob = await res.blob();
           if (!cancelled) setBlobUrl(URL.createObjectURL(blob));
+        } else if (isHtml) {
+          const text = await res.text();
+          if (!cancelled) setBlobUrl(URL.createObjectURL(new Blob([text], { type: 'text/html' })));
         } else {
           const text = await res.text();
           if (!cancelled) setTextContent(text);
@@ -94,6 +99,13 @@ export function FilePreviewModal({ fileName, downloadUrl, onClose, onDownload }:
         <div className={styles.previewBody}>
           {loading ? (
             <div className={styles.previewLoading}>Loading preview...</div>
+          ) : blobUrl && isHtml ? (
+            <iframe
+              src={blobUrl}
+              title={fileName}
+              className={styles.previewIframe}
+              sandbox="allow-scripts allow-forms"
+            />
           ) : blobUrl ? (
             <img
               src={blobUrl}

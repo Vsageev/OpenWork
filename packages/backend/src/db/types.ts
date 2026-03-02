@@ -264,6 +264,17 @@ export interface BoardCronTemplate {
   updatedAt: string;
 }
 
+export interface Workspace {
+  id: string;
+  name: string;
+  userId: string;
+  boardIds: string[];
+  collectionIds: string[];
+  agentGroupIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;

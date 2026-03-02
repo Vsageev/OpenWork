@@ -116,3 +116,11 @@
 .previewMarkdown {
   padding: var(--space-5) var(--space-6);
 }
+
+.previewIframe {
+  display: block;
+  width: 100%;
+  height: 65vh;
+  border: none;
+  background: #fff;
+}

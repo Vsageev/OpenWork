@@ -18,6 +18,7 @@ export const RUNS_DIR = path.resolve(env.DATA_DIR, 'agent-runs');
 interface CliCommand {
   bin: string;
   args: string[];
+  stdinData?: string;
 }
 
 const CHAT_MODE_SYSTEM_PROMPT =
@@ -39,31 +40,64 @@ interface BuildCliOptions {
   imagePaths?: string[];
 }
 
+/**
+ * Extract readable text from Claude CLI's stream-json output format.
+ * Falls back to raw stdout if no structured events are found.
+ */
+function extractStreamJsonText(stdout: string): string {
+  const lines = stdout.trim().split('\n');
+  // Prefer the final 'result' event which has the full consolidated text
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event.type === 'result' && typeof event.result === 'string') {
+        return event.result;
+      }
+    } catch {
+      // not JSON
+    }
+  }
+  // Fallback: extract text from the last assistant message block
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+        const textBlock = (event.message.content as Array<{ type: string; text?: string }>)
+          .find((b) => b.type === 'text');
+        if (textBlock?.text) return textBlock.text;
+      }
+    } catch {
+      // not JSON
+    }
+  }
+  return stdout.trim();
+}
+
 function buildCliCommand(options: BuildCliOptions): CliCommand {
   const { model, modelId, thinkingLevel, prompt, imagePaths } = options;
   const modelLower = model.trim().toLowerCase();
   const sysPrompt = options.systemPrompt ?? CHAT_MODE_SYSTEM_PROMPT;
 
   if (modelLower.includes('claude')) {
-    const args = [
-      '-p',
-      prompt,
-      '--output-format',
-      'text',
-      '--append-system-prompt',
-      sysPrompt,
-    ];
+    const args: string[] = [];
+
+    let fullPrompt = prompt;
+    if (imagePaths && imagePaths.length > 0) {
+      const pathList = imagePaths.map((p) => `- ${p}`).join('\n');
+      fullPrompt = `${prompt ? prompt + '\n\n' : ''}Image files:\n${pathList}`;
+    }
+
+    args.push('-p', fullPrompt, '--output-format', 'text', '--append-system-prompt', sysPrompt);
+
     if (modelId) {
       args.push('--model', modelId);
     }
     if (thinkingLevel) {
       args.push('--effort', thinkingLevel);
-    }
-    // Pass image files for multimodal input.
-    if (imagePaths && imagePaths.length > 0) {
-      for (const imgPath of imagePaths) {
-        args.push('--image', imgPath);
-      }
     }
     // Always run without interactive permission prompts.
     args.push('--dangerously-skip-permissions');
@@ -674,7 +708,7 @@ function attachToProcess(options: AttachOptions): RunHandle {
 
 function runAgentProcess(options: AgentProcessOptions) {
   const workDir = path.join(AGENTS_DIR, options.agentId);
-  const { bin, args } = buildCliCommand({
+  const { bin, args, stdinData } = buildCliCommand({
     model: options.agent.model,
     modelId: options.agent.modelId,
     thinkingLevel: options.agent.thinkingLevel,
@@ -712,7 +746,7 @@ function runAgentProcess(options: AgentProcessOptions) {
       cwd: workDir,
       env: childEnv,
       detached: true,
-      stdio: ['ignore', stdoutFd, stderrFd],
+      stdio: [stdinData ? 'pipe' : 'ignore', stdoutFd, stderrFd],
     });
   } catch (err) {
     fs.closeSync(stdoutFd);
@@ -720,6 +754,24 @@ function runAgentProcess(options: AgentProcessOptions) {
     completeAgentRun(runId, (err as Error).message);
     options.onSpawnError(err as Error);
     return;
+  }
+
+  // Write stdin data (e.g. stream-json for image messages) before unreffing.
+  if (stdinData && child.stdin) {
+    child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+      // Child may exit before consuming stdin (e.g. invalid CLI args for image mode).
+      if (err.code !== 'EPIPE' && err.code !== 'ERR_STREAM_DESTROYED') {
+        console.error(`[agent-chat] Failed writing stdin for run ${runId}:`, err.message);
+      }
+    });
+    try {
+      child.stdin.end(stdinData);
+    } catch (err) {
+      const stdinErr = err as NodeJS.ErrnoException;
+      if (stdinErr.code !== 'EPIPE' && stdinErr.code !== 'ERR_STREAM_DESTROYED') {
+        console.error(`[agent-chat] Failed writing stdin for run ${runId}:`, stdinErr.message);
+      }
+    }
   }
 
   // Unref so server can exit without killing the child
@@ -805,7 +857,8 @@ export function reattachRunningProcess(run: Record<string, unknown>) {
     if (triggerType === 'chat' && conversationId) {
       const updatesFromApi = listAgentApiUpdates(conversationId, runStartedAt);
       const finalApiMessage = findFinalAgentApiMessage(updatesFromApi);
-      const stdoutText = result.stdout.trim();
+      // extractStreamJsonText handles both plain text and stream-json output gracefully.
+      const stdoutText = extractStreamJsonText(result.stdout);
 
       if (!finalApiMessage && stdoutText) {
         saveMessage(conversationId, 'inbound', stdoutText);
@@ -929,6 +982,7 @@ function spawnChatProcess(
   }
 
   const key = processKey(agentId, conversationId);
+  const hasImages = imagePaths.length > 0;
 
   runAgentProcess({
     agentId,
@@ -936,10 +990,11 @@ function spawnChatProcess(
     runKey: key,
     prompt: fullPrompt,
     systemPrompt: CHAT_MODE_SYSTEM_PROMPT,
-    imagePaths: imagePaths.length > 0 ? imagePaths : undefined,
+    imagePaths: hasImages ? imagePaths : undefined,
     triggerType: 'chat',
     triggerRef: { conversationId },
-    onStdoutChunk: (text) => {
+    // When using stream-json output (image mode), raw chunks are JSON events — skip forwarding them.
+    onStdoutChunk: hasImages ? undefined : (text) => {
       callbacks.onChunk(text);
     },
     onExit: ({ code, stdout, stderr, runStartedAt }) => {
@@ -951,7 +1006,8 @@ function spawnChatProcess(
 
       const updatesFromApi = listAgentApiUpdates(conversationId, runStartedAt);
       const finalApiMessage = findFinalAgentApiMessage(updatesFromApi);
-      const stdoutText = stdout.trim();
+      // For image mode (stream-json output), extract the text from the JSON events.
+      const stdoutText = hasImages ? extractStreamJsonText(stdout) : stdout.trim();
 
       let msg: Record<string, unknown>;
       if (finalApiMessage) {

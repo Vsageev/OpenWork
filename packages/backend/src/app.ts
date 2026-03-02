@@ -36,6 +36,7 @@ import { cardRoutes } from './routes/cards.js';
 import { boardRoutes } from './routes/boards.js';
 import { storageRoutes } from './routes/storage.js';
 import { userRoutes } from './routes/users.js';
+import { workspaceRoutes } from './routes/workspaces.js';
 import { agentRoutes } from './routes/agents.js';
 import { agentChatRoutes } from './routes/agent-chat.js';
 import { agentRunRoutes } from './routes/agent-runs.js';
@@ -44,6 +45,7 @@ import { initAllBoardCronJobs } from './services/board-cron.js';
 import { reconcileRunsOnStartup, cleanupOldRunLogs } from './services/agent-runs.js';
 import { reattachRunningProcess, RUNS_DIR } from './services/agent-chat.js';
 import { ensureAgentServiceAccounts } from './services/agents.js';
+import { consolidateGeneralCollections } from './services/collections.js';
 
 function buildHttpsOptions(): SecureContextOptions | undefined {
   if (!env.TLS_CERT_PATH || !env.TLS_KEY_PATH) return undefined;
@@ -66,6 +68,7 @@ export async function buildApp() {
 
   // Initialize JSON store before anything else
   await store.init();
+  await consolidateGeneralCollections();
   await ensureAgentServiceAccounts();
 
   await app.register(sensible);
@@ -105,6 +108,7 @@ export async function buildApp() {
   await app.register(boardRoutes);
   await app.register(storageRoutes);
   await app.register(userRoutes);
+  await app.register(workspaceRoutes);
   await app.register(agentRoutes);
   await app.register(agentChatRoutes);
   await app.register(agentRunRoutes);

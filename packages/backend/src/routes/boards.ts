@@ -7,6 +7,7 @@ import {
   listBoards,
   getBoardById,
   isGeneralBoard,
+  countGeneralBoards,
   getBoardWithCards,
   createBoard,
   updateBoard,
@@ -18,6 +19,7 @@ import {
   moveCardOnBoard,
   removeCardFromBoard,
 } from '../services/boards.js';
+import { getWorkspaceById } from '../services/workspaces.js';
 import {
   listBoardCronTemplates,
   createBoardCronTemplate,
@@ -60,6 +62,7 @@ export async function boardRoutes(app: FastifyInstance) {
         summary: 'List boards',
         querystring: z.object({
           collectionId: z.uuid().optional(),
+          workspaceId: z.uuid().optional(),
           search: z.string().optional(),
           limit: z.coerce.number().optional(),
           offset: z.coerce.number().optional(),
@@ -67,7 +70,16 @@ export async function boardRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      let ids: string[] | undefined;
+      if (request.query.workspaceId) {
+        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        if (workspace) {
+          ids = workspace.boardIds;
+        }
+      }
+
       const { entries, total } = await listBoards({
+        ids,
         collectionId: request.query.collectionId,
         search: request.query.search,
         limit: request.query.limit,
@@ -170,11 +182,14 @@ export async function boardRoutes(app: FastifyInstance) {
       }
 
       if (isGeneralBoard(board)) {
-        throw ApiError.conflict(
-          'general_board_protected',
-          'General boards cannot be deleted',
-          'Create and use another board if you need to remove this one',
-        );
+        const generalCount = await countGeneralBoards();
+        if (generalCount <= 1) {
+          throw ApiError.conflict(
+            'general_board_protected',
+            'The last remaining general board cannot be deleted',
+            'Create and use another board if you need to remove this one',
+          );
+        }
       }
 
       const deleted = await deleteBoard(request.params.id, {

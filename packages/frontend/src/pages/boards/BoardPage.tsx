@@ -7,6 +7,7 @@ import { api, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { useConfirm } from '../../hooks/useConfirm';
 import { clearPreferredBoardId, setPreferredBoardId } from '../../lib/navigation-preferences';
+import { useWorkspace } from '../../stores/WorkspaceContext';
 import { BoardCronTemplatesPanel } from './BoardCronTemplatesPanel';
 import styles from './BoardPage.module.css';
 
@@ -84,6 +85,7 @@ export function BoardPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const { activeWorkspace } = useWorkspace();
   const [searchParams, setSearchParams] = useSearchParams();
   const [board, setBoard] = useState<BoardWithCards | null>(null);
   const [loading, setLoading] = useState(true);
@@ -97,24 +99,57 @@ export function BoardPage() {
   const collectionPickerRef = useRef<HTMLDivElement>(null);
   const dragCardRef = useRef<BoardCardEntry | null>(null);
 
+  const recoverFromMissingBoard = useCallback(async () => {
+    try {
+      const res = await api<{ entries: { id: string }[] }>('/boards?limit=100');
+      const fallbackBoardId = res.entries[0]?.id;
+      if (!fallbackBoardId || fallbackBoardId === id) {
+        clearPreferredBoardId();
+        navigate('/boards?list=1', { replace: true });
+        return;
+      }
+      setPreferredBoardId(fallbackBoardId);
+      navigate(`/boards/${fallbackBoardId}`, { replace: true });
+    } catch {
+      clearPreferredBoardId();
+      navigate('/boards?list=1', { replace: true });
+    }
+  }, [id, navigate]);
+
   const fetchBoard = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError('');
+    setBoard(null);
     try {
       const data = await api<BoardWithCards>(`/boards/${id}`);
       setBoard(data);
     } catch (err) {
-      if (err instanceof ApiError) setError(err.message);
-      else setError('Failed to load board');
+      if (err instanceof ApiError) {
+        if (err.status === 404) {
+          setError('Board not found');
+          void recoverFromMissingBoard();
+          return;
+        }
+        setError(err.message);
+      } else {
+        setError('Failed to load board');
+      }
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, recoverFromMissingBoard]);
 
   useEffect(() => {
     fetchBoard();
   }, [fetchBoard]);
+
+  useEffect(() => {
+    if (!board || !activeWorkspace) return;
+    if (!activeWorkspace.boardIds.includes(board.id)) {
+      void recoverFromMissingBoard();
+    }
+  }, [board, activeWorkspace, recoverFromMissingBoard]);
 
   useEffect(() => {
     api<{ entries: AgentEntry[] }>('/agents?limit=100')
@@ -126,9 +161,9 @@ export function BoardPage() {
   }, []);
 
   useEffect(() => {
-    if (!id) return;
-    setPreferredBoardId(id);
-  }, [id]);
+    if (!board?.id) return;
+    setPreferredBoardId(board.id);
+  }, [board?.id]);
 
   const sortedColumns = useMemo(
     () => (board ? [...board.columns].sort((a, b) => a.position - b.position) : []),

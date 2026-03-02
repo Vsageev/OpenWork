@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frame Studio</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=Instrument+Serif:ital@0;1&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-deep: #0a0a0b;
+    --bg-surface: #141416;
+    --bg-raised: #1c1c20;
+    --bg-hover: #26262b;
+    --border: #2a2a30;
+    --border-subtle: #1f1f24;
+    --text-primary: #e8e6e3;
+    --text-secondary: #8a8889;
+    --text-tertiary: #5a5859;
+    --accent: #e8734a;
+    --accent-soft: rgba(232, 115, 74, 0.12);
+    --accent-hover: #f0845e;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 16px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    grid-template-rows: 56px 1fr;
+    height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+  }
+
+  .logo {
+    font-family: 'Instrument Serif', serif;
+    font-size: 20px;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .logo-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* ── Canvas Area ── */
+  .canvas-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(232,115,74,0.03) 0%, transparent 70%),
+      var(--bg-deep);
+  }
+
+  .canvas-inner {
+    position: relative;
+  }
+
+  /* Checkerboard for transparency */
+  .canvas-inner::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background-image:
+      linear-gradient(45deg, #1a1a1e 25%, transparent 25%),
+      linear-gradient(-45deg, #1a1a1e 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1a1a1e 75%),
+      linear-gradient(-45deg, transparent 75%, #1a1a1e 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    z-index: 0;
+    opacity: 0.5;
+  }
+
+  .drop-zone {
+    width: 480px;
+    height: 340px;
+    border: 2px dashed var(--border);
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+    position: relative;
+  }
+
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .drop-zone svg {
+    opacity: 0.3;
+    transition: opacity 0.2s;
+  }
+
+  .drop-zone:hover svg { opacity: 0.5; }
+
+  .drop-label {
+    color: var(--text-secondary);
+    font-size: 14px;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .drop-label strong {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .drop-label kbd {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .preview-container {
+    display: none;
+    position: relative;
+    max-width: 80%;
+    max-height: 80%;
+  }
+
+  .preview-container.active {
+    display: block;
+    animation: fadeScale 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @keyframes fadeScale {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  .preview-frame {
+    position: relative;
+    display: inline-block;
+    padding: var(--frame-padding, 32px);
+    border-radius: var(--frame-radius, 16px);
+    background: var(--frame-bg, linear-gradient(135deg, #667eea, #764ba2));
+    box-shadow:
+      0 4px 24px rgba(0,0,0,0.3),
+      0 1px 2px rgba(0,0,0,0.2);
+    transition: padding 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+                border-radius 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+                background 0.3s ease;
+  }
+
+  .preview-frame img {
+    display: block;
+    max-width: 600px;
+    max-height: 500px;
+    width: auto;
+    height: auto;
+    border-radius: var(--img-radius, 12px);
+    transition: border-radius 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    background: var(--bg-surface);
+    border-left: 1px solid var(--border-subtle);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar-section {
+    padding: 20px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .sidebar-section:last-child { border-bottom: none; }
+
+  .section-label {
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-tertiary);
+    margin-bottom: 14px;
+  }
+
+  /* Slider */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .slider-row input[type="range"] {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--bg-hover);
+    outline: none;
+  }
+
+  .slider-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    transition: transform 0.15s;
+  }
+
+  .slider-row input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  .slider-value {
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 32px;
+    text-align: right;
+  }
+
+  /* Color presets */
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .preset-swatch {
+    aspect-ratio: 1;
+    border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .preset-swatch:hover { transform: scale(1.08); }
+  .preset-swatch.active { border-color: var(--text-primary); }
+
+  .custom-color-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .color-input-wrap {
+    position: relative;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .color-input-wrap input[type="color"] {
+    position: absolute;
+    inset: -4px;
+    width: calc(100% + 8px);
+    height: calc(100% + 8px);
+    border: none;
+    cursor: pointer;
+    background: none;
+  }
+
+  .color-input-wrap input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .color-input-wrap input[type="color"]::-webkit-color-swatch { border: none; }
+
+  .text-input {
+    flex: 1;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    color: var(--text-primary);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .text-input:focus { border-color: var(--accent); }
+
+  /* Gradient toggle */
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+
+  .toggle-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .toggle {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.2s;
+  }
+
+  .toggle.active {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .toggle::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: white;
+    transition: transform 0.2s;
+  }
+
+  .toggle.active::after { transform: translateX(16px); }
+
+  .gradient-second {
+    display: none;
+    margin-top: 10px;
+  }
+
+  .gradient-second.visible { display: flex; }
+
+  .gradient-angle {
+    display: none;
+    margin-top: 10px;
+  }
+
+  .gradient-angle.visible { display: flex; }
+
+  /* Padding slider */
+  .control-group {
+    margin-bottom: 16px;
+  }
+
+  .control-group:last-child { margin-bottom: 0; }
+
+  .control-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+    width: 100%;
+    padding: 10px 16px;
+  }
+
+  .btn-primary:hover { background: var(--accent-hover); }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+  }
+
+  .btn-ghost:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .btn-icon {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+
+  .btn-icon:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 20px;
+  }
+
+  /* Hidden */
+  .hidden { display: none !important; }
+
+  /* Export canvas (offscreen) */
+  #export-canvas { display: none; }
+
+  /* Subtle noise overlay */
+  .app::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.015;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-size: 256px 256px;
+    z-index: 9999;
+  }
+
+  /* Scrollbar */
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: transparent; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Size label */
+  .size-badge {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .size-badge.visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <div class="logo">
+      <span class="logo-dot"></span>
+      Frame Studio
+    </div>
+    <div class="header-actions">
+      <button class="btn-icon" id="btn-reset" title="Clear image">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Canvas -->
+  <div class="canvas-wrap" id="canvas-wrap">
+    <div class="drop-zone" id="drop-zone">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+      </svg>
+      <div class="drop-label">
+        <strong>Paste or drop an image</strong><br>
+        <kbd>⌘V</kbd> &nbsp;or drag &amp; drop
+      </div>
+      <input type="file" id="file-input" accept="image/*" style="display:none">
+    </div>
+
+    <div class="preview-container" id="preview-container">
+      <div class="preview-frame" id="preview-frame">
+        <img id="preview-img" src="" alt="Preview">
+      </div>
+    </div>
+
+    <div class="size-badge" id="size-badge"></div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <div class="section-label">Background</div>
+
+      <div class="preset-grid" id="preset-grid">
+        <!-- Filled by JS -->
+      </div>
+
+      <div class="toggle-row">
+        <span class="toggle-label">Gradient</span>
+        <div class="toggle" id="gradient-toggle"></div>
+      </div>
+
+      <div class="custom-color-row">
+        <div class="color-input-wrap">
+          <input type="color" id="color1" value="#667eea">
+        </div>
+        <input type="text" class="text-input" id="color1-text" value="#667eea" spellcheck="false">
+      </div>
+
+      <div class="gradient-second custom-color-row" id="gradient-second">
+        <div class="color-input-wrap">
+          <input type="color" id="color2" value="#764ba2">
+        </div>
+        <input type="text" class="text-input" id="color2-text" value="#764ba2" spellcheck="false">
+      </div>
+
+      <div class="gradient-angle" id="gradient-angle">
+        <div style="width:100%">
+          <label class="control-label">Angle</label>
+          <div class="slider-row">
+            <input type="range" id="angle-slider" min="0" max="360" value="135">
+            <span class="slider-value" id="angle-value">135°</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-label">Frame</div>
+
+      <div class="control-group">
+        <label class="control-label">Padding</label>
+        <div class="slider-row">
+          <input type="range" id="padding-slider" min="0" max="120" value="32">
+          <span class="slider-value" id="padding-value">32</span>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Frame Radius</label>
+        <div class="slider-row">
+          <input type="range" id="frame-radius-slider" min="0" max="48" value="16">
+          <span class="slider-value" id="frame-radius-value">16</span>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Image Radius</label>
+        <div class="slider-row">
+          <input type="range" id="img-radius-slider" min="0" max="48" value="12">
+          <span class="slider-value" id="img-radius-value">12</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-label">Shadow</div>
+      <div class="control-group">
+        <label class="control-label">Intensity</label>
+        <div class="slider-row">
+          <input type="range" id="shadow-slider" min="0" max="100" value="30">
+          <span class="slider-value" id="shadow-value">30</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="btn btn-primary" id="btn-export">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export PNG
+      </button>
+    </div>
+  </div>
+</div>
+
+<canvas id="export-canvas"></canvas>
+
+<script>
+(() => {
+  // ── State ──
+  const state = {
+    image: null,
+    color1: '#667eea',
+    color2: '#764ba2',
+    gradient: true,
+    angle: 135,
+    padding: 32,
+    frameRadius: 16,
+    imgRadius: 12,
+    shadow: 30,
+  };
+
+  // ── Elements ──
+  const $ = id => document.getElementById(id);
+  const dropZone = $('drop-zone');
+  const fileInput = $('file-input');
+  const canvasWrap = $('canvas-wrap');
+  const previewContainer = $('preview-container');
+  const previewFrame = $('preview-frame');
+  const previewImg = $('preview-img');
+  const sizeBadge = $('size-badge');
+  const presetGrid = $('preset-grid');
+  const gradientToggle = $('gradient-toggle');
+  const gradientSecond = $('gradient-second');
+  const gradientAngle = $('gradient-angle');
+  const color1 = $('color1');
+  const color1Text = $('color1-text');
+  const color2 = $('color2');
+  const color2Text = $('color2-text');
+  const angleSlider = $('angle-slider');
+  const angleValue = $('angle-value');
+  const paddingSlider = $('padding-slider');
+  const paddingValue = $('padding-value');
+  const frameRadiusSlider = $('frame-radius-slider');
+  const frameRadiusValue = $('frame-radius-value');
+  const imgRadiusSlider = $('img-radius-slider');
+  const imgRadiusValue = $('img-radius-value');
+  const shadowSlider = $('shadow-slider');
+  const shadowValue = $('shadow-value');
+  const btnExport = $('btn-export');
+  const btnReset = $('btn-reset');
+  const exportCanvas = $('export-canvas');
+
+  // ── Presets ──
+  const presets = [
+    { c1: '#667eea', c2: '#764ba2' },
+    { c1: '#f093fb', c2: '#f5576c' },
+    { c1: '#4facfe', c2: '#00f2fe' },
+    { c1: '#43e97b', c2: '#38f9d7' },
+    { c1: '#fa709a', c2: '#fee140' },
+    { c1: '#a18cd1', c2: '#fbc2eb' },
+    { c1: '#fccb90', c2: '#d57eeb' },
+    { c1: '#0c0c0c', c2: '#1a1a2e' },
+    { c1: '#ffffff', c2: '#e2e2e2' },
+    { c1: '#ff6b6b', c2: '#ee5a24' },
+  ];
+
+  presets.forEach((p, i) => {
+    const swatch = document.createElement('div');
+    swatch.className = 'preset-swatch' + (i === 0 ? ' active' : '');
+    swatch.style.background = `linear-gradient(135deg, ${p.c1}, ${p.c2})`;
+    swatch.addEventListener('click', () => {
+      state.color1 = p.c1;
+      state.color2 = p.c2;
+      color1.value = p.c1;
+      color1Text.value = p.c1;
+      color2.value = p.c2;
+      color2Text.value = p.c2;
+      document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+      swatch.classList.add('active');
+      updatePreview();
+    });
+    presetGrid.appendChild(swatch);
+  });
+
+  // ── Gradient toggle ──
+  gradientToggle.classList.add('active');
+  gradientToggle.addEventListener('click', () => {
+    state.gradient = !state.gradient;
+    gradientToggle.classList.toggle('active', state.gradient);
+    gradientSecond.classList.toggle('visible', state.gradient);
+    gradientAngle.classList.toggle('visible', state.gradient);
+    updatePreview();
+  });
+  gradientSecond.classList.add('visible');
+  gradientAngle.classList.add('visible');
+
+  // ── Color inputs ──
+  const syncColor = (picker, textInput, key) => {
+    picker.addEventListener('input', () => {
+      state[key] = picker.value;
+      textInput.value = picker.value;
+      clearActivePreset();
+      updatePreview();
+    });
+    textInput.addEventListener('input', () => {
+      const v = textInput.value;
+      if (/^#[0-9a-f]{6}$/i.test(v)) {
+        state[key] = v;
+        picker.value = v;
+        clearActivePreset();
+        updatePreview();
+      }
+    });
+  };
+
+  syncColor(color1, color1Text, 'color1');
+  syncColor(color2, color2Text, 'color2');
+
+  function clearActivePreset() {
+    document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+  }
+
+  // ── Sliders ──
+  const bindSlider = (slider, display, key, suffix = '') => {
+    slider.addEventListener('input', () => {
+      state[key] = parseInt(slider.value);
+      display.textContent = slider.value + suffix;
+      updatePreview();
+    });
+  };
+
+  bindSlider(angleSlider, angleValue, 'angle', '°');
+  bindSlider(paddingSlider, paddingValue, 'padding');
+  bindSlider(frameRadiusSlider, frameRadiusValue, 'frameRadius');
+  bindSlider(imgRadiusSlider, imgRadiusValue, 'imgRadius');
+  bindSlider(shadowSlider, shadowValue, 'shadow');
+
+  // ── Image loading ──
+  function loadImage(src) {
+    const img = new Image();
+    img.onload = () => {
+      state.image = img;
+      previewImg.src = src;
+      dropZone.classList.add('hidden');
+      previewContainer.classList.add('active');
+      updatePreview();
+      showSize();
+    };
+    img.src = src;
+  }
+
+  function handleFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = e => loadImage(e.target.result);
+    reader.readAsDataURL(file);
+  }
+
+  // Paste
+  document.addEventListener('paste', e => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        handleFile(item.getAsFile());
+        return;
+      }
+    }
+  });
+
+  // Drop
+  canvasWrap.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  canvasWrap.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  canvasWrap.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer?.files[0];
+    if (file) handleFile(file);
+  });
+
+  // Click to upload
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  // ── Update preview ──
+  function updatePreview() {
+    if (!state.image) return;
+
+    const bg = state.gradient
+      ? `linear-gradient(${state.angle}deg, ${state.color1}, ${state.color2})`
+      : state.color1;
+
+    previewFrame.style.setProperty('--frame-bg', bg);
+    previewFrame.style.background = bg;
+    previewFrame.style.setProperty('--frame-padding', state.padding + 'px');
+    previewFrame.style.padding = state.padding + 'px';
+    previewFrame.style.setProperty('--frame-radius', state.frameRadius + 'px');
+    previewFrame.style.borderRadius = state.frameRadius + 'px';
+    previewFrame.style.setProperty('--img-radius', state.imgRadius + 'px');
+    previewImg.style.borderRadius = state.imgRadius + 'px';
+
+    const s = state.shadow / 100;
+    previewFrame.style.boxShadow = `
+      0 ${4 + s * 20}px ${24 + s * 40}px rgba(0,0,0,${0.1 + s * 0.4}),
+      0 ${1 + s * 2}px ${2 + s * 4}px rgba(0,0,0,${0.1 + s * 0.2})
+    `;
+
+    showSize();
+  }
+
+  function showSize() {
+    if (!state.image) return;
+    const w = state.image.naturalWidth + state.padding * 2;
+    const h = state.image.naturalHeight + state.padding * 2;
+    sizeBadge.textContent = `${w} × ${h}`;
+    sizeBadge.classList.add('visible');
+  }
+
+  // ── Reset ──
+  btnReset.addEventListener('click', () => {
+    state.image = null;
+    previewImg.src = '';
+    previewContainer.classList.remove('active');
+    dropZone.classList.remove('hidden');
+    sizeBadge.classList.remove('visible');
+  });
+
+  // ── Export ──
+  btnExport.addEventListener('click', () => {
+    if (!state.image) return;
+
+    const img = state.image;
+    const pad = state.padding;
+    const w = img.naturalWidth + pad * 2;
+    const h = img.naturalHeight + pad * 2;
+
+    exportCanvas.width = w;
+    exportCanvas.height = h;
+    const ctx = exportCanvas.getContext('2d');
+
+    // Draw rounded rect background
+    const fr = state.frameRadius;
+    ctx.beginPath();
+    ctx.moveTo(fr, 0);
+    ctx.lineTo(w - fr, 0);
+    ctx.quadraticCurveTo(w, 0, w, fr);
+    ctx.lineTo(w, h - fr);
+    ctx.quadraticCurveTo(w, h, w - fr, h);
+    ctx.lineTo(fr, h);
+    ctx.quadraticCurveTo(0, h, 0, h - fr);
+    ctx.lineTo(0, fr);
+    ctx.quadraticCurveTo(0, 0, fr, 0);
+    ctx.closePath();
+    ctx.clip();
+
+    // Fill background
+    if (state.gradient) {
+      const rad = state.angle * Math.PI / 180;
+      const cx = w / 2, cy = h / 2;
+      const len = Math.max(w, h);
+      const x1 = cx - Math.cos(rad) * len / 2;
+      const y1 = cy - Math.sin(rad) * len / 2;
+      const x2 = cx + Math.cos(rad) * len / 2;
+      const y2 = cy + Math.sin(rad) * len / 2;
+      const grad = ctx.createLinearGradient(x1, y1, x2, y2);
+      grad.addColorStop(0, state.color1);
+      grad.addColorStop(1, state.color2);
+      ctx.fillStyle = grad;
+    } else {
+      ctx.fillStyle = state.color1;
+    }
+    ctx.fillRect(0, 0, w, h);
+
+    // Draw image with rounded corners
+    const ir = state.imgRadius;
+    const ix = pad, iy = pad;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(ix + ir, iy);
+    ctx.lineTo(ix + iw - ir, iy);
+    ctx.quadraticCurveTo(ix + iw, iy, ix + iw, iy + ir);
+    ctx.lineTo(ix + iw, iy + ih - ir);
+    ctx.quadraticCurveTo(ix + iw, iy + ih, ix + iw - ir, iy + ih);
+    ctx.lineTo(ix + ir, iy + ih);
+    ctx.quadraticCurveTo(ix, iy + ih, ix, iy + ih - ir);
+    ctx.lineTo(ix, iy + ir);
+    ctx.quadraticCurveTo(ix, iy, ix + ir, iy);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(img, ix, iy, iw, ih);
+    ctx.restore();
+
+    // Download
+    const link = document.createElement('a');
+    link.download = 'frame-studio-export.png';
+    link.href = exportCanvas.toDataURL('image/png');
+    link.click();
+  });
+
+})();
+</script>
+</body>
+</html>

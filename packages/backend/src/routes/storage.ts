@@ -205,6 +205,11 @@ export async function storageRoutes(app: FastifyInstance) {
         };
         const contentType = mimeMap[ext] || 'application/octet-stream';
 
+        // Ignore EPIPE — client disconnected before the stream finished
+        reply.raw.socket?.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'EPIPE') request.log.error(err);
+        });
+
         return reply
           .header('Content-Type', contentType)
           .header('Content-Disposition', `attachment; filename="${fileName}"`)

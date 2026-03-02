@@ -7,10 +7,12 @@ import {
   listCollections,
   getCollectionById,
   isGeneralCollection,
+  countGeneralCollections,
   createCollection,
   updateCollection,
   deleteCollection,
 } from '../services/collections.js';
+import { getWorkspaceById } from '../services/workspaces.js';
 import { listCards } from '../services/cards.js';
 
 const createCollectionBody = z.object({
@@ -36,13 +38,23 @@ export async function collectionRoutes(app: FastifyInstance) {
         summary: 'List collections',
         querystring: z.object({
           search: z.string().optional(),
+          workspaceId: z.uuid().optional(),
           limit: z.coerce.number().optional(),
           offset: z.coerce.number().optional(),
         }),
       },
     },
     async (request, reply) => {
+      let ids: string[] | undefined;
+      if (request.query.workspaceId) {
+        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        if (workspace) {
+          ids = workspace.collectionIds;
+        }
+      }
+
       const { entries, total } = await listCollections({
+        ids,
         search: request.query.search,
         limit: request.query.limit,
         offset: request.query.offset,
@@ -182,11 +194,14 @@ export async function collectionRoutes(app: FastifyInstance) {
       }
 
       if (isGeneralCollection(collection)) {
-        throw ApiError.conflict(
-          'general_collection_protected',
-          'General collections cannot be deleted',
-          'Create and use another collection if you need to remove this one',
-        );
+        const generalCount = await countGeneralCollections();
+        if (generalCount <= 1) {
+          throw ApiError.conflict(
+            'general_collection_protected',
+            'The last remaining general collection cannot be deleted',
+            'Create and use another collection if you need to remove this one',
+          );
+        }
       }
 
       const deleted = await deleteCollection(request.params.id, {

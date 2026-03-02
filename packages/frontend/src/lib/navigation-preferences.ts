@@ -50,3 +50,17 @@ export function setPreferredBoardId(boardId: string): void {
 export function clearPreferredBoardId(): void {
   clearStoredId(PREFERRED_BOARD_ID_KEY);
 }
+
+const ACTIVE_WORKSPACE_ID_KEY = 'ws_active_workspace_id';
+
+export function getActiveWorkspaceId(): string | null {
+  return getStoredId(ACTIVE_WORKSPACE_ID_KEY);
+}
+
+export function setActiveWorkspaceId(workspaceId: string): void {
+  setStoredId(ACTIVE_WORKSPACE_ID_KEY, workspaceId);
+}
+
+export function clearActiveWorkspaceId(): void {
+  clearStoredId(ACTIVE_WORKSPACE_ID_KEY);
+}

@@ -110,10 +110,14 @@ function TriggerLink({ run, navigate }: { run: AgentRun; navigate: ReturnType<ty
     );
   }
   if (run.conversationId) {
+    const targetParams = new URLSearchParams({
+      agentId: run.agentId,
+      conversationId: run.conversationId,
+    });
     return (
       <button
         className={styles.triggerLink}
-        onClick={(e) => { e.stopPropagation(); navigate(`/agents`); }}
+        onClick={(e) => { e.stopPropagation(); navigate(`/agents?${targetParams.toString()}`); }}
         title="Open conversation"
       >
         <ExternalLink size={12} />

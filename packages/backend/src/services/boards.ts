@@ -10,6 +10,93 @@ function normalizeName(name: unknown): string {
   return typeof name === 'string' ? name.trim().toLowerCase() : '';
 }
 
+function parseCreatedAt(value: unknown): number {
+  if (typeof value !== 'string') return Number.POSITIVE_INFINITY;
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY;
+}
+
+let generalBoardLock: Promise<void> = Promise.resolve();
+
+async function runWithGeneralBoardLock<T>(fn: () => Promise<T> | T): Promise<T> {
+  const previous = generalBoardLock;
+  let release: (() => void) | undefined;
+  generalBoardLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release?.();
+  }
+}
+
+function findCanonicalGeneralBoard(excludeId?: string): any | null {
+  const generals = (store.getAll('boards') as any[])
+    .filter((board) => (excludeId ? board.id !== excludeId : true))
+    .filter((board) => isGeneralBoard(board));
+  if (generals.length === 0) return null;
+
+  generals.sort((a, b) => {
+    const createdDiff = parseCreatedAt(a.createdAt) - parseCreatedAt(b.createdAt);
+    if (createdDiff !== 0) return createdDiff;
+
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  const canonical = generals[0];
+  if (canonical?.id && canonical.isGeneral !== true) {
+    store.update('boards', canonical.id, { isGeneral: true });
+  }
+
+  return canonical;
+}
+
+async function insertBoard(
+  boardData: Omit<CreateBoardData, 'columns'>,
+  columns: CreateBoardData['columns'],
+  defaultCollectionId: string | null,
+  isGeneral: boolean,
+  audit?: { userId: string; ipAddress?: string; userAgent?: string },
+) {
+  const board = store.insert('boards', {
+    name: boardData.name,
+    description: boardData.description ?? null,
+    collectionId: boardData.collectionId ?? null,
+    defaultCollectionId,
+    isGeneral,
+    createdById: audit?.userId,
+  }) as any;
+
+  if (columns && columns.length > 0) {
+    for (const col of columns) {
+      store.insert('boardColumns', {
+        boardId: board.id,
+        name: col.name,
+        color: col.color ?? '#6B7280',
+        position: col.position,
+        assignAgentId: col.assignAgentId ?? null,
+      });
+    }
+  }
+
+  if (audit) {
+    await createAuditLog({
+      userId: audit.userId,
+      action: 'create',
+      entityType: 'board',
+      entityId: board.id,
+      changes: { ...boardData, columns } as unknown as Record<string, unknown>,
+      ipAddress: audit.ipAddress,
+      userAgent: audit.userAgent,
+    });
+  }
+
+  return getBoardById(board.id);
+}
+
 export function isGeneralBoard(board: unknown): boolean {
   if (!board || typeof board !== 'object') return false;
 
@@ -19,7 +106,13 @@ export function isGeneralBoard(board: unknown): boolean {
   return GENERAL_BOARD_NAMES.has(normalizeName(candidate.name));
 }
 
+export async function countGeneralBoards(): Promise<number> {
+  const all = store.getAll('boards') as any[];
+  return all.filter((board) => isGeneralBoard(board)).length;
+}
+
 export interface BoardListQuery {
+  ids?: string[];
   collectionId?: string;
   search?: string;
   limit?: number;
@@ -60,6 +153,11 @@ export async function listBoards(query: BoardListQuery) {
   const offset = query.offset ?? 0;
 
   let all = store.getAll('boards') as any[];
+
+  if (query.ids) {
+    const idSet = new Set(query.ids);
+    all = all.filter((b: any) => idSet.has(b.id));
+  }
 
   if (query.collectionId) {
     all = all.filter((b: any) => b.collectionId === query.collectionId);
@@ -161,41 +259,19 @@ export async function createBoard(
     defaultCollectionId = generalFolder.id;
   }
 
-  const board = store.insert('boards', {
-    name: boardData.name,
-    description: boardData.description ?? null,
-    collectionId: boardData.collectionId ?? null,
-    defaultCollectionId,
-    isGeneral,
-    createdById: audit?.userId,
-  }) as any;
+  if (!isGeneral) {
+    return insertBoard(boardData, columns, defaultCollectionId, false, audit);
+  }
 
-  // Create initial columns
-  if (columns && columns.length > 0) {
-    for (const col of columns) {
-      store.insert('boardColumns', {
-        boardId: board.id,
-        name: col.name,
-        color: col.color ?? '#6B7280',
-        position: col.position,
-        assignAgentId: col.assignAgentId ?? null,
-      });
+  return runWithGeneralBoardLock(async () => {
+    // Serialize "General Board" creation/check to avoid duplicates under concurrent requests.
+    const existingGeneral = findCanonicalGeneralBoard();
+    if (existingGeneral) {
+      return getBoardById(existingGeneral.id);
     }
-  }
 
-  if (audit) {
-    await createAuditLog({
-      userId: audit.userId,
-      action: 'create',
-      entityType: 'board',
-      entityId: board.id,
-      changes: data as unknown as Record<string, unknown>,
-      ipAddress: audit.ipAddress,
-      userAgent: audit.userAgent,
-    });
-  }
-
-  return getBoardById(board.id);
+    return insertBoard(boardData, columns, defaultCollectionId, true, audit);
+  });
 }
 
 export async function updateBoard(
@@ -203,13 +279,69 @@ export async function updateBoard(
   data: UpdateBoardData,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
+  const existing = store.getById('boards', id) as any;
+  if (!existing) return null;
+
+  const currentIsGeneral = isGeneralBoard(existing);
+  const nextIsGeneral =
+    data.name === undefined
+      ? currentIsGeneral
+      : GENERAL_BOARD_NAMES.has(normalizeName(data.name));
+
   const setData: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (value !== undefined) {
       setData[key] = value;
     }
   }
+  setData.isGeneral = nextIsGeneral;
   setData.updatedAt = new Date().toISOString();
+
+  if (nextIsGeneral && !currentIsGeneral) {
+    return runWithGeneralBoardLock(async () => {
+      const refreshed = store.getById('boards', id) as any;
+      if (!refreshed) return null;
+
+      const refreshedIsGeneral = isGeneralBoard(refreshed);
+      const refreshedNextIsGeneral =
+        data.name === undefined
+          ? refreshedIsGeneral
+          : GENERAL_BOARD_NAMES.has(normalizeName(data.name));
+
+      if (refreshedNextIsGeneral && !refreshedIsGeneral) {
+        const canonicalGeneral = findCanonicalGeneralBoard(id);
+        if (canonicalGeneral) {
+          return getBoardById(canonicalGeneral.id);
+        }
+      }
+
+      const refreshedSetData: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(data)) {
+        if (value !== undefined) {
+          refreshedSetData[key] = value;
+        }
+      }
+      refreshedSetData.isGeneral = refreshedNextIsGeneral;
+      refreshedSetData.updatedAt = new Date().toISOString();
+
+      const updated = store.update('boards', id, refreshedSetData);
+      if (!updated) return null;
+
+      if (audit) {
+        await createAuditLog({
+          userId: audit.userId,
+          action: 'update',
+          entityType: 'board',
+          entityId: id,
+          changes: data as unknown as Record<string, unknown>,
+          ipAddress: audit.ipAddress,
+          userAgent: audit.userAgent,
+        });
+      }
+
+      return getBoardById(id);
+    });
+  }
 
   const updated = store.update('boards', id, setData);
   if (!updated) return null;

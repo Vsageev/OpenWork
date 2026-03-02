@@ -8,6 +8,7 @@ import { api, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { useConfirm } from '../../hooks/useConfirm';
 import { clearPreferredCollectionId, setPreferredCollectionId } from '../../lib/navigation-preferences';
+import { useWorkspace } from '../../stores/WorkspaceContext';
 import styles from './CollectionDetailPage.module.css';
 
 interface CardTag {
@@ -65,17 +66,39 @@ export function CollectionDetailPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const { activeWorkspace } = useWorkspace();
   const [searchParams, setSearchParams] = useSearchParams();
   const [collection, setCollection] = useState<Collection | null>(null);
   const [cards, setCards] = useState<Card[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [deletingCollection, setDeletingCollection] = useState(false);
 
+  const recoverFromMissingCollection = useCallback(async () => {
+    try {
+      const res = await api<{ entries: { id: string }[] }>('/collections?limit=100');
+      const fallbackCollectionId = res.entries[0]?.id;
+      if (!fallbackCollectionId || fallbackCollectionId === id) {
+        clearPreferredCollectionId();
+        navigate('/collections?list=1', { replace: true });
+        return;
+      }
+      setPreferredCollectionId(fallbackCollectionId);
+      navigate(`/collections/${fallbackCollectionId}`, { replace: true });
+    } catch {
+      clearPreferredCollectionId();
+      navigate('/collections?list=1', { replace: true });
+    }
+  }, [id, navigate]);
+
   const fetchData = useCallback(async () => {
     if (!id) return;
     setLoading(true);
+    setError('');
+    setCollection(null);
+    setCards([]);
     try {
       const [collectionData, cardsData] = await Promise.all([
         api<Collection>(`/collections/${id}`),
@@ -85,21 +108,37 @@ export function CollectionDetailPage() {
       ]);
       setCollection(collectionData);
       setCards(cardsData.entries);
-    } catch {
-      // best-effort
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 404) {
+          setError('Collection not found');
+          void recoverFromMissingCollection();
+          return;
+        }
+        setError(err.message);
+      } else {
+        setError('Failed to load collection');
+      }
     } finally {
       setLoading(false);
     }
-  }, [id, search]);
+  }, [id, search, recoverFromMissingCollection]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
   useEffect(() => {
-    if (!id) return;
-    setPreferredCollectionId(id);
-  }, [id]);
+    if (!collection || !activeWorkspace) return;
+    if (!activeWorkspace.collectionIds.includes(collection.id)) {
+      void recoverFromMissingCollection();
+    }
+  }, [collection, activeWorkspace, recoverFromMissingCollection]);
+
+  useEffect(() => {
+    if (!collection?.id) return;
+    setPreferredCollectionId(collection.id);
+  }, [collection?.id]);
 
   const shouldOpenCreateCard = searchParams.get('newCard') === '1';
 
@@ -169,7 +208,7 @@ export function CollectionDetailPage() {
   }
 
   if (!collection) {
-    return <div className={styles.emptyState}>Collection not found</div>;
+    return <div className={styles.emptyState}>{error || 'Collection not found'}</div>;
   }
 
   return (

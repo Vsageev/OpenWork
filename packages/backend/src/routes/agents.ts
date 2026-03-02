@@ -27,6 +27,7 @@ import {
   deleteAgentGroup,
   reorderAgentGroups,
 } from '../services/agents.js';
+import { getWorkspaceById } from '../services/workspaces.js';
 import { syncAgentCronJobs } from '../services/agent-cron.js';
 
 export async function agentRoutes(app: FastifyInstance) {
@@ -71,13 +72,23 @@ export async function agentRoutes(app: FastifyInstance) {
         tags: ['Agents'],
         summary: 'List agents',
         querystring: z.object({
+          workspaceId: z.uuid().optional(),
           limit: z.coerce.number().int().min(1).max(100).default(50),
           offset: z.coerce.number().int().min(0).default(0),
         }),
       },
     },
     async (request, reply) => {
-      const all = listAgents();
+      let all = listAgents();
+
+      if (request.query.workspaceId) {
+        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        if (workspace && Array.isArray(workspace.agentGroupIds)) {
+          const idSet = new Set(workspace.agentGroupIds);
+          all = all.filter((a: any) => a.groupId && idSet.has(a.groupId));
+        }
+      }
+
       const { limit, offset } = request.query;
       const entries = all.slice(offset, offset + limit);
       return reply.send({ total: all.length, limit, offset, entries });
@@ -251,10 +262,23 @@ export async function agentRoutes(app: FastifyInstance) {
       schema: {
         tags: ['Agent Groups'],
         summary: 'List all agent groups',
+        querystring: z.object({
+          workspaceId: z.uuid().optional(),
+        }),
       },
     },
-    async (_request, reply) => {
-      return reply.send({ entries: listAgentGroups() });
+    async (request, reply) => {
+      let groups = listAgentGroups();
+
+      if (request.query.workspaceId) {
+        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        if (workspace && Array.isArray(workspace.agentGroupIds)) {
+          const idSet = new Set(workspace.agentGroupIds);
+          groups = groups.filter((g: any) => idSet.has(g.id));
+        }
+      }
+
+      return reply.send({ entries: groups });
     },
   );
 
