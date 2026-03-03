@@ -40,6 +40,12 @@ interface BuildCliOptions {
   imagePaths?: string[];
 }
 
+function appendImagePathsToPrompt(prompt: string, imagePaths?: string[]): string {
+  if (!imagePaths || imagePaths.length === 0) return prompt;
+  const pathList = imagePaths.map((p) => `- ${p}`).join('\n');
+  return `${prompt ? prompt + '\n\n' : ''}Image files:\n${pathList}`;
+}
+
 /**
  * Extract readable text from Claude CLI's stream-json output format.
  * Falls back to raw stdout if no structured events are found.
@@ -84,12 +90,7 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
 
   if (modelLower.includes('claude')) {
     const args: string[] = [];
-
-    let fullPrompt = prompt;
-    if (imagePaths && imagePaths.length > 0) {
-      const pathList = imagePaths.map((p) => `- ${p}`).join('\n');
-      fullPrompt = `${prompt ? prompt + '\n\n' : ''}Image files:\n${pathList}`;
-    }
+    const fullPrompt = appendImagePathsToPrompt(prompt, imagePaths);
 
     args.push('-p', fullPrompt, '--output-format', 'text', '--append-system-prompt', sysPrompt);
 
@@ -106,13 +107,16 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
   if (modelLower.includes('codex')) {
     // Run codex in regular exec mode for conversational responses.
     const args = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
+    if (imagePaths && imagePaths.length > 0) {
+      args.push('--image', ...imagePaths);
+    }
     if (modelId) {
       args.push('--model', modelId);
     }
     if (thinkingLevel) {
       args.push('-c', `model_reasoning_effort="${thinkingLevel}"`);
     }
-    args.push('--', prompt);
+    args.push('--', appendImagePathsToPrompt(prompt, imagePaths));
     return { bin: 'codex', args };
   }
   if (modelLower.includes('qwen')) {
@@ -124,12 +128,12 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
     }
     // Use explicit prompt flag for compatibility with CLI variants that don't
     // accept positional prompt input in non-interactive mode.
-    args.push('--prompt', prompt);
+    args.push('--prompt', appendImagePathsToPrompt(prompt, imagePaths));
     return { bin: 'qwen', args };
   }
 
   // Fallback: treat model name as CLI binary with claude-like flags
-  const args = ['-p', prompt, '--output-format', 'text'];
+  const args = ['-p', appendImagePathsToPrompt(prompt, imagePaths), '--output-format', 'text'];
   if (modelId) {
     args.push('--model', modelId);
   }
@@ -269,7 +273,7 @@ export function validateConversationOwnership(
  */
 export function deleteAgentConversation(conversationId: string) {
   store.deleteWhere('messages', (r: Record<string, unknown>) => r.conversationId === conversationId);
-  store.deleteWhere('message_drafts', (r: Record<string, unknown>) => r.conversationId === conversationId);
+  store.deleteWhere('messageDrafts', (r: Record<string, unknown>) => r.conversationId === conversationId);
   return store.delete('conversations', conversationId);
 }
 
@@ -502,6 +506,11 @@ function buildTriggerContext(
 
 function buildChildEnv(agent: { apiKeyId: string; workspaceApiKey: string | null }): Record<string, string | undefined> {
   const childEnv: Record<string, string | undefined> = { ...process.env };
+
+  // Prevent "nested session" errors when the backend itself runs inside Claude Code
+  delete childEnv.CLAUDECODE;
+  delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+  delete childEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
 
   if (agent.apiKeyId) {
     const apiKey = store.getById('apiKeys', agent.apiKeyId);
@@ -1150,6 +1159,7 @@ export function executeCardTask(
   agentId: string,
   card: { id: string; name: string; description: string | null; collectionId: string },
   callbacks: { onDone: () => void; onError: (err: string) => void },
+  customPrompt?: string,
 ) {
   const agent = getAgent(agentId);
   if (!agent) {
@@ -1172,13 +1182,19 @@ export function executeCardTask(
     ? `**Description:** ${card.description}`
     : '**Description:** (none)';
 
-  const prompt =
-    `${triggerContext}` +
-    `You have been assigned the following card. See CHANNELS.MD for how to respond.\n` +
-    `This is a task assignment run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
-    `**Card:** ${card.name}\n` +
-    `${descriptionLine}\n\n` +
-    `Complete this task.`;
+  const prompt = customPrompt
+    ? `${triggerContext}` +
+      `You are running a batch task on a card. See CHANNELS.MD for how to respond.\n` +
+      `This is a task assignment run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
+      `**Card:** ${card.name}\n` +
+      `${descriptionLine}\n\n` +
+      `**Task:**\n${customPrompt}`
+    : `${triggerContext}` +
+      `You have been assigned the following card. See CHANNELS.MD for how to respond.\n` +
+      `This is a task assignment run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
+      `**Card:** ${card.name}\n` +
+      `${descriptionLine}\n\n` +
+      `Complete this task.`;
 
   runAgentProcess({
     agentId,

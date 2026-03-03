@@ -211,6 +211,7 @@ export interface CollectionListQuery {
   search?: string;
   limit?: number;
   offset?: number;
+  withCardCounts?: boolean;
 }
 
 export interface CreateCollectionData {
@@ -218,9 +219,25 @@ export interface CreateCollectionData {
   description?: string | null;
 }
 
+export interface AgentBatchCardFilters {
+  search?: string;
+  assigneeId?: string;
+  completed?: boolean;
+  priority?: 'high' | 'medium' | 'low';
+  tagId?: string;
+}
+
+export interface AgentBatchConfig {
+  agentId?: string | null;
+  prompt?: string | null;
+  maxParallel?: number;
+  cardFilters?: AgentBatchCardFilters;
+}
+
 export interface UpdateCollectionData {
   name?: string;
   description?: string | null;
+  agentBatchConfig?: AgentBatchConfig | null;
 }
 
 export async function listCollections(query: CollectionListQuery) {
@@ -252,6 +269,37 @@ export async function listCollections(query: CollectionListQuery) {
 
   const total = all.length;
   const entries = all.slice(offset, offset + limit);
+
+  if (query.withCardCounts) {
+    const allCards = store.getAll('cards') as any[];
+    const countByCollection = new Map<string, number>();
+    const completedByCollection = new Map<string, number>();
+    const overdueByCollection = new Map<string, number>();
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    for (const card of allCards) {
+      if (typeof card.collectionId === 'string') {
+        countByCollection.set(card.collectionId, (countByCollection.get(card.collectionId) ?? 0) + 1);
+        if (card.customFields?.completed === true) {
+          completedByCollection.set(card.collectionId, (completedByCollection.get(card.collectionId) ?? 0) + 1);
+        }
+        const dueDate = card.customFields?.dueDate as string | undefined;
+        if (dueDate && card.customFields?.completed !== true) {
+          const due = new Date(dueDate);
+          if (due < now) {
+            overdueByCollection.set(card.collectionId, (overdueByCollection.get(card.collectionId) ?? 0) + 1);
+          }
+        }
+      }
+    }
+    const entriesWithCounts = entries.map((c: any) => ({
+      ...c,
+      cardCount: countByCollection.get(c.id) ?? 0,
+      completedCardCount: completedByCollection.get(c.id) ?? 0,
+      overdueCardCount: overdueByCollection.get(c.id) ?? 0,
+    }));
+    return { entries: entriesWithCounts, total };
+  }
 
   return { entries, total };
 }

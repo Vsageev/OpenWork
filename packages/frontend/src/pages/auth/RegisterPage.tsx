@@ -4,8 +4,10 @@ import { Button, Input, Card } from '../../ui';
 import { useAuth } from '../../stores/useAuth';
 import { getErrorMessage } from '../../lib/error-messages';
 import styles from './AuthPage.module.css';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 
 export function RegisterPage() {
+  useDocumentTitle('Register');
   const { register } = useAuth();
   const navigate = useNavigate();
 

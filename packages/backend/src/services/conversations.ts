@@ -7,6 +7,7 @@ export interface ConversationListQuery {
   assigneeId?: string;
   channelType?: string;
   status?: string;
+  isUnread?: boolean;
   search?: string;
   limit?: number;
   offset?: number;
@@ -40,15 +41,31 @@ export async function listConversations(query: ConversationListQuery) {
     if (query.assigneeId && r.assigneeId !== query.assigneeId) return false;
     if (query.channelType && r.channelType !== query.channelType) return false;
     if (query.status && r.status !== query.status) return false;
+    if (query.isUnread !== undefined && r.isUnread !== query.isUnread) return false;
     if (query.search) {
+      const needle = query.search.toLowerCase();
       const subject = r.subject as string | undefined;
-      if (!subject?.toLowerCase().includes(query.search.toLowerCase())) return false;
+      const subjectMatch = subject?.toLowerCase().includes(needle);
+      // Also search by contact name
+      let contactMatch = false;
+      if (r.contactId) {
+        const contact = store.getById('contacts', r.contactId as string);
+        if (contact) {
+          const fullName = [contact.firstName, contact.lastName].filter(Boolean).join(' ').toLowerCase();
+          contactMatch = fullName.includes(needle);
+        }
+      }
+      if (!subjectMatch && !contactMatch) return false;
     }
     return true;
   };
 
   const allMatching = store.find('conversations', predicate);
   const total = allMatching.length;
+
+  if (limit === 0) {
+    return { entries: [], total };
+  }
 
   const sorted = allMatching.sort((a, b) => {
     const aLast = new Date(a.lastMessageAt as string).getTime() || 0;
@@ -65,8 +82,41 @@ export async function listConversations(query: ConversationListQuery) {
       ? store.getById('users', conversation.assigneeId as string)
       : null;
 
+    // Find last non-system message for preview
+    const convMessages = store.find('messages', (r: Record<string, unknown>) =>
+      r.conversationId === conversation.id && r.type !== 'system'
+    );
+    const lastMsg = convMessages.sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
+      new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime()
+    )[0] as Record<string, unknown> | undefined;
+
+    let lastMessagePreview: string | null = null;
+    if (lastMsg) {
+      const type = lastMsg.type as string;
+      const content = lastMsg.content as string | undefined;
+      if (type === 'text' && content) {
+        // Strip HTML tags and truncate
+        const text = content.replace(/<[^>]+>/g, '').trim();
+        lastMessagePreview = text.length > 120 ? text.slice(0, 120) + '…' : text || null;
+      } else if (type === 'image') {
+        lastMessagePreview = '📷 Photo';
+      } else if (type === 'video') {
+        lastMessagePreview = '🎥 Video';
+      } else if (type === 'document') {
+        lastMessagePreview = '📄 Document';
+      } else if (type === 'voice') {
+        lastMessagePreview = '🎤 Voice message';
+      } else if (type === 'sticker') {
+        lastMessagePreview = '🎭 Sticker';
+      } else if (type === 'location') {
+        lastMessagePreview = '📍 Location';
+      }
+    }
+
     return {
       ...conversation,
+      lastMessagePreview,
+      lastMessageDirection: (lastMsg?.direction as string | undefined) ?? null,
       contact: contact
         ? {
             id: contact.id,
@@ -186,6 +236,17 @@ export async function markConversationRead(id: string) {
   if (!existing || isAgentConversationRecord(existing)) return null;
   const updated = store.update('conversations', id, { isUnread: false });
   return updated ?? null;
+}
+
+export function markAllConversationsRead(): number {
+  const unread = store.find(
+    'conversations',
+    (r: Record<string, unknown>) => r.isUnread === true && !isAgentConversationRecord(r),
+  );
+  for (const conv of unread) {
+    store.update('conversations', conv.id as string, { isUnread: false });
+  }
+  return unread.length;
 }
 
 export async function deleteConversation(

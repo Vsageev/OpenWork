@@ -14,6 +14,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "pnpm -r run typecheck",
+    "check": "pnpm lint && pnpm typecheck && pnpm format:check",
     "clean": "pnpm -r run clean",
     "prepare": "husky",
     "certs:generate": "bash scripts/generate-certs.sh",

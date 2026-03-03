@@ -39,6 +39,219 @@
   color: var(--color-text);
 }
 
+.markAllReadBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+
+.markAllReadBtn:hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+
+.markAllReadBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Bulk action bar ── */
+.bulkBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.bulkSelectToggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-link);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background var(--transition-fast);
+}
+
+.bulkSelectToggle:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.bulkCount {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.bulkActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.bulkBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  padding: 0;
+}
+
+.bulkBtn:hover:not(:disabled) {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
+.bulkBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bulkBtnDanger:hover:not(:disabled) {
+  color: var(--color-error);
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.bulkDismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: all var(--transition-fast);
+}
+
+.bulkDismiss:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-hover);
+}
+
+/* ── Conversation checkbox ── */
+.convCheckbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-border);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+  margin-top: 8px;
+}
+
+.conversationItem:hover .convCheckbox,
+.convCheckbox:focus-visible,
+.conversationItemChecked .convCheckbox,
+.convCheckboxVisible {
+  opacity: 1;
+}
+
+.convCheckboxChecked {
+  opacity: 1;
+  color: var(--color-link);
+}
+
+.conversationItemChecked {
+  background: rgba(59, 130, 246, 0.04);
+}
+
+.conversationItemChecked:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+/* ── Status tabs ── */
+.statusTabs {
+  display: flex;
+  gap: 0;
+  padding: 4px var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+}
+
+.statusTab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.statusTab:hover {
+  color: var(--color-text-secondary);
+}
+
+.statusTabActive {
+  color: var(--color-text);
+  border-bottom-color: var(--color-link);
+}
+
+.statusTabCount {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 5px;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
+}
+
+.statusTabActive .statusTabCount {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--color-link);
+}
+
 .filterRow {
   display: flex;
   align-items: center;
@@ -63,7 +276,7 @@
 
 .searchInput {
   width: 100%;
-  padding: 6px 10px 6px 30px;
+  padding: 6px 28px 6px 30px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -82,7 +295,30 @@
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
 }
 
-.statusFilter {
+.searchClear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+}
+
+.searchClear:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-hover);
+}
+
+.channelFilterSelect {
   padding: 6px 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -91,6 +327,32 @@
   background: var(--color-surface);
   outline: none;
   cursor: pointer;
+  flex-shrink: 0;
+}
+
+.unreadFilterBtn {
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.unreadFilterBtn:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+
+.unreadFilterBtnActive {
+  color: var(--color-primary);
+  background: var(--color-primary-subtle, color-mix(in srgb, var(--color-primary) 12%, transparent));
+  border-color: var(--color-primary);
 }
 
 .conversationList {
@@ -125,6 +387,13 @@
 
 .conversationItemActive:hover {
   background: rgba(59, 130, 246, 0.08);
+}
+
+.conversationItemFocused {
+  background: var(--color-surface);
+  outline: 2px solid rgba(59, 130, 246, 0.35);
+  outline-offset: -2px;
+  border-radius: 2px;
 }
 
 .conversationItemUnread .convName,
@@ -227,6 +496,134 @@
   flex-shrink: 0;
 }
 
+/* ── Pinned conversations ── */
+.conversationItemPinned {
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.conversationItemPinned:hover {
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.pinnedIcon {
+  flex-shrink: 0;
+  color: #d97706;
+  margin-right: 4px;
+  transform: rotate(-45deg);
+}
+
+.pinnedSeparator {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+}
+
+.pinnedSeparatorLine {
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.convPinBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  opacity: 0;
+  margin-top: 6px;
+  transition: opacity var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.conversationItem:hover .convPinBtn,
+.convPinBtn:focus-visible,
+.convPinBtnActive {
+  opacity: 1;
+}
+
+.convPinBtn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+}
+
+.convPinBtnActive {
+  color: #d97706;
+}
+
+.convPinBtnActive:hover {
+  color: var(--color-text-secondary);
+}
+
+.iconBtnActive {
+  color: #d97706;
+  border-color: rgba(217, 119, 6, 0.3);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.iconBtnActive:hover {
+  color: var(--color-text);
+}
+
+.convAssigneeBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+/* ── Keyboard shortcut hints ── */
+.shortcutHints {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 6px var(--space-4);
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.shortcutHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.shortcutHint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: var(--color-card);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  line-height: 1;
+}
+
 /* ── Right panel: Thread view + Reply ── */
 .threadPanel {
   flex: 1;
@@ -272,9 +669,36 @@
   color: var(--color-text);
 }
 
+.threadContactMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
 .threadContactEmail {
   font-size: 12px;
   color: var(--color-text-secondary);
+}
+
+.threadContactPhone {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.threadAssigneeBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .threadActions {
@@ -605,6 +1029,7 @@
   justify-content: center;
   gap: var(--space-3);
   color: var(--color-text-tertiary);
+  padding: var(--space-5);
 }
 
 .emptyIcon {
@@ -612,7 +1037,7 @@
 }
 
 .emptyTitle {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--color-text-secondary);
 }
@@ -620,6 +1045,97 @@
 .emptyText {
   font-size: 13px;
   color: var(--color-text-tertiary);
+  text-align: center;
+  max-width: 220px;
+  line-height: 1.4;
+}
+
+.activeFilters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.activeFilterChip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clearFiltersBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-link);
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+  margin-top: var(--space-1);
+}
+
+.clearFiltersBtn:hover {
+  background: var(--color-surface);
+  border-color: var(--color-link);
+}
+
+/* ── Conversation skeleton loading ── */
+.convSkeletonList {
+  display: flex;
+  flex-direction: column;
+}
+
+.convSkeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.convSkeletonAvatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  flex-shrink: 0;
+  animation: convShimmer 1.5s ease-in-out infinite;
+}
+
+.convSkeletonLines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.convSkeletonLine {
+  height: 10px;
+  border-radius: 4px;
+  background: var(--color-surface);
+  animation: convShimmer 1.5s ease-in-out infinite;
+  animation-delay: 0.1s;
+}
+
+@keyframes convShimmer {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0.25; }
 }
 
 .loadingState {
@@ -629,6 +1145,58 @@
   padding: var(--space-10);
   color: var(--color-text-secondary);
   font-size: 14px;
+}
+
+/* ── Message skeleton loading ── */
+.msgSkeletonList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  flex: 1;
+}
+
+.msgSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msgSkeletonInbound {
+  align-self: flex-start;
+}
+
+.msgSkeletonOutbound {
+  align-self: flex-end;
+}
+
+.msgSkeletonBubble {
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  animation: convShimmer 1.5s ease-in-out infinite;
+}
+
+.msgSkeletonInbound .msgSkeletonBubble {
+  border: 1px solid var(--color-border);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.msgSkeletonOutbound .msgSkeletonBubble {
+  background: color-mix(in srgb, var(--color-primary-brand) 15%, transparent);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.msgSkeletonMeta {
+  height: 8px;
+  width: 50px;
+  border-radius: 4px;
+  background: var(--color-surface);
+  animation: convShimmer 1.5s ease-in-out infinite;
+  animation-delay: 0.15s;
+}
+
+.msgSkeletonOutbound .msgSkeletonMeta {
+  align-self: flex-end;
 }
 
 .errorState {
@@ -940,6 +1508,24 @@ a.inlineKeyboardBtn:hover {
   text-decoration: none;
 }
 
+/* ── Draft saved indicator ── */
+.draftSavedIndicator {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+  animation: draftFadeInOut 2s ease-in-out forwards;
+}
+
+@keyframes draftFadeInOut {
+  0% { opacity: 0; }
+  15% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 /* ── Scrollbar styling ── */
 .conversationList::-webkit-scrollbar,
 .messagesArea::-webkit-scrollbar,
@@ -1219,6 +1805,10 @@ a.inlineKeyboardBtn:hover {
     max-height: 40vh;
     border-right: none;
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .shortcutHints {
+    display: none;
   }
 
   .threadPanel {

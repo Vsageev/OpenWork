@@ -1,0 +1,28 @@
+.bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  background: var(--color-link);
+  z-index: 99999;
+  pointer-events: none;
+  transition: width 0.3s ease, opacity 0.25s ease;
+  will-change: width, opacity;
+}
+
+.bar::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 80px;
+  height: 100%;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.4));
+  border-radius: 0 2px 2px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    transition: none;
+  }
+}

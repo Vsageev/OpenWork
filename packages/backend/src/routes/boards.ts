@@ -26,12 +26,14 @@ import {
   updateBoardCronTemplate,
   deleteBoardCronTemplate,
 } from '../services/board-cron.js';
+import { runBoardAgentBatch } from '../services/board-batch.js';
 
 const columnSchema = z.object({
   name: z.string().min(1).max(255),
   color: z.string().max(7).optional(),
   position: z.number().int().min(0),
   assignAgentId: z.uuid().nullable().optional(),
+  wipLimit: z.number().int().min(1).nullable().optional(),
 });
 
 const createBoardBody = z.object({
@@ -245,6 +247,7 @@ export async function boardRoutes(app: FastifyInstance) {
           color: z.string().max(7).optional(),
           position: z.number().int().min(0).optional(),
           assignAgentId: z.uuid().nullable().optional(),
+          wipLimit: z.number().int().min(1).nullable().optional(),
         }),
       },
     },
@@ -439,6 +442,38 @@ export async function boardRoutes(app: FastifyInstance) {
       const updated = updateBoardCronTemplate(request.params.templateId, request.body);
       if (!updated) return reply.notFound('Cron template not found');
       return reply.send(updated);
+    },
+  );
+
+  // ── Batch Run ──────────────────────────────────────────────────────
+
+  // Run an agent on all cards in a board
+  typedApp.post(
+    '/api/boards/:id/batch-run',
+    {
+      onRequest: [app.authenticate, requirePermission('boards:update')],
+      schema: {
+        tags: ['Boards'],
+        summary: 'Run an agent on all cards in a board',
+        params: z.object({ id: z.uuid() }),
+        body: z.object({
+          agentId: z.uuid(),
+          prompt: z.string().min(1).max(10000),
+          columnIds: z.array(z.uuid()).optional(),
+          maxParallel: z.number().int().min(1).max(10).optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const board = await getBoardById(request.params.id);
+      if (!board) return reply.notFound('Board not found');
+
+      const result = await runBoardAgentBatch({
+        boardId: request.params.id,
+        ...request.body,
+      });
+
+      return reply.send(result);
     },
   );
 

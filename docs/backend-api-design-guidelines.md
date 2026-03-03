@@ -270,3 +270,14 @@ CORRECTNESS
 SAFETY
   Check permissions ......... POST /api/permissions/check  { permissions: [...] }
 ```
+
+---
+
+## Security
+
+See [Security Guidelines](security-guidelines.md) for detailed patterns on:
+- API key hashing
+- Agent endpoint security
+- Transaction rollback
+- Input validation
+- Rate limiting

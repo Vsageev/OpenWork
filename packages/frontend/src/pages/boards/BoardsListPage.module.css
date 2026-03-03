@@ -10,10 +10,15 @@
   gap: var(--space-3);
 }
 
-.searchInput {
+.searchWrapper {
+  position: relative;
   flex: 1;
   max-width: 320px;
-  padding: 8px 12px;
+}
+
+.searchInput {
+  width: 100%;
+  padding: 8px 32px 8px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-card);
@@ -22,6 +27,46 @@
 }
 
 .searchInput:focus {
+  outline: none;
+  border-color: var(--color-link);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.searchClear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.searchClear:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-border-subtle);
+}
+
+.sortSelect {
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  font-size: 14px;
+  color: var(--color-text);
+  cursor: pointer;
+  min-width: 140px;
+}
+
+.sortSelect:focus {
   outline: none;
   border-color: var(--color-link);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
@@ -71,7 +116,66 @@
   white-space: nowrap;
 }
 
+/* ── Column preview bars ─────────────────────────── */
+.columnPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: var(--space-2);
+}
+
+.columnBars {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.columnBar {
+  border-radius: 3px;
+  min-width: 4px;
+  transition: flex 0.3s ease;
+}
+
+.columnLabels {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.columnLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.columnDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.columnCount {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.cardCountMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .boardMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   font-size: 12px;
   color: var(--color-text-tertiary);
   margin-top: var(--space-1);
@@ -81,7 +185,40 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: var(--space-2);
   margin-top: var(--space-2);
+}
+
+.favoriteButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  padding: 0;
+  margin-right: auto;
+}
+
+.favoriteButton:hover {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.favoriteButtonActive {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.favoriteButtonActive:hover {
+  background: rgba(245, 158, 11, 0.14);
 }
 
 .deleteButton {
@@ -163,29 +300,34 @@
 
 .loadingState {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-8);
-  color: var(--color-text-secondary);
-  font-size: 15px;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
+.skeletonGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.skeletonCard {
+  height: 130px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeletonCard:nth-child(2) { animation-delay: 0.1s; }
+.skeletonCard:nth-child(3) { animation-delay: 0.2s; }
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0.3; }
 }
 
 .modal {
-  background: var(--color-card);
-  border-radius: var(--radius-lg);
   padding: var(--space-6);
-  width: 100%;
-  max-width: 420px;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

@@ -1,43 +1,8 @@
-@keyframes overlayIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes modalIn {
-  from {
-    opacity: 0;
-    transform: scale(0.96) translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  animation: overlayIn 0.15s ease-out;
-}
-
 .modal {
-  background: var(--color-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: var(--space-6);
-  width: 100%;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  animation: modalIn 0.2s ease-out;
 }
 
 .header {
@@ -119,6 +84,64 @@
 .sectionLabel {
   font-size: 13px;
   font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+/* ── Due date ────────────────────────────────────── */
+
+.dueDateField {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast);
+}
+
+.dueDateField:focus-within {
+  border-color: var(--color-primary, #3B82F6);
+}
+
+.dueDateIcon {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.dueDateInput {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--color-text);
+  font-family: inherit;
+  min-width: 0;
+}
+
+.dueDateInput::-webkit-calendar-picker-indicator {
+  opacity: 0.5;
+  cursor: pointer;
+}
+
+.dueDateClear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.dueDateClear:hover {
+  background: var(--color-border);
   color: var(--color-text-secondary);
 }
 
@@ -362,6 +385,384 @@
 }
 
 .selectedCardRemove:hover {
+  background: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+/* ── Error banner ───────────────────────────────── */
+
+.errorBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-error, #EF4444);
+  background: color-mix(in srgb, var(--color-error, #EF4444) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-error, #EF4444) 20%, transparent);
+  border-radius: var(--radius-md);
+  animation: bannerSlideIn 0.2s ease-out;
+}
+
+.errorBannerDismiss {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-error, #EF4444);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.errorBannerDismiss:hover {
+  opacity: 1;
+}
+
+/* ── "Just created" success banner ──────────────── */
+
+.justCreatedBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-success, #10B981);
+  background: color-mix(in srgb, var(--color-success, #10B981) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-success, #10B981) 20%, transparent);
+  border-radius: var(--radius-md);
+  animation: bannerSlideIn 0.2s ease-out;
+}
+
+@keyframes bannerSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Header actions ────────────────────────────────── */
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ── Templates ─────────────────────────────────────── */
+
+.templateContainer {
+  position: relative;
+}
+
+.templateTrigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.templateTrigger:hover {
+  border-color: var(--color-text-tertiary);
+  color: var(--color-text);
+  background: var(--color-border);
+}
+
+.templateSaveIconBtn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: var(--radius-md);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.templateSaveIconBtn:hover {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+
+.templateDropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 260px;
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  z-index: 20;
+  overflow: hidden;
+  animation: templateDropdownIn 0.15s ease-out;
+}
+
+@keyframes templateDropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.templateDropdownHeader {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-tertiary);
+  padding: 8px 12px 4px;
+}
+
+.templateItem {
+  display: flex;
+  align-items: center;
+}
+
+.templateItemBtn {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 7px 12px;
+  font-size: 13px;
+  color: var(--color-text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  text-align: left;
+  min-width: 0;
+}
+
+.templateItemBtn:hover {
+  background: var(--color-surface);
+}
+
+.templateItemContent {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.templateItemName {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.templateItemHint {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.templateItemDelete {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  margin-right: 8px;
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.templateItem:hover .templateItemDelete {
+  opacity: 1;
+}
+
+.templateItemDelete:hover {
+  background: color-mix(in srgb, var(--color-error, #EF4444) 12%, transparent);
+  color: var(--color-error, #EF4444);
+}
+
+.templateDropdownDivider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 4px 0;
+}
+
+.templateAddBtn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: left;
+}
+
+.templateAddBtn:hover {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+
+.templateSaveInline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.templateSaveInput {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 4px);
+  outline: none;
+  min-width: 0;
+}
+
+.templateSaveInput:focus {
+  border-color: var(--color-primary, #3B82F6);
+}
+
+.templateSaveInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.templateSaveSubmit {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-primary, #3B82F6);
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity var(--transition-fast);
+}
+
+.templateSaveSubmit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.templateSaveSubmit:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+/* ── Save template banner (shown inline in modal) ── */
+
+.templateSaveBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--color-primary, #3B82F6) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-primary, #3B82F6) 20%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--color-primary, #3B82F6);
+  animation: bannerSlideIn 0.2s ease-out;
+}
+
+.templateSaveBannerInput {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--color-text);
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 4px);
+  outline: none;
+  min-width: 0;
+}
+
+.templateSaveBannerInput:focus {
+  border-color: var(--color-primary, #3B82F6);
+}
+
+.templateSaveBannerInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.templateSaveBannerBtn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-primary, #3B82F6);
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity var(--transition-fast);
+}
+
+.templateSaveBannerBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.templateSaveBannerBtn:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.templateSaveBannerCancel {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.templateSaveBannerCancel:hover {
   background: var(--color-border);
   color: var(--color-text-secondary);
 }

@@ -238,7 +238,7 @@ export function AgentAvatarPicker({ value, onChange }: AgentAvatarPickerProps) {
 
   const randomize = useCallback(() => {
     const [bg, logo] = randomPalette();
-    onChange({ ...value, bgColor: bg, logoColor: logo });
+    onChange({ ...value, bgColor: bg, logoColor: logo, icon: randomIcon() });
   }, [onChange, value]);
 
   const preview = useMemo(
@@ -250,8 +250,8 @@ export function AgentAvatarPicker({ value, onChange }: AgentAvatarPickerProps) {
     <div className={styles.picker}>
       <div className={styles.pickerPreview}>
         {preview}
-        <Tooltip label="Random colors">
-          <button type="button" className={styles.randomBtn} onClick={randomize} aria-label="Random colors">
+        <Tooltip label="Randomize avatar">
+          <button type="button" className={styles.randomBtn} onClick={randomize} aria-label="Randomize avatar">
             <RefreshCw size={14} />
           </button>
         </Tooltip>

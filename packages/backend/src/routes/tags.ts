@@ -41,7 +41,17 @@ export async function tagRoutes(app: FastifyInstance) {
         const bDate = b.createdAt as string || '';
         return bDate.localeCompare(aDate);
       });
-      return reply.send({ entries });
+      // Count card usages per tag
+      const cardTags = store.getAll('cardTags') as any[];
+      const countsByTagId = new Map<string, number>();
+      for (const ct of cardTags) {
+        countsByTagId.set(ct.tagId, (countsByTagId.get(ct.tagId) ?? 0) + 1);
+      }
+      const enriched = entries.map((tag: any) => ({
+        ...tag,
+        cardCount: countsByTagId.get(tag.id) ?? 0,
+      }));
+      return reply.send({ entries: enriched, total: enriched.length });
     },
   );
 
@@ -116,6 +126,9 @@ export async function tagRoutes(app: FastifyInstance) {
       if (!deleted) {
         return reply.notFound('Tag not found');
       }
+
+      // Cascade: remove all card-tag associations for the deleted tag
+      store.deleteWhere('cardTags', (r: any) => r.tagId === request.params.id);
 
       return reply.status(204).send();
     },

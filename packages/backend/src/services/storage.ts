@@ -217,6 +217,36 @@ export async function uploadFile(
   return entry;
 }
 
+export function renameItem(itemPath: string, newName: string): StorageEntry {
+  const normalized = validatePath(itemPath);
+  if (normalized === '/') throw new Error('Cannot rename root');
+
+  const safeName = newName.replace(/[/\\:*?"<>|]/g, '_').trim();
+  if (!safeName) throw new Error('Invalid name');
+
+  const diskPath = resolveDiskPath(normalized);
+  if (!fs.existsSync(diskPath)) throw new Error('Item not found');
+
+  const parentDir = path.dirname(diskPath);
+  const newDiskPath = path.join(parentDir, safeName);
+
+  // Ensure the new path is still within storage
+  const rootPrefix = STORAGE_DIR.endsWith(path.sep) ? STORAGE_DIR : STORAGE_DIR + path.sep;
+  if (newDiskPath !== STORAGE_DIR && !newDiskPath.startsWith(rootPrefix)) {
+    throw new Error('Path traversal detected');
+  }
+
+  if (fs.existsSync(newDiskPath)) {
+    throw new Error('A file or folder with this name already exists');
+  }
+
+  fs.renameSync(diskPath, newDiskPath);
+
+  const entry = buildEntryFromDisk(newDiskPath, safeName);
+  if (!entry) throw new Error('Failed to rename item');
+  return entry;
+}
+
 export function deleteItem(itemPath: string): boolean {
   const normalized = validatePath(itemPath);
   if (normalized === '/') return false;
@@ -236,6 +266,13 @@ export function getFilePath(filePath: string): string | null {
   const stats = fs.statSync(diskPath);
   if (!stats.isFile()) return null;
 
+  return diskPath;
+}
+
+export function getDiskPath(storagePath: string): string | null {
+  const normalized = validatePath(storagePath);
+  const diskPath = resolveDiskPath(normalized);
+  if (!fs.existsSync(diskPath)) return null;
   return diskPath;
 }
 

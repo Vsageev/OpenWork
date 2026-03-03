@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
 import { Button } from './Button';
+import { Modal } from './Modal';
 import styles from './ConfirmDialog.module.css';
 
 export interface ConfirmDialogProps {
@@ -21,17 +21,9 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') onCancel();
-    }
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onCancel]);
-
   return (
-    <div className={styles.overlay} onClick={onCancel}>
-      <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onCancel} size="sm" ariaLabel={title}>
+      <div className={styles.dialog}>
         <h2 className={styles.title}>{title}</h2>
         <p className={styles.message}>{message}</p>
         <div className={styles.actions}>
@@ -45,6 +37,6 @@ export function ConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

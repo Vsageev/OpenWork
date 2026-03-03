@@ -7,6 +7,11 @@ export interface CardListQuery {
   collectionId?: string;
   assigneeId?: string;
   search?: string;
+  completed?: boolean;
+  priority?: 'high' | 'medium' | 'low';
+  dueDateBefore?: string;
+  dueDateAfter?: string;
+  tagId?: string;
   limit?: number;
   offset?: number;
 }
@@ -52,9 +57,45 @@ export async function listCards(query: CardListQuery) {
     );
   }
 
-  all.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  if (query.completed !== undefined) {
+    all = all.filter((c: any) => (c.customFields?.completed === true) === query.completed);
+  }
+
+  if (query.priority) {
+    all = all.filter((c: any) => c.customFields?.priority === query.priority);
+  }
+
+  if (query.dueDateBefore) {
+    const before = new Date(query.dueDateBefore).getTime();
+    all = all.filter((c: any) => {
+      const d = c.customFields?.dueDate as string | undefined;
+      return d ? new Date(d).getTime() < before : false;
+    });
+  }
+
+  if (query.dueDateAfter) {
+    const after = new Date(query.dueDateAfter).getTime();
+    all = all.filter((c: any) => {
+      const d = c.customFields?.dueDate as string | undefined;
+      return d ? new Date(d).getTime() > after : false;
+    });
+  }
+
+  if (query.tagId) {
+    const taggedCardIds = new Set(
+      (store.find('cardTags', (r: any) => r.tagId === query.tagId) as any[]).map((ct: any) => ct.cardId),
+    );
+    all = all.filter((c: any) => taggedCardIds.has(c.id));
+  }
 
   const total = all.length;
+
+  if (limit === 0) {
+    return { entries: [], total };
+  }
+
+  all.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
   const entries = all.slice(offset, offset + limit);
 
   // Hydrate assignee and tags for list entries
@@ -390,6 +431,29 @@ export async function createCardComment(
   }
 
   return comment;
+}
+
+export async function updateCardComment(
+  commentId: string,
+  content: string,
+  audit?: { userId: string; ipAddress?: string; userAgent?: string },
+) {
+  const updated = store.update('cardComments', commentId, { content, updatedAt: new Date().toISOString() });
+  if (!updated) return null;
+
+  if (audit) {
+    await createAuditLog({
+      userId: audit.userId,
+      action: 'update',
+      entityType: 'card_comment',
+      entityId: commentId,
+      changes: { content },
+      ipAddress: audit.ipAddress,
+      userAgent: audit.userAgent,
+    });
+  }
+
+  return updated;
 }
 
 export async function deleteCardComment(

@@ -2,8 +2,8 @@ import { type ReactNode } from 'react';
 import styles from './PageHeader.module.css';
 
 interface PageHeaderProps {
-  title: string;
-  description?: string;
+  title: ReactNode;
+  description?: ReactNode;
   actions?: ReactNode;
 }
 

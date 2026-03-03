@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api, ApiError } from '../lib/api';
 import { toast } from '../stores/toast';
 import { Button } from '../ui';
+import { Modal } from './Modal';
 import type { Workspace } from '../stores/WorkspaceContext';
 import styles from './WorkspaceModal.module.css';
 
@@ -102,8 +103,8 @@ export function WorkspaceModal({ workspace, onClose, onSaved }: WorkspaceModalPr
   }
 
   return (
-    <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} size="md" ariaLabel={workspace ? 'Edit Workspace' : 'New Workspace'}>
+      <div className={styles.content}>
         <div className={styles.modalTitle}>
           {workspace ? 'Edit Workspace' : 'New Workspace'}
         </div>
@@ -191,6 +192,6 @@ export function WorkspaceModal({ workspace, onClose, onSaved }: WorkspaceModalPr
           </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

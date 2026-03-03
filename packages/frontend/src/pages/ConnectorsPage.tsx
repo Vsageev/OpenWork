@@ -1,11 +1,15 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import {
-  Cable, RefreshCw, Trash2, Bot, Plus, X, Settings, AlertCircle, CheckCircle2,
+  Cable, RefreshCw, Trash2, Bot, Plus, X, Settings,
 } from 'lucide-react';
 import { PageHeader } from '../layout';
 import { Button, Input, Badge, Card, Tooltip } from '../ui';
 import { api, ApiError } from '../lib/api';
+import { toast } from '../stores/toast';
+import { useConfirm } from '../hooks/useConfirm';
+import { TimeAgo } from '../components/TimeAgo';
 import styles from './ConnectorsPage.module.css';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 
 interface Connector {
   id: string;
@@ -44,20 +48,11 @@ const CONNECTOR_TYPES = [
 
 type ConnectorTypeId = (typeof CONNECTOR_TYPES)[number]['id'];
 
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
 export function ConnectorsPage() {
+  useDocumentTitle('Connectors');
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [loading, setLoading] = useState(true);
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Create modal
   const [createOpen, setCreateOpen] = useState(false);
@@ -72,17 +67,8 @@ export function ConnectorsPage() {
   const [editSettings, setEditSettings] = useState<Record<string, unknown>>({});
   const [savingSettings, setSavingSettings] = useState(false);
 
-  // Delete confirmation
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deleteLoading, setDeleteLoading] = useState(false);
-
   // Refresh
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
-
-  const showToast = useCallback((type: 'success' | 'error', message: string) => {
-    setToast({ type, message });
-    setTimeout(() => setToast(null), 3000);
-  }, []);
 
   const fetchConnectors = useCallback(async () => {
     setLoading(true);
@@ -90,11 +76,11 @@ export function ConnectorsPage() {
       const data = await api<{ entries: Connector[] }>('/connectors');
       setConnectors(data.entries);
     } catch (err) {
-      showToast('error', err instanceof ApiError ? err.message : 'Failed to load connectors');
+      toast.error(err instanceof ApiError ? err.message : 'Failed to load connectors');
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, []);
 
   useEffect(() => {
     fetchConnectors();
@@ -135,7 +121,7 @@ export function ConnectorsPage() {
         body: JSON.stringify({ type: selectedType, token: token.trim() }),
       });
       closeCreate();
-      showToast('success', 'Connector created successfully');
+      toast.success('Connector created successfully');
       await fetchConnectors();
     } catch (err) {
       setCreateError(err instanceof ApiError ? err.message : 'Failed to create connector');
@@ -146,17 +132,20 @@ export function ConnectorsPage() {
 
   // Delete
   async function handleDelete(id: string) {
-    setDeleteLoading(true);
+    const ok = await confirm({
+      title: 'Remove connector',
+      message: 'Are you sure you want to remove this connector? This will stop all message processing.',
+      confirmLabel: 'Remove',
+      variant: 'danger',
+    });
+    if (!ok) return;
     try {
       await api(`/connectors/${id}`, { method: 'DELETE' });
-      setDeletingId(null);
-      showToast('success', 'Connector removed');
+      toast.success('Connector removed');
       setConnectors((prev) => prev.filter((c) => c.id !== id));
       if (settingsConnector?.id === id) setSettingsConnector(null);
     } catch (err) {
-      showToast('error', err instanceof ApiError ? err.message : 'Failed to delete connector');
-    } finally {
-      setDeleteLoading(false);
+      toast.error(err instanceof ApiError ? err.message : 'Failed to delete connector');
     }
   }
 
@@ -165,10 +154,10 @@ export function ConnectorsPage() {
     setRefreshingId(id);
     try {
       await api(`/connectors/${id}/refresh`, { method: 'POST' });
-      showToast('success', 'Connector refreshed');
+      toast.success('Connector refreshed');
       await fetchConnectors();
     } catch (err) {
-      showToast('error', err instanceof ApiError ? err.message : 'Failed to refresh');
+      toast.error(err instanceof ApiError ? err.message : 'Failed to refresh');
     } finally {
       setRefreshingId(null);
     }
@@ -188,11 +177,11 @@ export function ConnectorsPage() {
         method: 'PATCH',
         body: JSON.stringify(editSettings),
       });
-      showToast('success', 'Settings saved');
+      toast.success('Settings saved');
       setSettingsConnector(null);
       await fetchConnectors();
     } catch (err) {
-      showToast('error', err instanceof ApiError ? err.message : 'Failed to save settings');
+      toast.error(err instanceof ApiError ? err.message : 'Failed to save settings');
     } finally {
       setSavingSettings(false);
     }
@@ -257,13 +246,6 @@ export function ConnectorsPage() {
         }
       />
 
-      {toast && (
-        <div className={`${styles.toast} ${styles[toast.type]}`}>
-          {toast.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-          {toast.message}
-        </div>
-      )}
-
       {loading ? (
         <div className={styles.loadingState}>Loading connectors...</div>
       ) : connectors.length === 0 ? (
@@ -307,7 +289,7 @@ export function ConnectorsPage() {
                     <div className={styles.connectorMeta}>
                       {connector.capabilities.join(', ')}
                       {' · '}
-                      Created {timeAgo(connector.createdAt)}
+                      Created <TimeAgo date={connector.createdAt} />
                       {connector.statusMessage && ` · ${connector.statusMessage}`}
                     </div>
                   </div>
@@ -334,36 +316,15 @@ export function ConnectorsPage() {
                         />
                       </button>
                     </Tooltip>
-                    {deletingId === connector.id ? (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => setDeletingId(null)}
-                          disabled={deleteLoading}
-                        >
-                          Cancel
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="danger"
-                          onClick={() => handleDelete(connector.id)}
-                          disabled={deleteLoading}
-                        >
-                          {deleteLoading ? 'Removing...' : 'Remove'}
-                        </Button>
-                      </>
-                    ) : (
-                      <Tooltip label="Remove connector">
-                        <button
-                          className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
-                          onClick={() => setDeletingId(connector.id)}
-                          aria-label="Remove connector"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </Tooltip>
-                    )}
+                    <Tooltip label="Remove connector">
+                      <button
+                        className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
+                        onClick={() => handleDelete(connector.id)}
+                        aria-label="Remove connector"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </Tooltip>
                   </div>
                 </div>
               ))}
@@ -445,6 +406,8 @@ export function ConnectorsPage() {
           </div>
         </div>
       )}
+
+      {confirmDialog}
 
       {/* Settings modal */}
       {settingsConnector && (

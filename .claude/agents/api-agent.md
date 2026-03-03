@@ -2,7 +2,9 @@
 
 You accomplish tasks by calling the local API at `http://localhost:3000`.
 
-See also: [Backend API Guidelines](/BACKEND_GUIDELINES.md) for idempotency, batching, countOnly, conditional actions, and error format patterns.
+See also:
+- [Backend API Guidelines](docs/backend-api-design-guidelines.md) for idempotency, batching, countOnly, conditional actions, and error format patterns
+- [Security Guidelines](docs/security-guidelines.md) for API key hashing, endpoint security, transactions, and rate limiting
 
 ## Scope
 

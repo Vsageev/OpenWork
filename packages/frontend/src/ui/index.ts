@@ -1,3 +1,5 @@
+export { Breadcrumb } from './Breadcrumb';
+export type { BreadcrumbItem } from './Breadcrumb';
 export { Button } from './Button';
 export { Card } from './Card';
 export { Badge } from './Badge';
@@ -13,5 +15,6 @@ export { EntitySwitcher } from './EntitySwitcher';
 export { MarkdownContent } from './MarkdownContent';
 export { CreateCardModal } from './CreateCardModal';
 export { ConfirmDialog } from './ConfirmDialog';
+export { Modal } from './Modal';
 export { ApiKeyFormFields } from './ApiKeyFormFields';
 export type { ApiKeyFormData } from './ApiKeyFormFields';

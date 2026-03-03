@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc && cp -r src/presets dist/presets",
+    "dev": "node scripts/dev-supervisor.mjs",
+    "dev:watch": "tsx watch src/index.ts",
+    "build": "tsc && rm -rf dist/presets && cp -r src/presets dist/presets",
     "start": "node dist/index.js",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",

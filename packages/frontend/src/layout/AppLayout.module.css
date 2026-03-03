@@ -10,6 +10,11 @@
   margin-left: var(--sidebar-width);
   padding: var(--space-6);
   min-height: 100vh;
+  transition: margin-left 0.2s ease;
+}
+
+.mainCollapsed {
+  margin-left: var(--sidebar-collapsed-width);
 }
 
 /* Mobile header - hidden on desktop */
@@ -39,6 +44,71 @@
   font-weight: 700;
   color: var(--color-text);
   letter-spacing: -0.01em;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.backBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+}
+
+.backBtn:hover {
+  background: var(--color-surface);
+}
+
+.mobileHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.mobileInboxBtn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+}
+
+.mobileInboxBtn:hover {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.mobileInboxBadge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--color-primary-brand);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 /* Sidebar wrapper */
@@ -73,7 +143,8 @@
     z-index: 90;
   }
 
-  .main {
+  .main,
+  .mainCollapsed {
     margin-left: 0;
     padding: var(--space-4);
     padding-top: calc(var(--mobile-header-height) + var(--space-4));

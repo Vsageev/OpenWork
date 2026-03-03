@@ -8,6 +8,7 @@ import {
   createConversation,
   updateConversation,
   markConversationRead,
+  markAllConversationsRead,
   deleteConversation,
 } from '../services/conversations.js';
 import { ApiError } from '../utils/api-errors.js';
@@ -47,7 +48,9 @@ export async function conversationRoutes(app: FastifyInstance) {
           assigneeId: z.string().optional(),
           channelType: z.string().optional(),
           status: z.string().optional(),
+          isUnread: z.coerce.boolean().optional(),
           search: z.string().optional(),
+          countOnly: z.coerce.boolean().optional(),
           limit: z.coerce.number().optional(),
           offset: z.coerce.number().optional(),
         }),
@@ -59,10 +62,15 @@ export async function conversationRoutes(app: FastifyInstance) {
         assigneeId: request.query.assigneeId,
         channelType: request.query.channelType,
         status: request.query.status,
+        isUnread: request.query.isUnread,
         search: request.query.search,
-        limit: request.query.limit,
-        offset: request.query.offset,
+        limit: request.query.countOnly ? 0 : request.query.limit,
+        offset: request.query.countOnly ? 0 : request.query.offset,
       });
+
+      if (request.query.countOnly) {
+        return reply.send({ total });
+      }
 
       return reply.send({
         total,
@@ -172,6 +180,22 @@ export async function conversationRoutes(app: FastifyInstance) {
       }
 
       return reply.status(204).send();
+    },
+  );
+
+  // Mark all conversations as read
+  typedApp.post(
+    '/api/conversations/read-all',
+    {
+      onRequest: [app.authenticate, requirePermission('messages:read')],
+      schema: {
+        tags: ['Conversations'],
+        summary: 'Mark all conversations as read',
+      },
+    },
+    async (_request, reply) => {
+      const count = markAllConversationsRead();
+      return reply.send({ count });
     },
   );
 

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useState, useEffect, useCallback } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
   FolderOpen,
@@ -10,11 +10,20 @@ import {
   Cable,
   HardDrive,
   Settings,
+  CheckSquare,
   LogOut,
   ChevronDown,
   Pencil,
   Trash2,
   Plus,
+  Search,
+  Star,
+  X,
+  PanelLeftClose,
+  PanelLeftOpen,
+  FileText,
+  Clock,
+  Bell,
 } from 'lucide-react';
 import { useAuth } from '../stores/useAuth';
 import { useWorkspace, type Workspace } from '../stores/WorkspaceContext';
@@ -22,35 +31,73 @@ import { Tooltip } from '../ui';
 import { WorkspaceModal } from '../ui/WorkspaceModal';
 import { api } from '../lib/api';
 import { toast } from '../stores/toast';
+import { useUnreadNotificationCount } from '../stores/toast';
 import { useConfirm } from '../hooks/useConfirm';
+import { useFavorites } from '../hooks/useFavorites';
+import { getRecentVisits, type RecentVisit } from '../lib/recent-visits';
+import { NotificationPanel } from '../components/NotificationPanel';
 import styles from './Sidebar.module.css';
 
 interface SidebarProps {
   onNavigate?: () => void;
+  onOpenCommandPalette?: () => void;
+  onQuickCreateCard?: () => void;
+  unreadCount?: number;
+  overdueCardsCount?: number;
+  activeRunsCount?: number;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
-export function Sidebar({ onNavigate }: SidebarProps) {
+export function Sidebar({ onNavigate, onOpenCommandPalette, onQuickCreateCard, unreadCount = 0, overdueCardsCount = 0, activeRunsCount = 0, collapsed = false, onToggleCollapse }: SidebarProps) {
   const { user, logout } = useAuth();
   const { workspaces, activeWorkspace, activeWorkspaceId, setActiveWorkspace, refetchWorkspaces } = useWorkspace();
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const { favorites, removeFavorite } = useFavorites();
+  const location = useLocation();
+
+  const [recentVisits, setRecentVisits] = useState<RecentVisit[]>([]);
+  const [recentCollapsed, setRecentCollapsed] = useState(
+    () => localStorage.getItem('sidebar-recent-collapsed') === 'true',
+  );
+
+  // Refresh recent visits on route change
+  const refreshRecents = useCallback(() => {
+    setRecentVisits(getRecentVisits().slice(0, 5));
+  }, []);
+
+  useEffect(() => {
+    refreshRecents();
+  }, [location.pathname, refreshRecents]);
+
+  const toggleRecentCollapsed = useCallback(() => {
+    setRecentCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('sidebar-recent-collapsed', String(next));
+      return next;
+    });
+  }, []);
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<Workspace | null>(null);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const notificationUnreadCount = useUnreadNotificationCount();
 
   const collectionsTo = '/collections';
   const boardsTo = '/boards';
 
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+    { to: '/my-cards', icon: CheckSquare, label: 'My Cards', badge: overdueCardsCount, badgeDanger: true },
     { to: collectionsTo, icon: FolderOpen, label: 'Collections' },
     { to: boardsTo, icon: Kanban, label: 'Boards' },
-    { to: '/inbox', icon: MessageSquare, label: 'Inbox' },
+    { to: '/inbox', icon: MessageSquare, label: 'Inbox', badge: unreadCount },
     { to: '/agents', icon: Cpu, label: 'Agents' },
-    { to: '/monitor', icon: Activity, label: 'Monitor' },
+    { to: '/monitor', icon: Activity, label: 'Monitor', badge: activeRunsCount, badgePulsing: true },
     { to: '/connectors', icon: Cable, label: 'Connectors' },
     { to: '/storage', icon: HardDrive, label: 'Storage' },
-  ] as const;
+  ];
 
   function handleSelectWorkspace(id: string | null) {
     setActiveWorkspace(id);
@@ -93,118 +140,359 @@ export function Sidebar({ onNavigate }: SidebarProps) {
   }
 
   return (
-    <aside className={styles.sidebar}>
+    <aside className={`${styles.sidebar}${collapsed ? ` ${styles.sidebarCollapsed}` : ''}`}>
       {confirmDialog}
-      <div className={styles.logo}>Cards</div>
+      {collapsed ? (
+        <Tooltip label={activeWorkspace?.name ?? 'Workplace'} position="right">
+          <div className={styles.logoCollapsed}>
+            {(activeWorkspace?.name ?? 'W')[0]}
+          </div>
+        </Tooltip>
+      ) : (
+        <div className={styles.logo}>{activeWorkspace?.name ?? 'Workplace'}</div>
+      )}
 
       {/* Workspace switcher */}
-      <div className={styles.workspaceSwitcher}>
-        <button
-          className={styles.workspaceButton}
-          onClick={() => setDropdownOpen(!dropdownOpen)}
-        >
-          <span className={styles.workspaceLabel}>
-            {activeWorkspace?.name ?? 'All'}
-          </span>
-          <ChevronDown size={14} />
-        </button>
+      {!collapsed && (
+        <div className={styles.workspaceSwitcher}>
+          <button
+            className={styles.workspaceButton}
+            onClick={() => setDropdownOpen(!dropdownOpen)}
+          >
+            <span className={styles.workspaceLabel}>
+              {activeWorkspace?.name ?? 'All'}
+            </span>
+            <ChevronDown size={14} />
+          </button>
 
-        {dropdownOpen && (
-          <>
-            <div
-              className={styles.dropdownBackdrop}
-              onClick={() => setDropdownOpen(false)}
-            />
-            <div className={styles.dropdown}>
-              <button
-                className={`${styles.dropdownItem} ${!activeWorkspaceId ? styles.dropdownItemActive : ''}`}
-                onClick={() => handleSelectWorkspace(null)}
-              >
-                All
-              </button>
-              {workspaces.map((ws) => (
+          {dropdownOpen && (
+            <>
+              <div
+                className={styles.dropdownBackdrop}
+                onClick={() => setDropdownOpen(false)}
+              />
+              <div className={styles.dropdown}>
                 <button
-                  key={ws.id}
-                  className={`${styles.dropdownItem} ${activeWorkspaceId === ws.id ? styles.dropdownItemActive : ''}`}
-                  onClick={() => handleSelectWorkspace(ws.id)}
+                  className={`${styles.dropdownItem} ${!activeWorkspaceId ? styles.dropdownItemActive : ''}`}
+                  onClick={() => handleSelectWorkspace(null)}
                 >
-                  <span className={styles.dropdownItemName}>{ws.name}</span>
-                  <span className={styles.dropdownItemActions}>
-                    <span
-                      className={styles.dropdownAction}
-                      onClick={(e) => handleEdit(ws, e)}
-                    >
-                      <Pencil size={12} />
-                    </span>
-                    <span
-                      className={styles.dropdownAction}
-                      onClick={(e) => { void handleDelete(ws, e); }}
-                    >
-                      <Trash2 size={12} />
-                    </span>
-                  </span>
+                  All
                 </button>
-              ))}
+                {workspaces.map((ws) => (
+                  <button
+                    key={ws.id}
+                    className={`${styles.dropdownItem} ${activeWorkspaceId === ws.id ? styles.dropdownItemActive : ''}`}
+                    onClick={() => handleSelectWorkspace(ws.id)}
+                  >
+                    <span className={styles.dropdownItemName}>{ws.name}</span>
+                    <span className={styles.dropdownItemActions}>
+                      <span
+                        className={styles.dropdownAction}
+                        onClick={(e) => handleEdit(ws, e)}
+                      >
+                        <Pencil size={12} />
+                      </span>
+                      <span
+                        className={styles.dropdownAction}
+                        onClick={(e) => { void handleDelete(ws, e); }}
+                      >
+                        <Trash2 size={12} />
+                      </span>
+                    </span>
+                  </button>
+                ))}
+                <button
+                  className={styles.dropdownItemCreate}
+                  onClick={handleCreate}
+                >
+                  <Plus size={14} />
+                  <span>New workspace</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {onOpenCommandPalette && (
+        collapsed ? (
+          <Tooltip label="Search" position="right">
+            <button
+              className={styles.collapsedIconBtn}
+              onClick={onOpenCommandPalette}
+            >
+              <Search size={18} />
+            </button>
+          </Tooltip>
+        ) : (
+          <button
+            className={styles.searchButton}
+            onClick={onOpenCommandPalette}
+          >
+            <Search size={14} />
+            <span>Search...</span>
+            <kbd className={styles.searchKbd}>{navigator.platform?.includes('Mac') ? '\u2318' : 'Ctrl'}K</kbd>
+          </button>
+        )
+      )}
+
+      {onQuickCreateCard && (
+        collapsed ? (
+          <Tooltip label="New Card" position="right">
+            <button
+              className={styles.collapsedCreateBtn}
+              onClick={onQuickCreateCard}
+            >
+              <Plus size={18} />
+            </button>
+          </Tooltip>
+        ) : (
+          <button
+            className={styles.quickCreateButton}
+            onClick={onQuickCreateCard}
+          >
+            <Plus size={14} />
+            <span>New Card</span>
+            <kbd className={styles.searchKbd}>C</kbd>
+          </button>
+        )
+      )}
+
+      <div className={styles.scrollArea}>
+      {favorites.length > 0 && !collapsed && (
+        <div className={styles.favoritesSection}>
+          <div className={styles.favoritesHeader}>
+            <Star size={12} />
+            <span>Favorites</span>
+          </div>
+          {favorites.map((fav) => (
+            <NavLink
+              key={fav.id}
+              to={fav.type === 'board' ? `/boards/${fav.id}` : fav.type === 'card' ? `/cards/${fav.id}` : `/collections/${fav.id}`}
+              className={styles.favoriteItem}
+              onClick={onNavigate}
+            >
+              {fav.type === 'board' ? <Kanban size={14} /> : fav.type === 'card' ? <FileText size={14} /> : <FolderOpen size={14} />}
+              <span className={styles.favoriteName}>{fav.name}</span>
               <button
-                className={styles.dropdownItemCreate}
-                onClick={handleCreate}
+                className={styles.favoriteRemove}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  removeFavorite(fav.id);
+                }}
+                title="Remove from favorites"
               >
-                <Plus size={14} />
-                <span>New workspace</span>
+                <X size={12} />
               </button>
-            </div>
-          </>
-        )}
-      </div>
+            </NavLink>
+          ))}
+        </div>
+      )}
+
+      {recentVisits.length > 0 && !collapsed && (
+        <div className={styles.recentSection}>
+          <button
+            className={styles.recentHeader}
+            onClick={toggleRecentCollapsed}
+            aria-expanded={!recentCollapsed}
+          >
+            <Clock size={12} />
+            <span>Recent</span>
+            <ChevronDown
+              size={12}
+              className={`${styles.recentChevron}${recentCollapsed ? ` ${styles.recentChevronCollapsed}` : ''}`}
+            />
+          </button>
+          {!recentCollapsed && recentVisits.map((visit) => (
+            <NavLink
+              key={`${visit.type}-${visit.id}`}
+              to={visit.path}
+              className={styles.recentItem}
+              onClick={onNavigate}
+            >
+              {visit.type === 'board' ? <Kanban size={14} /> : visit.type === 'card' ? <FileText size={14} /> : <FolderOpen size={14} />}
+              <span className={styles.recentName}>{visit.name}</span>
+            </NavLink>
+          ))}
+        </div>
+      )}
+
+      {favorites.length > 0 && collapsed && (
+        <div className={styles.collapsedFavoritesSection}>
+          {favorites.map((fav) => (
+            <Tooltip key={fav.id} label={fav.name} position="right">
+              <NavLink
+                to={fav.type === 'board' ? `/boards/${fav.id}` : fav.type === 'card' ? `/cards/${fav.id}` : `/collections/${fav.id}`}
+                className={styles.collapsedFavoriteItem}
+                onClick={onNavigate}
+              >
+                {fav.type === 'board' ? <Kanban size={16} /> : fav.type === 'card' ? <FileText size={16} /> : <FolderOpen size={16} />}
+              </NavLink>
+            </Tooltip>
+          ))}
+        </div>
+      )}
+      {(favorites.length > 0 || recentVisits.length > 0) && collapsed && (
+        <div className={styles.collapsedFavoritesDivider} />
+      )}
 
       <nav className={styles.nav}>
-        {navItems.map((item) => (
+        {navItems.map((item) => {
+          const link = (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                [styles.navItem, isActive && styles.active].filter(Boolean).join(' ')
+              }
+              end={item.to === '/'}
+              onClick={onNavigate}
+            >
+              <item.icon size={18} />
+              {!collapsed && <span>{item.label}</span>}
+              {!!item.badge && (
+                <span className={
+                  collapsed
+                    ? (item.badgeDanger ? styles.navBadgeDangerCollapsed : item.badgePulsing ? styles.navBadgePulsingCollapsed : styles.navBadgeCollapsed)
+                    : (item.badgeDanger ? styles.navBadgeDanger : item.badgePulsing ? styles.navBadgePulsing : styles.navBadge)
+                }>
+                  {item.badge > 99 ? '99+' : item.badge}
+                </span>
+              )}
+            </NavLink>
+          );
+          return collapsed ? (
+            <Tooltip key={item.to} label={item.label} position="right">
+              {link}
+            </Tooltip>
+          ) : link;
+        })}
+      </nav>
+      </div>
+      <div className={styles.bottom}>
+        <div className={styles.notificationWrapper}>
+          {collapsed ? (
+            <Tooltip label="Notifications" position="right">
+              <button
+                className={styles.collapsedIconBtn}
+                onClick={() => setShowNotifications((v) => !v)}
+                aria-label="Notifications"
+              >
+                <Bell size={18} />
+                {notificationUnreadCount > 0 && (
+                  <span className={styles.notificationBadgeCollapsed}>
+                    {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
+                  </span>
+                )}
+              </button>
+            </Tooltip>
+          ) : (
+            <button
+              className={styles.notificationButton}
+              onClick={() => setShowNotifications((v) => !v)}
+            >
+              <Bell size={16} />
+              <span>Notifications</span>
+              {notificationUnreadCount > 0 && (
+                <span className={styles.notificationBadge}>
+                  {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
+                </span>
+              )}
+            </button>
+          )}
+          {showNotifications && (
+            <NotificationPanel onClose={() => setShowNotifications(false)} />
+          )}
+        </div>
+
+        {collapsed ? (
+          <Tooltip label="Settings" position="right">
+            <NavLink
+              to="/settings"
+              className={({ isActive }) =>
+                [styles.navItem, isActive && styles.active].filter(Boolean).join(' ')
+              }
+              onClick={onNavigate}
+            >
+              <Settings size={18} />
+            </NavLink>
+          </Tooltip>
+        ) : (
           <NavLink
-            key={item.to}
-            to={item.to}
+            to="/settings"
             className={({ isActive }) =>
               [styles.navItem, isActive && styles.active].filter(Boolean).join(' ')
             }
-            end={item.to === '/'}
             onClick={onNavigate}
           >
-            <item.icon size={18} />
-            <span>{item.label}</span>
+            <Settings size={18} />
+            <span>Settings</span>
           </NavLink>
-        ))}
-      </nav>
-      <div className={styles.bottom}>
-        <NavLink
-          to="/settings"
-          className={({ isActive }) =>
-            [styles.navItem, isActive && styles.active].filter(Boolean).join(' ')
-          }
-          onClick={onNavigate}
-        >
-          <Settings size={18} />
-          <span>Settings</span>
-        </NavLink>
+        )}
+
+        {collapsed ? (
+          <>
+            {onToggleCollapse && (
+              <Tooltip label="Expand sidebar" position="right">
+                <button
+                  className={styles.collapseToggle}
+                  onClick={onToggleCollapse}
+                  aria-label="Expand sidebar"
+                >
+                  <PanelLeftOpen size={16} />
+                </button>
+              </Tooltip>
+            )}
+          </>
+        ) : (
+          <>
+            {onToggleCollapse && (
+              <Tooltip label="Collapse sidebar" position="right">
+                <button
+                  className={styles.collapseToggle}
+                  onClick={onToggleCollapse}
+                  aria-label="Collapse sidebar"
+                >
+                  <PanelLeftClose size={16} />
+                </button>
+              </Tooltip>
+            )}
+          </>
+        )}
+
         {user && (
           <div className={styles.userSection}>
-            <div className={styles.userInfo}>
-              <span className={styles.userAvatar}>
-                {user.firstName[0]}
-                {user.lastName[0]}
-              </span>
-              <div className={styles.userDetails}>
-                <span className={styles.userName}>
-                  {user.firstName} {user.lastName}
+            {collapsed ? (
+              <Tooltip label={`${user.firstName} ${user.lastName}`} position="right">
+                <span className={styles.userAvatar}>
+                  {user.firstName[0]}
+                  {user.lastName[0]}
                 </span>
-              </div>
-            </div>
-            <Tooltip label="Log out">
-              <button
-                className={styles.logoutBtn}
-                onClick={logout}
-              >
-                <LogOut size={16} />
-              </button>
-            </Tooltip>
+              </Tooltip>
+            ) : (
+              <>
+                <div className={styles.userInfo}>
+                  <span className={styles.userAvatar}>
+                    {user.firstName[0]}
+                    {user.lastName[0]}
+                  </span>
+                  <div className={styles.userDetails}>
+                    <span className={styles.userName}>
+                      {user.firstName} {user.lastName}
+                    </span>
+                  </div>
+                </div>
+                <Tooltip label="Log out">
+                  <button
+                    className={styles.logoutBtn}
+                    onClick={logout}
+                  >
+                    <LogOut size={16} />
+                  </button>
+                </Tooltip>
+              </>
+            )}
           </div>
         )}
       </div>

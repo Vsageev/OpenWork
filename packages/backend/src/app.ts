@@ -60,8 +60,21 @@ export async function buildApp() {
   const https = buildHttpsOptions();
 
   const app = Fastify({
+    trustProxy: env.TRUST_PROXY,
+    bodyLimit: env.BODY_LIMIT_BYTES,
     logger: {
       level: env.NODE_ENV === 'production' ? 'info' : 'debug',
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.headers["x-api-key"]',
+          'headers.authorization',
+          'headers.cookie',
+          'headers["x-api-key"]',
+        ],
+        censor: '[REDACTED]',
+      },
     },
     ...(https ? { https } : {}),
   });

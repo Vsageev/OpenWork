@@ -51,6 +51,7 @@ import {
 } from '../stores/agent-chat-runtime';
 import { useWorkspace } from '../stores/WorkspaceContext';
 import styles from './AgentsPage.module.css';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 
 /* ── Types ── */
 
@@ -347,6 +348,10 @@ function areChatConversationListsEqual(a: ChatConversation[], b: ChatConversatio
   return true;
 }
 
+function agentConversationKey(agentId: string, conversationId: string): string {
+  return `${agentId}:${conversationId}`;
+}
+
 /* ── Agent file entry type ── */
 
 type AgentFileEntry = import('../lib/file-utils').FileEntry & { isReference?: boolean; target?: string };
@@ -552,6 +557,17 @@ function AgentFiles({ agentId }: { agentId: string }) {
       .catch(() => setError('Failed to download file'));
   }
 
+  async function handleReveal(filePath: string) {
+    try {
+      await api(`/agents/${agentId}/files/reveal`, {
+        method: 'POST',
+        body: JSON.stringify({ path: filePath }),
+      });
+    } catch {
+      setError('Failed to reveal in file manager');
+    }
+  }
+
   function handleEntryClick(entry: AgentFileEntry) {
     if (entry.type === 'folder') {
       navigateTo(entry.path);
@@ -730,6 +746,15 @@ function AgentFiles({ agentId }: { agentId: string }) {
                         </button>
                       </Tooltip>
                     )}
+                    <Tooltip label="Show in Finder">
+                      <button
+                        className={styles.filesIconBtn}
+                        onClick={() => handleReveal(entry.path)}
+                        aria-label="Show in Finder"
+                      >
+                        <FolderOpen size={16} />
+                      </button>
+                    </Tooltip>
                     {deletingPath === entry.path ? (
                       <>
                         <Button size="sm" variant="secondary" onClick={() => setDeletingPath(null)} disabled={deleteLoading}>
@@ -782,6 +807,7 @@ function AgentFiles({ agentId }: { agentId: string }) {
    ══════════════════════════════════════════════════════════ */
 
 export function AgentsPage() {
+  useDocumentTitle('Agents');
   const { activeWorkspaceId } = useWorkspace();
   const [searchParams] = useSearchParams();
   const requestedAgentId = searchParams.get('agentId');
@@ -825,6 +851,7 @@ export function AgentsPage() {
   const [uploading, setUploading] = useState(false);
   const [stagedImage, setStagedImage] = useState<{ file: File; previewUrl: string } | null>(null);
   const [draggingOver, setDraggingOver] = useState(false);
+  const [queuedMessagesByConversation, setQueuedMessagesByConversation] = useState<Record<string, string[]>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isFirstMessageRef = useRef(false);
   const activeAgentIdRef = useRef<string | null>(null);
@@ -919,9 +946,57 @@ export function AgentsPage() {
     if (!activeAgentId || !activeConvId) return null;
     return (convsByAgent[activeAgentId] || []).find((conv) => conv.id === activeConvId) ?? null;
   }, [activeAgentId, activeConvId, convsByAgent]);
+  const activeQueueKey = activeAgentId && activeConvId
+    ? agentConversationKey(activeAgentId, activeConvId)
+    : null;
+  const queuedMessages = activeQueueKey ? queuedMessagesByConversation[activeQueueKey] ?? [] : [];
+  const queuedMessage = queuedMessages[0] ?? null;
+  const queuedMessageCount = queuedMessages.length;
   const activeConversationBusy = Boolean(activeConversation?.isBusy);
   const streaming = Boolean(activeStream) || activeConversationBusy;
   const streamText = activeStream?.text ?? '';
+
+  const dequeueAndSendQueuedMessage = useCallback((agentId: string, conversationId: string) => {
+    const key = agentConversationKey(agentId, conversationId);
+    let promptToSend: string | null = null;
+    setQueuedMessagesByConversation((prev) => {
+      const queue = prev[key];
+      if (!queue || queue.length === 0) return prev;
+      promptToSend = queue[0];
+      if (queue.length > 1) {
+        return { ...prev, [key]: queue.slice(1) };
+      }
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    if (!promptToSend) return;
+    const prompt = promptToSend;
+
+    const isActiveConversation =
+      activeAgentIdRef.current === agentId &&
+      activeConvIdRef.current === conversationId;
+
+    if (isActiveConversation) {
+      const tempMsg: ChatMessage = {
+        id: `temp-${Date.now()}`,
+        direction: 'outbound',
+        content: prompt,
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, tempMsg]);
+    }
+
+    void startAgentChatStream({ agentId, conversationId, prompt }).catch((err) => {
+      if (isActiveConversation) {
+        setChatError(err instanceof Error ? err.message : 'Failed to send queued message');
+      }
+      setQueuedMessagesByConversation((prev) => ({
+        ...prev,
+        [key]: [prompt, ...(prev[key] ?? [])],
+      }));
+    });
+  }, []);
 
   /* ── Close context menu on outside click ── */
   useEffect(() => {
@@ -1172,6 +1247,7 @@ export function AgentsPage() {
       if (previousStatus !== 'streaming') continue;
 
       if (stream.status === 'done') {
+        dequeueAndSendQueuedMessage(stream.agentId, stream.conversationId);
         if (
           activeAgentIdRef.current === stream.agentId &&
           activeConvIdRef.current === stream.conversationId
@@ -1190,7 +1266,7 @@ export function AgentsPage() {
     }
 
     previousStreamStatusRef.current = next;
-  }, [chatStreams, fetchConversations, fetchMessages, markConversationRead]);
+  }, [chatStreams, dequeueAndSendQueuedMessage, fetchConversations, fetchMessages, markConversationRead]);
 
   // While a run is active (local stream or backend busy flag), periodically
   // refresh messages so API-posted progress/final updates are visible.
@@ -1211,6 +1287,18 @@ export function AgentsPage() {
       window.clearInterval(intervalId);
     };
   }, [activeStream, activeConversationBusy, activeAgentId, activeConvId, fetchMessages]);
+
+  // Busy-flag fallback: if chat stream isn't tracked locally, dispatch queued text
+  // once backend busy state flips from true -> false for the active conversation.
+  const wasActiveConversationBusyRef = useRef(false);
+  useEffect(() => {
+    const wasBusy = wasActiveConversationBusyRef.current;
+    wasActiveConversationBusyRef.current = activeConversationBusy;
+
+    if (wasBusy && !activeConversationBusy && !activeStream && activeAgentId && activeConvId) {
+      dequeueAndSendQueuedMessage(activeAgentId, activeConvId);
+    }
+  }, [activeConversationBusy, activeStream, activeAgentId, activeConvId, dequeueAndSendQueuedMessage]);
 
   /* ── Scroll to bottom ── */
   const scrollToBottom = useCallback(() => {
@@ -1345,19 +1433,40 @@ export function AgentsPage() {
   async function deleteConversation(agentId: string, convId: string) {
     try {
       await api(`/agents/${agentId}/chat/conversations/${convId}`, { method: 'DELETE' });
-      setConvsByAgent((prev) => {
-        const next = (prev[agentId] || []).filter((c) => c.id !== convId);
-        return { ...prev, [agentId]: next };
-      });
-      if (convId === activeConvId) {
-        const remaining = (convsByAgent[agentId] || []).filter((c) => c.id !== convId);
-        if (remaining.length > 0) {
-          setActiveConvId(remaining[0].id);
-          fetchMessages(agentId, remaining[0].id);
-        } else {
-          setActiveConvId(null);
-          setMessages([]);
+      const deletingActiveConversation = activeAgentId === agentId && activeConvId === convId;
+
+      // Compute next selection from current state before mutating it.
+      let nextFocusedConversationId: string | null = null;
+      if (deletingActiveConversation) {
+        const current = convsByAgent[agentId] || [];
+        const deletedIndex = current.findIndex((c) => c.id === convId);
+        if (deletedIndex !== -1) {
+          const next = current.filter((c) => c.id !== convId);
+          // Prefer the chat below; fall back to the chat above if none below.
+          nextFocusedConversationId = next[deletedIndex]?.id ?? next[deletedIndex - 1]?.id ?? null;
         }
+      }
+
+      setConvsByAgent((prev) => ({
+        ...prev,
+        [agentId]: (prev[agentId] || []).filter((c) => c.id !== convId),
+      }));
+      setQueuedMessagesByConversation((prev) => {
+        const key = agentConversationKey(agentId, convId);
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+
+      if (!deletingActiveConversation) return;
+
+      if (nextFocusedConversationId) {
+        setActiveConvId(nextFocusedConversationId);
+        void fetchMessages(agentId, nextFocusedConversationId);
+      } else {
+        setActiveConvId(null);
+        setMessages([]);
       }
     } catch {
       setChatError('Failed to delete conversation');
@@ -1368,7 +1477,19 @@ export function AgentsPage() {
   async function sendMessage() {
     const prompt = input.trim();
     const hasImage = !!stagedImage;
-    if ((!prompt && !hasImage) || streaming || !activeAgentId || !activeConvId) return;
+    if ((!prompt && !hasImage) || !activeAgentId || !activeConvId) return;
+
+    // If agent is busy, queue the text message (images can't be queued)
+    if (streaming) {
+      if (hasImage) return; // can't queue images
+      const queueKey = agentConversationKey(activeAgentId, activeConvId);
+      setQueuedMessagesByConversation((prev) => ({
+        ...prev,
+        [queueKey]: [...(prev[queueKey] ?? []), prompt],
+      }));
+      setInput('');
+      return;
+    }
 
     const sentAgentId = activeAgentId;
     const sentConvId = activeConvId;
@@ -1831,12 +1952,22 @@ export function AgentsPage() {
   function renderAgentItem(agent: Agent) {
     const convs = convsByAgent[agent.id] || [];
     const collapsed = isAgentCollapsed(agent.id);
+    const hasUnread = collapsed && convs.some((c) => {
+      const isStreaming = Boolean(c.isBusy) || streamingConversationIds.has(c.id);
+      return !isStreaming && c.isUnread;
+    });
+    const hasStreaming = collapsed && convs.some((c) => Boolean(c.isBusy) || streamingConversationIds.has(c.id));
     return (
       <div key={agent.id} className={styles.agentGroup}>
         <div
           className={styles.agentGroupHeader}
           onClick={() => {
-            toggleAgentCollapse(agent.id);
+            const convs = convsByAgent[agent.id] || [];
+            if (convs.length > 0) {
+              selectConversation(agent.id, convs[0].id);
+            } else {
+              createConversation(agent.id);
+            }
           }}
           onContextMenu={(e) => {
             if (groups.length === 0) return;
@@ -1847,13 +1978,18 @@ export function AgentsPage() {
           <ChevronRight
             size={14}
             className={`${styles.agentGroupChevron} ${!collapsed ? styles.agentGroupChevronOpen : ''}`}
+            onClick={(e) => { e.stopPropagation(); toggleAgentCollapse(agent.id); }}
           />
-          <AgentAvatar
-            icon={agent.avatarIcon || 'spark'}
-            bgColor={agent.avatarBgColor || '#1a1a2e'}
-            logoColor={agent.avatarLogoColor || '#e94560'}
-            size={36}
-          />
+          <div className={styles.agentAvatarWrapper}>
+            <AgentAvatar
+              icon={agent.avatarIcon || 'spark'}
+              bgColor={agent.avatarBgColor || '#1a1a2e'}
+              logoColor={agent.avatarLogoColor || '#e94560'}
+              size={36}
+            />
+            {hasStreaming && <span className={styles.agentStreamingDot} title="Agent is responding..." />}
+            {!hasStreaming && hasUnread && <span className={styles.agentUnreadDot} title="New response" />}
+          </div>
           <div className={styles.agentGroupInfo}>
             <div className={styles.agentGroupName}>{agent.name}</div>
             <div className={styles.agentGroupMeta}>
@@ -2284,6 +2420,32 @@ export function AgentsPage() {
                 {uploading && (
                   <div className={styles.uploadingIndicator}>Uploading image…</div>
                 )}
+                {queuedMessage && (
+                  <div className={styles.queuedMessageIndicator}>
+                    <span className={styles.queuedMessageText}>
+                      Queued{queuedMessageCount > 1 ? ` (${queuedMessageCount})` : ''}: {queuedMessage}
+                    </span>
+                    <button
+                      className={styles.queuedMessageCancel}
+                      onClick={() => {
+                        if (!activeQueueKey) return;
+                        setQueuedMessagesByConversation((prev) => {
+                          const queue = prev[activeQueueKey];
+                          if (!queue || queue.length === 0) return prev;
+                          if (queue.length > 1) {
+                            return { ...prev, [activeQueueKey]: queue.slice(1) };
+                          }
+                          const next = { ...prev };
+                          delete next[activeQueueKey];
+                          return next;
+                        });
+                      }}
+                      aria-label="Cancel queued message"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
                 {stagedImage && (
                   <div className={styles.stagedImagePreview}>
                     <img src={stagedImage.previewUrl} alt="Preview" className={styles.stagedImageThumb} />
@@ -2317,19 +2479,20 @@ export function AgentsPage() {
                   <textarea
                     ref={inputRef}
                     className={styles.replyInput}
-                    placeholder={stagedImage ? 'Add a caption… (optional)' : 'Type a message…'}
+                    placeholder={streaming ? 'Type to queue a message…' : stagedImage ? 'Add a caption… (optional)' : 'Type a message…'}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     onPaste={handlePaste}
                     rows={1}
-                    disabled={streaming || uploading}
+                    disabled={uploading}
                   />
                   <button
                     className={styles.sendBtn}
                     onClick={sendMessage}
-                    disabled={streaming || uploading || (!input.trim() && !stagedImage)}
-                    aria-label="Send message"
+                    disabled={uploading || (!input.trim() && !stagedImage)}
+                    aria-label={streaming ? 'Queue message' : 'Send message'}
+                    title={streaming ? 'Queue message — will send when agent finishes' : 'Send message'}
                   >
                     <Send size={18} />
                   </button>

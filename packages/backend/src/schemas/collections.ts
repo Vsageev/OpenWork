@@ -61,12 +61,26 @@ export const tagSchema = z
   })
   .passthrough();
 
+export const agentBatchConfigSchema = z.object({
+  agentId: z.string().nullable().optional(),
+  prompt: z.string().nullable().optional(),
+  maxParallel: z.number().int().min(1).max(20).optional(),
+  cardFilters: z.object({
+    search: z.string().optional(),
+    assigneeId: z.string().optional(),
+    completed: z.boolean().optional(),
+    priority: z.enum(['high', 'medium', 'low']).optional(),
+    tagId: z.string().optional(),
+  }).optional(),
+});
+
 export const collectionSchema = z
   .object({
     id: z.string(),
     name: z.string(),
     description: z.string().nullable(),
     isGeneral: z.boolean().optional(),
+    agentBatchConfig: agentBatchConfigSchema.nullable().optional(),
     createdById: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -146,7 +160,7 @@ export const conversationSchema = z
     id: z.string(),
     contactId: z.string(),
     assigneeId: z.string().nullable(),
-    channelType: z.string(),
+    channelType: z.enum(['telegram', 'internal', 'other', 'agent', 'email', 'web_chat']),
     status: z.enum(['open', 'closed', 'archived']),
     subject: z.string().nullable(),
     externalId: z.string().nullable(),

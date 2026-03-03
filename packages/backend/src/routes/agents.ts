@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
@@ -9,6 +10,7 @@ import cron from 'node-cron';
 import {
   checkCliStatus,
   listPresets,
+  asPublicAgent,
   createAgent,
   listAgents,
   getAgent,
@@ -16,6 +18,7 @@ import {
   deleteAgent,
   listAgentFiles,
   getAgentFilePath,
+  getAgentEntryPath,
   readAgentFileContent,
   uploadAgentFile,
   createAgentFolder,
@@ -90,7 +93,7 @@ export async function agentRoutes(app: FastifyInstance) {
       }
 
       const { limit, offset } = request.query;
-      const entries = all.slice(offset, offset + limit);
+      const entries = all.slice(offset, offset + limit).map(asPublicAgent);
       return reply.send({ total: all.length, limit, offset, entries });
     },
   );
@@ -159,7 +162,7 @@ export async function agentRoutes(app: FastifyInstance) {
           avatarBgColor,
           avatarLogoColor,
         });
-        return reply.status(201).send(agent);
+        return reply.status(201).send(asPublicAgent(agent));
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }
@@ -182,7 +185,7 @@ export async function agentRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const agent = getAgent(request.params.id);
       if (!agent) return reply.notFound('Agent not found');
-      return reply.send(agent);
+      return reply.send(asPublicAgent(agent));
     },
   );
 
@@ -227,7 +230,7 @@ export async function agentRoutes(app: FastifyInstance) {
         syncAgentCronJobs(request.params.id);
       }
 
-      return reply.send(updated);
+      return reply.send(asPublicAgent(updated));
     },
   );
 
@@ -421,6 +424,50 @@ export async function agentRoutes(app: FastifyInstance) {
           .header('Content-Type', 'application/octet-stream')
           .header('Content-Disposition', `attachment; filename="${fileName}"`)
           .send(fs.createReadStream(diskPath));
+      } catch (err) {
+        return reply.badRequest((err as Error).message);
+      }
+    },
+  );
+
+  // Reveal file/folder in host OS file manager
+  typedApp.post(
+    '/api/agents/:id/files/reveal',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Open a file or folder location in the OS file manager',
+        params: z.object({ id: z.string() }),
+        body: z.object({
+          path: z.string().min(1),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const agent = getAgent(request.params.id);
+      if (!agent) return reply.notFound('Agent not found');
+      try {
+        const diskPath = getAgentEntryPath(request.params.id, request.body.path);
+        if (!diskPath) return reply.notFound('Path not found');
+
+        const platform = process.platform;
+        if (platform === 'darwin') {
+          const stat = fs.statSync(diskPath);
+          if (stat.isDirectory()) {
+            spawn('open', [diskPath], { detached: true, stdio: 'ignore' }).unref();
+          } else {
+            spawn('open', ['-R', diskPath], { detached: true, stdio: 'ignore' }).unref();
+          }
+        } else if (platform === 'win32') {
+          spawn('explorer', [`/select,${diskPath}`], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+          const stat = fs.statSync(diskPath);
+          const dir = stat.isDirectory() ? diskPath : path.dirname(diskPath);
+          spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+        }
+
+        return reply.status(204).send();
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }

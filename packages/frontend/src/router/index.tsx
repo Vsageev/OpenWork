@@ -48,6 +48,9 @@ const StoragePage = lazy(() =>
 const NotFoundPage = lazy(() =>
   import('../pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })),
 );
+const MyCardsPage = lazy(() =>
+  import('../pages/MyCardsPage').then((m) => ({ default: m.MyCardsPage })),
+);
 
 function SuspenseWrapper({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
@@ -95,6 +98,7 @@ export const router = createBrowserRouter([
               { path: 'connectors', element: <SuspenseWrapper><ConnectorsPage /></SuspenseWrapper> },
               { path: 'storage', element: <SuspenseWrapper><StoragePage /></SuspenseWrapper> },
               { path: 'settings', element: <SuspenseWrapper><SettingsPage /></SuspenseWrapper> },
+              { path: 'my-cards', element: <SuspenseWrapper><MyCardsPage /></SuspenseWrapper> },
             ],
           },
         ],

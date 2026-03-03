@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import DOMPurify from 'dompurify';
 import {
   Search,
   MessageSquare,
@@ -22,12 +23,23 @@ import {
   Download,
   Play,
   MapPin,
+  CheckSquare,
+  Square,
+  MinusSquare,
+  Pin,
+  PinOff,
 } from 'lucide-react';
 import { api, apiUpload, ApiError } from '../../lib/api';
+import { toast } from '../../stores/toast';
+import { CreateCardModal } from '../../ui/CreateCardModal';
+import type { CreateCardData } from '../../ui/CreateCardModal';
 import { getFirstImageFromClipboardData, prepareImageForUpload } from '../../lib/image-upload';
 import { useAuth } from '../../stores/useAuth';
 import { Tooltip } from '../../ui';
+import { formatBytes } from 'shared';
 import styles from './InboxPage.module.css';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle';
+import { useDebounce } from '../../hooks/useDebounce';
 
 /* ── Types ── */
 
@@ -55,6 +67,8 @@ interface Conversation {
   externalId: string | null;
   isUnread: boolean;
   lastMessageAt: string | null;
+  lastMessagePreview: string | null;
+  lastMessageDirection: 'inbound' | 'outbound' | null;
   closedAt: string | null;
   metadata: string | null;
   createdAt: string;
@@ -251,41 +265,14 @@ function getMessageInlineKeyboard(msg: Message): InlineKeyboardButton[][] | null
 /**
  * Render HTML-formatted message content safely.
  * Supports Telegram HTML tags: <b>, <i>, <code>, <pre>, <a>, <s>, <u>.
+ * Uses DOMPurify for proper XSS protection.
  */
 function renderFormattedContent(content: string): string {
-  // Sanitize: escape everything except allowed Telegram HTML tags
-  let safe = content
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  // Restore allowed tags
-  safe = safe
-    .replace(/&lt;b&gt;/g, '<b>')
-    .replace(/&lt;\/b&gt;/g, '</b>')
-    .replace(/&lt;strong&gt;/g, '<b>')
-    .replace(/&lt;\/strong&gt;/g, '</b>')
-    .replace(/&lt;i&gt;/g, '<i>')
-    .replace(/&lt;\/i&gt;/g, '</i>')
-    .replace(/&lt;em&gt;/g, '<i>')
-    .replace(/&lt;\/em&gt;/g, '</i>')
-    .replace(/&lt;code&gt;/g, '<code>')
-    .replace(/&lt;\/code&gt;/g, '</code>')
-    .replace(/&lt;pre&gt;/g, '<pre>')
-    .replace(/&lt;\/pre&gt;/g, '</pre>')
-    .replace(/&lt;s&gt;/g, '<s>')
-    .replace(/&lt;\/s&gt;/g, '</s>')
-    .replace(/&lt;u&gt;/g, '<u>')
-    .replace(/&lt;\/u&gt;/g, '</u>');
-
-  // Restore <a href="..."> tags
-  safe = safe.replace(
-    /&lt;a href=&quot;([^&]*)&quot;&gt;/g,
-    '<a href="$1" target="_blank" rel="noopener noreferrer">',
-  );
-  safe = safe.replace(/&lt;\/a&gt;/g, '</a>');
-
-  return safe;
+  return DOMPurify.sanitize(content, {
+    ALLOWED_TAGS: ['b', 'strong', 'i', 'em', 'code', 'pre', 's', 'u', 'a'],
+    ALLOWED_ATTR: ['href', 'target', 'rel'],
+    ADD_ATTR: ['target', 'rel'],
+  });
 }
 
 /**
@@ -323,12 +310,6 @@ function getMediaUrl(messageId: string, index: number): string {
   return `/api/media/${messageId}/${index}`;
 }
 
-function formatFileSize(bytes: number | undefined): string {
-  if (!bytes) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function formatDuration(seconds: number | undefined): string {
   if (!seconds) return '0:00';
@@ -340,6 +321,7 @@ function formatDuration(seconds: number | undefined): string {
 /* ── Component ── */
 
 export function InboxPage() {
+  useDocumentTitle('Inbox');
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -348,8 +330,13 @@ export function InboxPage() {
   const [convsLoading, setConvsLoading] = useState(true);
   const [convsError, setConvsError] = useState('');
   const [searchInput, setSearchInput] = useState('');
+  const debouncedSearch = useDebounce(searchInput, 300);
   const [statusFilter, setStatusFilter] = useState<string>('open');
   const [channelFilter, setChannelFilter] = useState<string>('');
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [assignedToMe, setAssignedToMe] = useState(false);
+  const [markingAllRead, setMarkingAllRead] = useState(false);
+  const [statusCounts, setStatusCounts] = useState<{ open: number; closed: number; archived: number; all: number }>({ open: 0, closed: 0, archived: 0, all: 0 });
 
   // Active conversation
   const selectedId = searchParams.get('id') || null;
@@ -380,8 +367,45 @@ export function InboxPage() {
 
   // Draft state
   const [draftConversationIds, setDraftConversationIds] = useState<Set<string>>(new Set());
+  const [draftSavedIndicator, setDraftSavedIndicator] = useState(false);
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedDraftRef = useRef<{ conversationId: string; content: string } | null>(null);
+
+  // Bulk selection state
+  const [selectedConvIds, setSelectedConvIds] = useState<Set<string>>(new Set());
+  const [bulkActing, setBulkActing] = useState(false);
+
+  // Pinned conversations (localStorage-based)
+  const PINNED_STORAGE_KEY = 'inbox-pinned-conversations';
+  const [pinnedIds, setPinnedIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('inbox-pinned-conversations');
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  });
+
+  const togglePin = useCallback((conversationId: string) => {
+    setPinnedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(conversationId)) {
+        next.delete(conversationId);
+        toast.success('Conversation unpinned');
+      } else {
+        next.add(conversationId);
+        toast.success('Conversation pinned');
+      }
+      try { localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+
+  // Create card from conversation
+  const [showCreateCard, setShowCreateCard] = useState(false);
+
+  // Keyboard navigation state for conversation list
+  const [focusedConvIndex, setFocusedConvIndex] = useState<number>(-1);
+  const conversationListRef = useRef<HTMLDivElement>(null);
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -403,8 +427,10 @@ export function InboxPage() {
       const params = new URLSearchParams();
       params.set('limit', '100');
       if (statusFilter) params.set('status', statusFilter);
-      if (searchInput) params.set('search', searchInput);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (channelFilter) params.set('channelType', channelFilter);
+      if (unreadOnly) params.set('isUnread', 'true');
+      if (assignedToMe && user) params.set('assigneeId', user.id);
 
       const data = await api<PaginatedResponse<Conversation>>(`/conversations?${params}`);
       setConversations((prev) => (areConversationListsEqual(prev, data.entries) ? prev : data.entries));
@@ -417,11 +443,30 @@ export function InboxPage() {
         setConvsLoading(false);
       }
     }
-  }, [statusFilter, searchInput, channelFilter]);
+  }, [statusFilter, debouncedSearch, channelFilter, unreadOnly, assignedToMe, user]);
 
   useEffect(() => {
     fetchConversations();
   }, [fetchConversations]);
+
+  /* ── Fetch status counts ── */
+  const fetchStatusCounts = useCallback(async () => {
+    try {
+      const [openRes, closedRes, archivedRes, allRes] = await Promise.all([
+        api<{ total: number }>('/conversations?status=open&countOnly=true'),
+        api<{ total: number }>('/conversations?status=closed&countOnly=true'),
+        api<{ total: number }>('/conversations?status=archived&countOnly=true'),
+        api<{ total: number }>('/conversations?countOnly=true'),
+      ]);
+      setStatusCounts({ open: openRes.total, closed: closedRes.total, archived: archivedRes.total, all: allRes.total });
+    } catch {
+      // best-effort
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStatusCounts();
+  }, [fetchStatusCounts]);
 
   /* ── Fetch drafts on mount ── */
   useEffect(() => {
@@ -495,13 +540,14 @@ export function InboxPage() {
     const intervalId = window.setInterval(() => {
       if (document.hidden) return;
       fetchConversations({ silent: true });
+      fetchStatusCounts();
       if (selectedId) {
         fetchMessages(selectedId, { silent: true });
       }
     }, INBOX_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [fetchConversations, fetchMessages, selectedId]);
+  }, [fetchConversations, fetchMessages, fetchStatusCounts, selectedId]);
 
   /* ── Scroll to bottom on new messages or streaming ── */
   useEffect(() => {
@@ -529,6 +575,10 @@ export function InboxPage() {
         })
           .then(() => {
             lastSavedDraftRef.current = { conversationId: selectedId, content: trimmed };
+            // Flash "Draft saved" indicator
+            setDraftSavedIndicator(true);
+            if (draftIndicatorTimerRef.current) clearTimeout(draftIndicatorTimerRef.current);
+            draftIndicatorTimerRef.current = setTimeout(() => setDraftSavedIndicator(false), 2000);
             setDraftConversationIds((prev) => {
               if (prev.has(selectedId)) return prev;
               const next = new Set(prev);
@@ -571,6 +621,7 @@ export function InboxPage() {
     function handleClick(e: MouseEvent) {
       if (templatesRef.current && !templatesRef.current.contains(e.target as Node)) {
         setTemplatesOpen(false);
+        setTemplateSearch('');
       }
       if (keyboardRef.current && !keyboardRef.current.contains(e.target as Node)) {
         setKeyboardOpen(false);
@@ -581,6 +632,129 @@ export function InboxPage() {
       return () => document.removeEventListener('mousedown', handleClick);
     }
   }, [templatesOpen, keyboardOpen]);
+
+  /* ── Sort conversations: pinned first, then by original order ── */
+  const sortedConversations = useMemo(() => {
+    if (pinnedIds.size === 0) return conversations;
+    const pinned: Conversation[] = [];
+    const unpinned: Conversation[] = [];
+    for (const conv of conversations) {
+      if (pinnedIds.has(conv.id)) pinned.push(conv);
+      else unpinned.push(conv);
+    }
+    return [...pinned, ...unpinned];
+  }, [conversations, pinnedIds]);
+
+  const pinnedCount = useMemo(
+    () => sortedConversations.filter((c) => pinnedIds.has(c.id)).length,
+    [sortedConversations, pinnedIds],
+  );
+
+  /* ── Keyboard navigation for conversation list (J/K, Arrow Up/Down, Enter, Escape) ── */
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement).tagName;
+      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable;
+
+      // Skip all shortcuts when typing in an input (except Escape which blurs the input)
+      if (isInput) {
+        if (e.key === 'Escape') {
+          (e.target as HTMLElement).blur();
+        }
+        return;
+      }
+
+      // Escape: deselect conversation and go back to list
+      if (e.key === 'Escape' && selectedId) {
+        e.preventDefault();
+        setSearchParams({});
+        return;
+      }
+
+      const len = sortedConversations.length;
+      if (len === 0) return;
+
+      if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setFocusedConvIndex((prev) => {
+          const next = prev < len - 1 ? prev + 1 : prev;
+          scrollConvIntoView(next);
+          return next;
+        });
+      } else if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setFocusedConvIndex((prev) => {
+          const next = prev > 0 ? prev - 1 : 0;
+          scrollConvIntoView(next);
+          return next;
+        });
+      } else if (e.key === 'Enter' && focusedConvIndex >= 0 && focusedConvIndex < len) {
+        e.preventDefault();
+        setSearchParams({ id: sortedConversations[focusedConvIndex].id });
+      } else if (e.key === 'u') {
+        // Toggle unread on focused or selected conversation
+        const targetId = selectedId || (focusedConvIndex >= 0 ? sortedConversations[focusedConvIndex]?.id : null);
+        if (targetId) {
+          e.preventDefault();
+          void toggleConversationUnread(targetId);
+        }
+      } else if (e.key === 'e') {
+        // Archive focused or selected conversation
+        const targetId = selectedId || (focusedConvIndex >= 0 ? sortedConversations[focusedConvIndex]?.id : null);
+        if (targetId) {
+          e.preventDefault();
+          void updateConversationStatus('archived', targetId);
+        }
+      } else if (e.key === 'x') {
+        // Close/reopen focused or selected conversation
+        const targetConv = selectedId
+          ? activeConversation
+          : focusedConvIndex >= 0
+            ? sortedConversations[focusedConvIndex]
+            : null;
+        if (targetConv) {
+          e.preventDefault();
+          void updateConversationStatus(targetConv.status === 'open' ? 'closed' : 'open', targetConv.id);
+        }
+      } else if (e.key === 'r') {
+        // Focus reply input
+        if (selectedId && replyInputRef.current) {
+          e.preventDefault();
+          replyInputRef.current.focus();
+        }
+      } else if (e.key === 'p') {
+        // Pin/unpin focused or selected conversation
+        const targetId = selectedId || (focusedConvIndex >= 0 ? sortedConversations[focusedConvIndex]?.id : null);
+        if (targetId) {
+          e.preventDefault();
+          togglePin(targetId);
+        }
+      }
+    }
+
+    function scrollConvIntoView(index: number) {
+      const container = conversationListRef.current;
+      if (!container) return;
+      const items = container.querySelectorAll('[data-conv-item]');
+      items[index]?.scrollIntoView({ block: 'nearest' });
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [conversations, focusedConvIndex, selectedId, activeConversation, setSearchParams, togglePin, sortedConversations]);
+
+  // Reset focused index when conversations change (search/filter)
+  useEffect(() => {
+    setFocusedConvIndex(-1);
+  }, [statusFilter, debouncedSearch, channelFilter, unreadOnly, assignedToMe]);
+
+  // Sync focused index when a conversation is selected
+  useEffect(() => {
+    if (selectedId) {
+      const idx = sortedConversations.findIndex((c) => c.id === selectedId);
+      if (idx >= 0) setFocusedConvIndex(idx);
+    }
+  }, [selectedId, sortedConversations]);
 
   /* ── Fetch templates when popover opens ── */
   useEffect(() => {
@@ -600,8 +774,10 @@ export function InboxPage() {
     setSearchParams({ id });
     setAttachedFile(null);
     setTemplatesOpen(false);
+    setTemplateSearch('');
     setKeyboardOpen(false);
     setKeyboardRows([]);
+    setDraftSavedIndicator(false);
 
     // Load draft for the selected conversation
     api<PaginatedResponse<{ id: string; conversationId: string; content: string }>>(
@@ -818,7 +994,9 @@ export function InboxPage() {
         ),
       );
     } catch (err) {
-      setMsgsError(err instanceof ApiError ? err.message : 'Failed to send message');
+      const errorMsg = err instanceof ApiError ? err.message : 'Failed to send message';
+      setMsgsError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setSending(false);
     }
@@ -842,17 +1020,50 @@ export function InboxPage() {
   }
 
   /* ── Update conversation status ── */
-  async function updateConversationStatus(status: 'open' | 'closed' | 'archived') {
-    if (!selectedId) return;
+  async function updateConversationStatus(status: 'open' | 'closed' | 'archived', conversationId?: string) {
+    const id = conversationId ?? selectedId;
+    if (!id) return;
+    const prevStatus = conversations.find((c) => c.id === id)?.status;
     try {
-      const updated = await api<Conversation>(`/conversations/${selectedId}`, {
+      const updated = await api<Conversation>(`/conversations/${id}`, {
         method: 'PATCH',
         body: JSON.stringify({ status }),
       });
-      setActiveConversation((prev) => (prev ? { ...prev, ...updated } : prev));
-      setConversations((prev) => prev.map((c) => (c.id === selectedId ? { ...c, status } : c)));
+      if (id === selectedId) {
+        setActiveConversation((prev) => (prev ? { ...prev, ...updated } : prev));
+      }
+      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, status } : c)));
+      fetchStatusCounts();
+      const statusLabel = status === 'open' ? 'Reopened' : status === 'closed' ? 'Closed' : 'Archived';
+      toast.success(`Conversation ${statusLabel.toLowerCase()}`, {
+        action: prevStatus ? {
+          label: 'Undo',
+          onClick: () => void updateConversationStatus(prevStatus, id),
+        } : undefined,
+      });
     } catch {
-      // silent
+      toast.error('Failed to update conversation');
+    }
+  }
+
+  async function toggleConversationUnread(conversationId: string) {
+    const conv = conversations.find((c) => c.id === conversationId);
+    if (!conv) return;
+    const newUnread = !conv.isUnread;
+    try {
+      await api(`/conversations/${conversationId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isUnread: newUnread }),
+      });
+      setConversations((prev) =>
+        prev.map((c) => (c.id === conversationId ? { ...c, isUnread: newUnread } : c)),
+      );
+      if (activeConversation?.id === conversationId) {
+        setActiveConversation((prev) => (prev ? { ...prev, isUnread: newUnread } : prev));
+      }
+      toast.success(newUnread ? 'Marked as unread' : 'Marked as read');
+    } catch {
+      toast.error('Failed to update conversation');
     }
   }
 
@@ -888,40 +1099,278 @@ export function InboxPage() {
       t.content.toLowerCase().includes(templateSearch.toLowerCase()),
   );
 
-  /* ── Search conversations ── */
-  function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    fetchConversations();
+  /* ── Mark all conversations as read ── */
+  async function handleMarkAllRead() {
+    if (markingAllRead) return;
+    setMarkingAllRead(true);
+    try {
+      await api('/conversations/read-all', { method: 'POST' });
+      setConversations((prev) => prev.map((c) => ({ ...c, isUnread: false })));
+      toast.success('All conversations marked as read');
+    } catch {
+      toast.error('Failed to mark conversations as read');
+    } finally {
+      setMarkingAllRead(false);
+    }
   }
+
+  /* ── Create card from conversation ── */
+  async function handleCreateCard(data: CreateCardData) {
+    if (!activeConversation || !data.collectionId) return;
+    const customFields: Record<string, unknown> = {};
+    if (data.dueDate) customFields.dueDate = data.dueDate;
+    if (data.priority) customFields.priority = data.priority;
+    const card = await api<{ id: string }>('/cards', {
+      method: 'POST',
+      body: JSON.stringify({
+        collectionId: data.collectionId,
+        name: data.name,
+        description: data.description,
+        assigneeId: data.assigneeId,
+        ...(Object.keys(customFields).length > 0 ? { customFields } : {}),
+      }),
+    });
+    await Promise.all([
+      ...data.tagIds.map((tagId) =>
+        api(`/cards/${card.id}/tags`, { method: 'POST', body: JSON.stringify({ tagId }) }),
+      ),
+      ...data.linkedCardIds.map((targetCardId) =>
+        api(`/cards/${card.id}/links`, { method: 'POST', body: JSON.stringify({ targetCardId }) }),
+      ),
+    ]);
+    // Post a comment linking back to the source conversation
+    const contactName = getContactName(activeConversation.contact);
+    const conversationRef = activeConversation.subject
+      ? `"${activeConversation.subject}"`
+      : `conversation with ${contactName}`;
+    await api(`/cards/${card.id}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({
+        content: `Created from ${conversationRef} in Inbox.\n\n[View conversation](/inbox?id=${activeConversation.id})`,
+      }),
+    }).catch(() => {/* best-effort */});
+    setShowCreateCard(false);
+    toast.success('Card created from conversation', {
+      action: { label: 'Open card', onClick: () => { window.location.href = `/cards/${card.id}`; } },
+    });
+  }
+
+  /* ── Bulk selection helpers ── */
+  function toggleConvSelection(id: string) {
+    setSelectedConvIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllConversations() {
+    setSelectedConvIds(new Set(sortedConversations.map((c) => c.id)));
+  }
+
+  function deselectAll() {
+    setSelectedConvIds(new Set());
+  }
+
+  const allSelected = sortedConversations.length > 0 && selectedConvIds.size === sortedConversations.length;
+  const someSelected = selectedConvIds.size > 0 && !allSelected;
+
+  async function bulkUpdateStatus(status: 'open' | 'closed' | 'archived') {
+    if (bulkActing || selectedConvIds.size === 0) return;
+    const count = selectedConvIds.size;
+    setBulkActing(true);
+    try {
+      await Promise.all(
+        [...selectedConvIds].map((cid) =>
+          api(`/conversations/${cid}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status }),
+          }),
+        ),
+      );
+      setConversations((prev) =>
+        prev.map((c) => (selectedConvIds.has(c.id) ? { ...c, status } : c)),
+      );
+      if (selectedId && selectedConvIds.has(selectedId)) {
+        setActiveConversation((prev) => (prev ? { ...prev, status } : prev));
+      }
+      fetchStatusCounts();
+      deselectAll();
+      const statusLabel = status === 'open' ? 'reopened' : status === 'closed' ? 'closed' : 'archived';
+      toast.success(`${count} conversation${count > 1 ? 's' : ''} ${statusLabel}`);
+    } catch {
+      toast.error('Failed to update conversations');
+    } finally {
+      setBulkActing(false);
+    }
+  }
+
+  async function bulkMarkRead() {
+    if (bulkActing || selectedConvIds.size === 0) return;
+    const count = selectedConvIds.size;
+    setBulkActing(true);
+    try {
+      await Promise.all(
+        [...selectedConvIds].map((cid) =>
+          api(`/conversations/${cid}/read`, { method: 'POST' }),
+        ),
+      );
+      setConversations((prev) =>
+        prev.map((c) => (selectedConvIds.has(c.id) ? { ...c, isUnread: false } : c)),
+      );
+      deselectAll();
+      toast.success(`${count} conversation${count > 1 ? 's' : ''} marked as read`);
+    } catch {
+      toast.error('Failed to mark conversations as read');
+    } finally {
+      setBulkActing(false);
+    }
+  }
+
+  async function bulkDelete() {
+    if (bulkActing || selectedConvIds.size === 0) return;
+    const count = selectedConvIds.size;
+    if (!window.confirm(`Delete ${count} conversation${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    setBulkActing(true);
+    try {
+      await Promise.all(
+        [...selectedConvIds].map((cid) =>
+          api(`/conversations/${cid}`, { method: 'DELETE' }),
+        ),
+      );
+      setConversations((prev) => prev.filter((c) => !selectedConvIds.has(c.id)));
+      if (selectedId && selectedConvIds.has(selectedId)) {
+        setSearchParams({});
+      }
+      fetchStatusCounts();
+      deselectAll();
+      toast.success(`${count} conversation${count > 1 ? 's' : ''} deleted`);
+    } catch {
+      toast.error('Failed to delete conversations');
+    } finally {
+      setBulkActing(false);
+    }
+  }
+
+  // Clear selection when filters change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    deselectAll();
+  }, [statusFilter, debouncedSearch, channelFilter, unreadOnly, assignedToMe]);
 
   /* ── Render ── */
 
   const dateGroups = groupMessagesByDate(messages);
 
   return (
+    <>
     <div className={styles.wrapper}>
       <div className={styles.container}>
         {/* ── Left: Conversation list ── */}
         <div className={styles.sidebar}>
           <div className={styles.sidebarHeader}>
-            <span className={styles.sidebarTitle}>Inbox</span>
+            {selectedConvIds.size > 0 ? (
+              <div className={styles.bulkBar}>
+                <button
+                  className={styles.bulkSelectToggle}
+                  onClick={allSelected ? deselectAll : selectAllConversations}
+                  title={allSelected ? 'Deselect all' : 'Select all'}
+                >
+                  {allSelected ? <CheckSquare size={16} /> : someSelected ? <MinusSquare size={16} /> : <Square size={16} />}
+                </button>
+                <span className={styles.bulkCount}>{selectedConvIds.size} selected</span>
+                <div className={styles.bulkActions}>
+                  <Tooltip label="Mark read">
+                    <button className={styles.bulkBtn} onClick={() => { void bulkMarkRead(); }} disabled={bulkActing}>
+                      <CheckCircle2 size={14} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Close">
+                    <button className={styles.bulkBtn} onClick={() => { void bulkUpdateStatus('closed'); }} disabled={bulkActing}>
+                      <X size={14} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Archive">
+                    <button className={styles.bulkBtn} onClick={() => { void bulkUpdateStatus('archived'); }} disabled={bulkActing}>
+                      <Archive size={14} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Reopen">
+                    <button className={styles.bulkBtn} onClick={() => { void bulkUpdateStatus('open'); }} disabled={bulkActing}>
+                      <RotateCcw size={14} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Delete">
+                    <button className={`${styles.bulkBtn} ${styles.bulkBtnDanger}`} onClick={() => { void bulkDelete(); }} disabled={bulkActing}>
+                      <Trash2 size={14} />
+                    </button>
+                  </Tooltip>
+                </div>
+                <button className={styles.bulkDismiss} onClick={deselectAll} title="Cancel selection">
+                  <X size={14} />
+                </button>
+              </div>
+            ) : (
+              <>
+                <span className={styles.sidebarTitle}>Inbox</span>
+                {sortedConversations.some((c) => c.isUnread) && (
+                  <button
+                    className={styles.markAllReadBtn}
+                    onClick={() => { void handleMarkAllRead(); }}
+                    disabled={markingAllRead}
+                    title="Mark all as read"
+                  >
+                    <CheckCircle2 size={14} />
+                    <span>{markingAllRead ? 'Marking…' : 'Mark all read'}</span>
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className={styles.statusTabs}>
+            {([
+              { value: 'open', label: 'Open', count: statusCounts.open },
+              { value: 'closed', label: 'Closed', count: statusCounts.closed },
+              { value: 'archived', label: 'Archived', count: statusCounts.archived },
+              { value: '', label: 'All', count: statusCounts.all },
+            ] as const).map((tab) => (
+              <button
+                key={tab.value}
+                className={`${styles.statusTab}${statusFilter === tab.value ? ` ${styles.statusTabActive}` : ''}`}
+                onClick={() => setStatusFilter(tab.value)}
+              >
+                {tab.label}
+                {tab.count > 0 && <span className={styles.statusTabCount}>{tab.count}</span>}
+              </button>
+            ))}
           </div>
 
           <div className={styles.filterRow}>
-            <form onSubmit={handleSearchSubmit} className={styles.searchWrap}>
+            <div className={styles.searchWrap}>
               <Search size={14} className={styles.searchIcon} />
               <input
                 type="text"
-                placeholder="Search..."
+                placeholder="Search conversations..."
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 className={styles.searchInput}
               />
-            </form>
+              {searchInput && (
+                <button
+                  className={styles.searchClear}
+                  onClick={() => setSearchInput('')}
+                  aria-label="Clear search"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
             <select
               value={channelFilter}
               onChange={(e) => setChannelFilter(e.target.value)}
-              className={styles.statusFilter}
+              className={styles.channelFilterSelect}
             >
               <option value="">All channels</option>
               <option value="email">Email</option>
@@ -930,75 +1379,212 @@ export function InboxPage() {
               <option value="internal">Internal</option>
               <option value="other">Other</option>
             </select>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className={styles.statusFilter}
+            <button
+              type="button"
+              className={[styles.unreadFilterBtn, unreadOnly && styles.unreadFilterBtnActive].filter(Boolean).join(' ')}
+              onClick={() => setUnreadOnly((v) => !v)}
+              title="Show unread only"
             >
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="archived">Archived</option>
-              <option value="">All</option>
-            </select>
+              Unread
+            </button>
+            <button
+              type="button"
+              className={[styles.unreadFilterBtn, assignedToMe && styles.unreadFilterBtnActive].filter(Boolean).join(' ')}
+              onClick={() => setAssignedToMe((v) => !v)}
+              title="Show only conversations assigned to me"
+            >
+              Mine
+            </button>
           </div>
 
-          <div className={styles.conversationList}>
+          <div className={styles.conversationList} ref={conversationListRef}>
             {convsLoading ? (
-              <div className={styles.loadingState}>Loading...</div>
+              <div className={styles.convSkeletonList}>
+                {[0, 1, 2, 3, 4].map((i) => (
+                  <div key={i} className={styles.convSkeleton}>
+                    <div className={styles.convSkeletonAvatar} />
+                    <div className={styles.convSkeletonLines}>
+                      <div className={styles.convSkeletonLine} style={{ width: i % 2 === 0 ? '60%' : '45%' }} />
+                      <div className={styles.convSkeletonLine} style={{ width: i % 2 === 0 ? '80%' : '70%' }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
             ) : convsError ? (
               <div className={styles.errorState}>{convsError}</div>
-            ) : conversations.length === 0 ? (
+            ) : sortedConversations.length === 0 ? (
               <div className={styles.emptyPanel}>
-                <MessageSquare size={40} className={styles.emptyIcon} />
-                <span className={styles.emptyText}>No conversations</span>
+                {(debouncedSearch || channelFilter || unreadOnly || assignedToMe) ? (
+                  <>
+                    <Search size={36} className={styles.emptyIcon} />
+                    <span className={styles.emptyTitle}>No matching conversations</span>
+                    <div className={styles.activeFilters}>
+                      {debouncedSearch && <span className={styles.activeFilterChip}>Search: &ldquo;{debouncedSearch}&rdquo;</span>}
+                      {channelFilter && <span className={styles.activeFilterChip}>{CHANNEL_LABELS[channelFilter] || channelFilter}</span>}
+                      {statusFilter && statusFilter !== 'open' && <span className={styles.activeFilterChip}>Status: {statusFilter}</span>}
+                      {statusFilter === '' && <span className={styles.activeFilterChip}>All statuses</span>}
+                      {unreadOnly && <span className={styles.activeFilterChip}>Unread only</span>}
+                      {assignedToMe && <span className={styles.activeFilterChip}>Assigned to me</span>}
+                    </div>
+                    <button
+                      className={styles.clearFiltersBtn}
+                      onClick={() => {
+                        setSearchInput('');
+                        setChannelFilter('');
+                        setStatusFilter('open');
+                        setUnreadOnly(false);
+                        setAssignedToMe(false);
+                      }}
+                    >
+                      <RotateCcw size={13} />
+                      Reset filters
+                    </button>
+                  </>
+                ) : statusFilter === 'closed' ? (
+                  <>
+                    <CheckCircle2 size={36} className={styles.emptyIcon} />
+                    <span className={styles.emptyTitle}>No closed conversations</span>
+                    <span className={styles.emptyText}>
+                      Conversations you close will appear here for reference.
+                    </span>
+                  </>
+                ) : statusFilter === 'archived' ? (
+                  <>
+                    <Archive size={36} className={styles.emptyIcon} />
+                    <span className={styles.emptyTitle}>No archived conversations</span>
+                    <span className={styles.emptyText}>
+                      Archived conversations are stored here for long-term record keeping.
+                    </span>
+                  </>
+                ) : statusFilter === '' ? (
+                  <>
+                    <MessageSquare size={40} className={styles.emptyIcon} />
+                    <span className={styles.emptyTitle}>No conversations yet</span>
+                    <span className={styles.emptyText}>
+                      Conversations will appear here when contacts reach out or you start a new chat.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <MessageSquare size={40} className={styles.emptyIcon} />
+                    <span className={styles.emptyTitle}>No conversations yet</span>
+                    <span className={styles.emptyText}>
+                      Conversations will appear here when contacts reach out or you start a new chat.
+                    </span>
+                  </>
+                )}
               </div>
             ) : (
-              conversations.map((conv) => {
+              sortedConversations.map((conv, index) => {
                 const isActive = conv.id === selectedId;
+                const isFocused = index === focusedConvIndex && !isActive;
+                const isChecked = selectedConvIds.has(conv.id);
+                const isPinned = pinnedIds.has(conv.id);
+                const showPinnedSeparator = pinnedCount > 0 && index === pinnedCount;
                 const cls = [
                   styles.conversationItem,
                   isActive && styles.conversationItemActive,
+                  isFocused && styles.conversationItemFocused,
                   conv.isUnread && styles.conversationItemUnread,
+                  isChecked && styles.conversationItemChecked,
+                  isPinned && styles.conversationItemPinned,
                 ]
                   .filter(Boolean)
                   .join(' ');
 
                 return (
-                  <div
-                    key={conv.id}
-                    className={cls}
-                    onClick={() => selectConversation(conv.id)}
-                  >
-                    <span className={styles.convAvatar}>
-                      {getContactInitials(conv.contact)}
-                    </span>
-                    <div className={styles.convContent}>
-                      <div className={styles.convHeader}>
-                        <span className={styles.convName}>
-                          {getContactName(conv.contact)}
-                        </span>
-                        <span className={styles.convTime}>
-                          {formatRelativeTime(conv.lastMessageAt || conv.createdAt)}
-                        </span>
+                  <div key={conv.id}>
+                    {showPinnedSeparator && (
+                      <div className={styles.pinnedSeparator}>
+                        <span className={styles.pinnedSeparatorLine} />
                       </div>
-                      {conv.subject && (
-                        <div className={styles.convSubject}>{conv.subject}</div>
-                      )}
-                      <div className={styles.convFooter}>
-                        <span className={styles.convPreview}>
-                          {conv.subject || CHANNEL_LABELS[conv.channelType] || conv.channelType}
-                        </span>
-                        <span className={styles.channelBadge}>
-                          {CHANNEL_LABELS[conv.channelType] || conv.channelType}
-                        </span>
-                        {conv.isUnread && <span className={styles.unreadDot} />}
-                        {draftConversationIds.has(conv.id) && <span className={styles.draftBadge}>Draft</span>}
+                    )}
+                    <div
+                      className={cls}
+                      data-conv-item
+                      onClick={(e) => {
+                        if (e.shiftKey || selectedConvIds.size > 0) {
+                          e.preventDefault();
+                          toggleConvSelection(conv.id);
+                        } else {
+                          selectConversation(conv.id);
+                        }
+                      }}
+                    >
+                      <button
+                        className={[
+                          styles.convCheckbox,
+                          isChecked && styles.convCheckboxChecked,
+                          selectedConvIds.size > 0 && styles.convCheckboxVisible,
+                        ].filter(Boolean).join(' ')}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleConvSelection(conv.id);
+                        }}
+                        aria-label={isChecked ? 'Deselect conversation' : 'Select conversation'}
+                      >
+                        {isChecked ? <CheckSquare size={16} /> : <Square size={16} />}
+                      </button>
+                      <span className={styles.convAvatar}>
+                        {getContactInitials(conv.contact)}
+                      </span>
+                      <div className={styles.convContent}>
+                        <div className={styles.convHeader}>
+                          <span className={styles.convName}>
+                            {isPinned && <Pin size={11} className={styles.pinnedIcon} />}
+                            {getContactName(conv.contact)}
+                          </span>
+                          <span className={styles.convTime} title={new Date(conv.lastMessageAt || conv.createdAt).toLocaleString()}>
+                            {formatRelativeTime(conv.lastMessageAt || conv.createdAt)}
+                          </span>
+                        </div>
+                        {conv.subject && (
+                          <div className={styles.convSubject}>{conv.subject}</div>
+                        )}
+                        <div className={styles.convFooter}>
+                          <span className={styles.convPreview}>
+                            {conv.lastMessagePreview
+                              ? (conv.lastMessageDirection === 'outbound' ? 'You: ' : '') + conv.lastMessagePreview
+                              : conv.subject || CHANNEL_LABELS[conv.channelType] || conv.channelType}
+                          </span>
+                          <span className={styles.channelBadge}>
+                            {CHANNEL_LABELS[conv.channelType] || conv.channelType}
+                          </span>
+                          {conv.assignee && (
+                            <span className={styles.convAssigneeBadge} title={`Assigned to ${conv.assignee.firstName} ${conv.assignee.lastName ?? ''}`}>
+                              {conv.assignee.firstName[0]}{conv.assignee.lastName?.[0] ?? ''}
+                            </span>
+                          )}
+                          {conv.isUnread && <span className={styles.unreadDot} />}
+                          {draftConversationIds.has(conv.id) && <span className={styles.draftBadge}>Draft</span>}
+                        </div>
                       </div>
+                      <button
+                        className={[
+                          styles.convPinBtn,
+                          isPinned && styles.convPinBtnActive,
+                        ].filter(Boolean).join(' ')}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePin(conv.id);
+                        }}
+                        title={isPinned ? 'Unpin conversation' : 'Pin conversation'}
+                        aria-label={isPinned ? 'Unpin conversation' : 'Pin conversation'}
+                      >
+                        {isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+                      </button>
                     </div>
                   </div>
                 );
               })
             )}
+          </div>
+          <div className={styles.shortcutHints}>
+            <span className={styles.shortcutHint}><kbd>J</kbd><kbd>K</kbd> navigate</span>
+            <span className={styles.shortcutHint}><kbd>Enter</kbd> open</span>
+            <span className={styles.shortcutHint}><kbd>U</kbd> unread</span>
+            <span className={styles.shortcutHint}><kbd>P</kbd> pin</span>
+            <span className={styles.shortcutHint}><kbd>R</kbd> reply</span>
           </div>
         </div>
 
@@ -1015,17 +1601,57 @@ export function InboxPage() {
                   <div className={styles.threadContactName}>
                     {getContactName(activeConversation.contact)}
                   </div>
-                  {activeConversation.contact?.email && (
-                    <div className={styles.threadContactEmail}>
-                      {activeConversation.contact.email}
+                  {(activeConversation.contact?.email || activeConversation.contact?.phone) && (
+                    <div className={styles.threadContactMeta}>
+                      {activeConversation.contact.email && (
+                        <span className={styles.threadContactEmail}>
+                          {activeConversation.contact.email}
+                        </span>
+                      )}
+                      {activeConversation.contact.phone && (
+                        <span className={styles.threadContactPhone}>
+                          {activeConversation.contact.phone}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
+              {activeConversation.assignee && (
+                <div className={styles.threadAssigneeBadge}>
+                  <User size={11} />
+                  {activeConversation.assignee.firstName} {activeConversation.assignee.lastName ?? ''}
+                </div>
+              )}
               <div className={styles.threadActions}>
+                <Tooltip label="Create card from conversation">
+                  <button
+                    className={styles.iconBtn}
+                    onClick={() => setShowCreateCard(true)}
+                    aria-label="Create card from conversation"
+                  >
+                    <FileText size={16} />
+                  </button>
+                </Tooltip>
+                <Tooltip label={`${pinnedIds.has(activeConversation.id) ? 'Unpin' : 'Pin'} conversation (P)`}>
+                  <button
+                    className={`${styles.iconBtn}${pinnedIds.has(activeConversation.id) ? ` ${styles.iconBtnActive}` : ''}`}
+                    onClick={() => togglePin(activeConversation.id)}
+                  >
+                    {pinnedIds.has(activeConversation.id) ? <PinOff size={16} /> : <Pin size={16} />}
+                  </button>
+                </Tooltip>
+                <Tooltip label={`${activeConversation.isUnread ? 'Mark read' : 'Mark unread'} (U)`}>
+                  <button
+                    className={styles.iconBtn}
+                    onClick={() => void toggleConversationUnread(activeConversation.id)}
+                  >
+                    <MessageSquare size={16} />
+                  </button>
+                </Tooltip>
                 {activeConversation.status === 'open' ? (
                   <>
-                    <Tooltip label="Close conversation">
+                    <Tooltip label="Close conversation (X)">
                       <button
                         className={styles.iconBtn}
                         onClick={() => updateConversationStatus('closed')}
@@ -1033,7 +1659,7 @@ export function InboxPage() {
                         <CheckCircle2 size={16} />
                       </button>
                     </Tooltip>
-                    <Tooltip label="Archive conversation">
+                    <Tooltip label="Archive conversation (E)">
                       <button
                         className={styles.iconBtn}
                         onClick={() => updateConversationStatus('archived')}
@@ -1043,7 +1669,7 @@ export function InboxPage() {
                     </Tooltip>
                   </>
                 ) : (
-                  <Tooltip label="Reopen conversation">
+                  <Tooltip label="Reopen conversation (X)">
                     <button
                       className={styles.iconBtn}
                       onClick={() => updateConversationStatus('open')}
@@ -1058,7 +1684,28 @@ export function InboxPage() {
             {/* Messages area */}
             <div className={styles.messagesArea}>
               {msgsLoading ? (
-                <div className={styles.loadingState}>Loading messages...</div>
+                <div className={styles.msgSkeletonList}>
+                  {[
+                    { dir: 'in', w: 220, h: 38 },
+                    { dir: 'in', w: 180, h: 52 },
+                    { dir: 'out', w: 200, h: 38 },
+                    { dir: 'in', w: 260, h: 38 },
+                    { dir: 'out', w: 240, h: 52 },
+                    { dir: 'out', w: 160, h: 38 },
+                    { dir: 'in', w: 200, h: 66 },
+                  ].map((s, i) => (
+                    <div
+                      key={i}
+                      className={`${styles.msgSkeleton} ${s.dir === 'in' ? styles.msgSkeletonInbound : styles.msgSkeletonOutbound}`}
+                    >
+                      <div
+                        className={styles.msgSkeletonBubble}
+                        style={{ width: s.w, height: s.h, animationDelay: `${i * 0.08}s` }}
+                      />
+                      <div className={styles.msgSkeletonMeta} />
+                    </div>
+                  ))}
+                </div>
               ) : msgsError ? (
                 <div className={styles.errorState}>{msgsError}</div>
               ) : messages.length === 0 ? (
@@ -1187,7 +1834,7 @@ export function InboxPage() {
                                     <div className={styles.mediaDocInfo}>
                                       <span className={styles.mediaDocName}>{att.fileName || 'Document'}</span>
                                       {att.fileSize && (
-                                        <span className={styles.mediaDocSize}>{formatFileSize(att.fileSize)}</span>
+                                        <span className={styles.mediaDocSize}>{formatBytes(att.fileSize)}</span>
                                       )}
                                     </div>
                                     <Download size={14} className={styles.mediaDocDownload} />
@@ -1234,7 +1881,7 @@ export function InboxPage() {
                           )}
                           <div className={styles.messageMeta}>
                             <span>{senderName}</span>
-                            <span>{formatMessageTime(msg.createdAt)}</span>
+                            <span title={new Date(msg.createdAt).toLocaleString()}>{formatMessageTime(msg.createdAt)}</span>
                             {msg.direction === 'outbound' && (
                               <span className={styles.messageStatus}>
                                 {msg.status === 'read'
@@ -1536,7 +2183,7 @@ export function InboxPage() {
                     <div className={styles.attachedFileBar}>
                       <FileText size={14} />
                       <span className={styles.attachedFileName}>{attachedFile.name}</span>
-                      <span className={styles.attachedFileSize}>{formatFileSize(attachedFile.size)}</span>
+                      <span className={styles.attachedFileSize}>{formatBytes(attachedFile.size)}</span>
                       <Tooltip label="Remove file">
                         <button
                           className={styles.attachedFileRemove}
@@ -1554,10 +2201,18 @@ export function InboxPage() {
                   <textarea
                     ref={replyInputRef}
                     className={styles.replyInput}
-                    placeholder={attachedFile ? 'Add a caption... (optional)' : 'Type a message... (Enter to send, Shift+Enter for new line)'}
+                    placeholder={attachedFile ? 'Add a caption... (optional)' : 'Type a message… or / for templates (Enter to send, Shift+Enter for new line)'}
                     value={replyText}
                     onChange={(e) => {
-                      setReplyText(e.target.value);
+                      const val = e.target.value;
+                      // Slash trigger: lone "/" opens the template popover
+                      if (val === '/') {
+                        setTemplatesOpen(true);
+                        setTemplateSearch('');
+                        setReplyText('');
+                        return;
+                      }
+                      setReplyText(val);
                       // Auto-resize
                       const ta = e.target;
                       ta.style.height = 'auto';
@@ -1567,6 +2222,9 @@ export function InboxPage() {
                     onPaste={handleReplyPaste}
                     rows={1}
                   />
+                  {draftSavedIndicator && (
+                    <span className={styles.draftSavedIndicator}>Draft saved</span>
+                  )}
                 </div>
                 <Tooltip label="Send message">
                   <button
@@ -1592,5 +2250,25 @@ export function InboxPage() {
         )}
       </div>
     </div>
+
+    {showCreateCard && activeConversation && (
+      <CreateCardModal
+        onClose={() => setShowCreateCard(false)}
+        onSubmit={handleCreateCard}
+        showCollectionPicker
+        allowCreateAnother={false}
+        defaultName={
+          activeConversation.subject
+            ? activeConversation.subject
+            : `Conversation with ${getContactName(activeConversation.contact)}`
+        }
+        defaultDescription={
+          activeConversation.lastMessagePreview
+            ? `> ${activeConversation.lastMessagePreview}`
+            : undefined
+        }
+      />
+    )}
+    </>
   );
 }

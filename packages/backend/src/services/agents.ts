@@ -216,6 +216,8 @@ export interface AgentRecord {
   updatedAt: string;
 }
 
+export type PublicAgentRecord = Omit<AgentRecord, 'workspaceApiKey' | 'workspaceApiKeyId'>;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -245,6 +247,13 @@ function asAgent(rec: Record<string, unknown>): AgentRecord {
     avatarLogoColor:
       typeof rec.avatarLogoColor === 'string' ? rec.avatarLogoColor : '#e94560',
   } as unknown as AgentRecord;
+}
+
+export function asPublicAgent(agent: AgentRecord): PublicAgentRecord {
+  const publicAgent = { ...agent };
+  delete (publicAgent as Partial<AgentRecord>).workspaceApiKey;
+  delete (publicAgent as Partial<AgentRecord>).workspaceApiKeyId;
+  return publicAgent;
 }
 
 // ---------------------------------------------------------------------------
@@ -347,64 +356,89 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
   if (!preset) throw new Error(`Unknown preset: ${params.preset}`);
 
   const agentId = randomUUID();
-  const serviceUser = await createAgentServiceUser(agentId, params.name);
-  const serviceUserId = serviceUser.id as string;
+  let serviceUserId: string | null = null;
+  let wsKeyId: string | null = null;
 
-  const wsKey = await createApiKey({
-    name: `Agent: ${params.name}`,
-    permissions: WORKSPACE_API_PERMISSIONS,
-    createdById: serviceUserId,
-    description: `Auto-created workspace API key for agent "${params.name}"`,
-  });
+  try {
+    // Step 1: Create service user
+    const serviceUser = await createAgentServiceUser(agentId, params.name);
+    serviceUserId = serviceUser.id as string;
 
-  const record = store.insert('agents', {
-    id: agentId,
-    name: params.name,
-    description: params.description,
-    model: params.model,
-    modelId: params.modelId ?? null,
-    thinkingLevel: params.thinkingLevel ?? null,
-    preset: params.preset,
-    status: 'active',
-    apiKeyId: params.apiKeyId,
-    apiKeyName: params.apiKeyName,
-    apiKeyPrefix: params.apiKeyPrefix,
-    capabilities: params.capabilities,
-    skipPermissions: params.skipPermissions ?? false,
-    groupId: params.groupId ?? null,
-    workspaceApiKey: wsKey.rawKey,
-    workspaceApiKeyId: (wsKey as Record<string, unknown>).id as string,
-    serviceUserId,
-    lastActivity: null,
-    avatarIcon: params.avatarIcon ?? 'spark',
-    avatarBgColor: params.avatarBgColor ?? '#1a1a2e',
-    avatarLogoColor: params.avatarLogoColor ?? '#e94560',
-  });
+    // Step 2: Create workspace API key
+    const wsKey = await createApiKey({
+      name: `Agent: ${params.name}`,
+      permissions: WORKSPACE_API_PERMISSIONS,
+      createdById: serviceUserId,
+      description: `Auto-created workspace API key for agent "${params.name}"`,
+    });
+    wsKeyId = (wsKey as Record<string, unknown>).id as string;
 
-  // Scaffold workspace folder
-  ensureAgentsDir();
-  const dir = agentDir(record.id as string);
-  fs.mkdirSync(dir, { recursive: true });
+    // Step 3: Insert agent record
+    const record = store.insert('agents', {
+      id: agentId,
+      name: params.name,
+      description: params.description,
+      model: params.model,
+      modelId: params.modelId ?? null,
+      thinkingLevel: params.thinkingLevel ?? null,
+      preset: params.preset,
+      status: 'active',
+      apiKeyId: params.apiKeyId,
+      apiKeyName: params.apiKeyName,
+      apiKeyPrefix: params.apiKeyPrefix,
+      capabilities: params.capabilities,
+      skipPermissions: params.skipPermissions ?? false,
+      groupId: params.groupId ?? null,
+      workspaceApiKey: wsKey.rawKey,
+      workspaceApiKeyId: wsKeyId,
+      serviceUserId,
+      lastActivity: null,
+      avatarIcon: params.avatarIcon ?? 'spark',
+      avatarBgColor: params.avatarBgColor ?? '#1a1a2e',
+      avatarLogoColor: params.avatarLogoColor ?? '#e94560',
+    });
 
-  const applicableFiles = preset.files.filter(
-    (f) => !f.models || f.models.includes(params.model),
-  );
+    // Step 4: Scaffold workspace folder
+    ensureAgentsDir();
+    const dir = agentDir(record.id as string);
+    fs.mkdirSync(dir, { recursive: true });
 
-  for (const fileDef of applicableFiles) {
-    const filePath = path.join(dir, fileDef.name);
-    if (fileDef.type === 'file') {
-      const content = renderTemplate(fileDef.template, {
-        agentName: params.name,
-        description: params.description || 'Agent workspace.',
-      });
-      fs.writeFileSync(filePath, content, 'utf-8');
-      continue;
+    const applicableFiles = preset.files.filter(
+      (f) => !f.models || f.models.includes(params.model),
+    );
+
+    for (const fileDef of applicableFiles) {
+      const filePath = path.join(dir, fileDef.name);
+      if (fileDef.type === 'file') {
+        const content = renderTemplate(fileDef.template, {
+          agentName: params.name,
+          description: params.description || 'Agent workspace.',
+        });
+        fs.writeFileSync(filePath, content, 'utf-8');
+        continue;
+      }
+
+      fs.symlinkSync(fileDef.target, filePath);
     }
 
-    fs.symlinkSync(fileDef.target, filePath);
+    return asAgent(record);
+  } catch (error) {
+    // Rollback: delete created resources on failure
+    if (wsKeyId) {
+      await deleteApiKey(wsKeyId).catch(() => {});
+    }
+    if (serviceUserId) {
+      store.delete('users', serviceUserId);
+    }
+    if (agentId) {
+      store.delete('agents', agentId);
+    }
+    const dir = agentDir(agentId);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    throw error;
   }
-
-  return asAgent(record);
 }
 
 export function listAgents(): AgentRecord[] {
@@ -478,7 +512,7 @@ export async function deleteAgent(id: string): Promise<boolean> {
 
   // Close related conversations and preserve agent name in metadata
   const agentConversations = store.find('conversations', (r: Record<string, unknown>) => {
-    if (r.channelType !== 'agent') return false;
+    if (r.channelType !== 'agent' && r.channelType !== 'other') return false;
     try {
       const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
       return meta?.agentId === id;
@@ -535,11 +569,12 @@ export async function ensureAgentServiceAccounts(): Promise<void> {
     const currentKeyId = rawAgent.workspaceApiKeyId as string | null | undefined;
     const currentKey = currentKeyId ? store.getById('apiKeys', currentKeyId) : null;
     const keyOwnerMatches = currentKey?.createdById === serviceUserId;
+    const currentKeyValue = (rawAgent.workspaceApiKey as string | null | undefined) ?? null;
 
     let nextKeyId = currentKeyId ?? null;
-    let nextKeyValue = (rawAgent.workspaceApiKey as string | null | undefined) ?? null;
+    let nextKeyValue = currentKeyValue;
 
-    if (!currentKey || !keyOwnerMatches || !nextKeyValue) {
+    if (!currentKey || !keyOwnerMatches || !currentKeyValue) {
       const wsKey = await createApiKey({
         name: `Agent: ${agentName}`,
         permissions: WORKSPACE_API_PERMISSIONS,
@@ -652,6 +687,13 @@ export function getAgentFilePath(agentId: string, filePath: string): string | nu
   if (!fs.existsSync(diskPath)) return null;
   const stats = fs.statSync(diskPath);
   if (!stats.isFile()) return null;
+  return diskPath;
+}
+
+export function getAgentEntryPath(agentId: string, entryPath: string): string | null {
+  const normalized = validateAgentPath(agentId, entryPath);
+  const diskPath = resolveAgentDiskPath(agentId, normalized);
+  if (!fs.existsSync(diskPath)) return null;
   return diskPath;
 }
 

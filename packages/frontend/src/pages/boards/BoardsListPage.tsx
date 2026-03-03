@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Plus, Kanban, Trash2 } from 'lucide-react';
+import { Plus, Kanban, Trash2, X, Star, FileText } from 'lucide-react';
 import { PageHeader } from '../../layout';
 import { Button } from '../../ui';
+import { Modal } from '../../ui/Modal';
 import { api, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { useConfirm } from '../../hooks/useConfirm';
@@ -12,7 +13,27 @@ import {
   setPreferredBoardId,
 } from '../../lib/navigation-preferences';
 import { useWorkspace } from '../../stores/WorkspaceContext';
+import { useFavorites } from '../../hooks/useFavorites';
 import styles from './BoardsListPage.module.css';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle';
+import { useDebounce } from '../../hooks/useDebounce';
+import { highlightMatch } from '../../components/SearchHighlight';
+
+type SortOption = 'name-asc' | 'name-desc' | 'created-desc' | 'created-asc';
+const SORT_STORAGE_KEY = 'boards-sort';
+
+interface BoardColumn {
+  id: string;
+  name: string;
+  color: string;
+  position: number;
+}
+
+interface BoardCardEntry {
+  id: string;
+  columnId: string;
+  card: { id: string } | null;
+}
 
 interface Board {
   id: string;
@@ -20,6 +41,11 @@ interface Board {
   description: string | null;
   isGeneral?: boolean;
   createdAt: string;
+}
+
+interface BoardDetail {
+  columns: BoardColumn[];
+  cards: BoardCardEntry[];
 }
 
 interface BoardsResponse {
@@ -34,27 +60,34 @@ function isGeneralBoard(board: Board): boolean {
 }
 
 export function BoardsListPage() {
+  useDocumentTitle('Boards');
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { activeWorkspaceId } = useWorkspace();
+  const { isFavorite, toggleFavorite } = useFavorites();
   const [boards, setBoards] = useState<Board[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<SortOption>(
+    () => (localStorage.getItem(SORT_STORAGE_KEY) as SortOption) || 'created-desc',
+  );
   const [showCreate, setShowCreate] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createDesc, setCreateDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [provisioningStarter, setProvisioningStarter] = useState(false);
   const [deletingBoardId, setDeletingBoardId] = useState<string | null>(null);
+  const [boardDetails, setBoardDetails] = useState<Record<string, BoardDetail>>({});
+  const debouncedSearch = useDebounce(search, 300);
 
   const fetchBoards = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const qp = new URLSearchParams();
-      if (search) qp.set('search', search);
+      if (debouncedSearch) qp.set('search', debouncedSearch);
       if (activeWorkspaceId) qp.set('workspaceId', activeWorkspaceId);
       const qs = qp.toString();
       const data = await api<BoardsResponse>(`/boards${qs ? `?${qs}` : ''}`);
@@ -66,11 +99,34 @@ export function BoardsListPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, activeWorkspaceId]);
+  }, [debouncedSearch, activeWorkspaceId]);
 
   useEffect(() => {
     fetchBoards();
   }, [fetchBoards]);
+
+  // Fetch column/card details for each board to show previews
+  useEffect(() => {
+    if (boards.length === 0) return;
+    let cancelled = false;
+    const fetchDetails = async () => {
+      const results = await Promise.allSettled(
+        boards.map((b) =>
+          api<BoardDetail>(`/boards/${b.id}`).then((d) => ({ id: b.id, detail: d })),
+        ),
+      );
+      if (cancelled) return;
+      const details: Record<string, BoardDetail> = {};
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          details[r.value.id] = r.value.detail;
+        }
+      }
+      setBoardDetails(details);
+    };
+    void fetchDetails();
+    return () => { cancelled = true; };
+  }, [boards]);
 
   const createDefaultBoard = useCallback(async () => {
     setProvisioningStarter(true);
@@ -101,9 +157,17 @@ export function BoardsListPage() {
     void createDefaultBoard();
   }, [activeWorkspaceId, search, loading, provisioningStarter, error, boards.length, createDefaultBoard]);
 
+  // Auto-open create dialog when navigated with ?action=create
+  useEffect(() => {
+    if (searchParams.get('action') === 'create' && !loading) {
+      setShowCreate(true);
+    }
+  }, [searchParams, loading]);
+
   useEffect(() => {
     const forceList = searchParams.get('list') === '1';
-    if (activeWorkspaceId || forceList || search || loading || provisioningStarter || error || boards.length === 0) return;
+    const forceCreate = searchParams.get('action') === 'create';
+    if (activeWorkspaceId || forceList || forceCreate || search || loading || provisioningStarter || error || boards.length === 0) return;
 
     const preferredBoardId = getPreferredBoardId();
     const targetBoardId =
@@ -133,6 +197,7 @@ export function BoardsListPage() {
       setShowCreate(false);
       setCreateName('');
       setCreateDesc('');
+      toast.success('Board created');
       fetchBoards();
     } catch (err) {
       if (err instanceof ApiError) toast.error(err.message);
@@ -140,6 +205,30 @@ export function BoardsListPage() {
       setCreating(false);
     }
   }
+
+  function handleSortChange(value: SortOption) {
+    setSort(value);
+    localStorage.setItem(SORT_STORAGE_KEY, value);
+  }
+
+  const sortedBoards = useMemo(() => {
+    const sorted = [...boards];
+    switch (sort) {
+      case 'name-asc':
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case 'name-desc':
+        sorted.sort((a, b) => b.name.localeCompare(a.name));
+        break;
+      case 'created-desc':
+        sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        break;
+      case 'created-asc':
+        sorted.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        break;
+    }
+    return sorted;
+  }, [boards, sort]);
 
   async function handleDeleteBoard(board: Board) {
     if (isGeneralBoard(board)) return;
@@ -189,17 +278,39 @@ export function BoardsListPage() {
       />
 
       <div className={styles.toolbar}>
-        <input
-          className={styles.searchInput}
-          placeholder="Search boards..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+        <div className={styles.searchWrapper}>
+          <input
+            className={styles.searchInput}
+            placeholder="Search boards..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search boards"
+          />
+          {search && (
+            <button className={styles.searchClear} onClick={() => setSearch('')} title="Clear search">
+              <X size={12} />
+            </button>
+          )}
+        </div>
+        <select
+          className={styles.sortSelect}
+          value={sort}
+          onChange={(e) => handleSortChange(e.target.value as SortOption)}
+        >
+          <option value="created-desc">Newest first</option>
+          <option value="created-asc">Oldest first</option>
+          <option value="name-asc">Name A–Z</option>
+          <option value="name-desc">Name Z–A</option>
+        </select>
       </div>
 
       {loading || provisioningStarter ? (
         <div className={styles.loadingState}>
-          {provisioningStarter ? 'Preparing your board...' : 'Loading boards...'}
+          <div className={styles.skeletonGrid}>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className={styles.skeletonCard} />
+            ))}
+          </div>
         </div>
       ) : error ? (
         <div className={styles.emptyState}>
@@ -210,30 +321,87 @@ export function BoardsListPage() {
           <p className={styles.emptyDescription}>{error}</p>
           <Button variant="ghost" onClick={fetchBoards}>Try again</Button>
         </div>
-      ) : boards.length === 0 && search ? (
+      ) : sortedBoards.length === 0 && search ? (
         <div className={styles.emptyState}>
           <div className={styles.emptyIcon}>
             <Kanban size={48} strokeWidth={1.2} />
           </div>
           <h3 className={styles.emptyTitle}>No boards found</h3>
           <p className={styles.emptyDescription}>
-            No boards match &ldquo;{search}&rdquo;. Try a different search term.
+            No boards match &ldquo;{search}&rdquo;.
           </p>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => { setCreateName(search); setShowCreate(true); }}
+          >
+            <Plus size={14} />
+            Create board &ldquo;{search}&rdquo;
+          </Button>
         </div>
       ) : (
         <div className={styles.grid}>
-          {boards.map((board) => (
+          {sortedBoards.map((board) => {
+            const detail = boardDetails[board.id];
+            const columns = detail?.columns?.slice().sort((a, b) => a.position - b.position) ?? [];
+            const cards = detail?.cards ?? [];
+            const totalCards = cards.length;
+            const columnCounts = columns.map((col) => ({
+              ...col,
+              count: cards.filter((c) => c.columnId === col.id).length,
+            }));
+            return (
             <article key={board.id} className={styles.boardCard}>
               <Link to={`/boards/${board.id}`} className={styles.boardLink}>
-                <div className={styles.boardName}>{board.name}</div>
+                <div className={styles.boardName}>{highlightMatch(board.name, debouncedSearch)}</div>
                 {board.description && (
-                  <div className={styles.boardDescription}>{board.description}</div>
+                  <div className={styles.boardDescription}>{highlightMatch(board.description, debouncedSearch)}</div>
+                )}
+                {columns.length > 0 && (
+                  <div className={styles.columnPreview}>
+                    <div className={styles.columnBars}>
+                      {columnCounts.map((col) => (
+                        <div
+                          key={col.id}
+                          className={styles.columnBar}
+                          style={{
+                            flex: totalCards > 0 ? Math.max(col.count, 0.15 * totalCards) : 1,
+                            backgroundColor: col.color,
+                          }}
+                          title={`${col.name}: ${col.count} card${col.count !== 1 ? 's' : ''}`}
+                        />
+                      ))}
+                    </div>
+                    <div className={styles.columnLabels}>
+                      {columnCounts.map((col) => (
+                        <span key={col.id} className={styles.columnLabel} title={col.name}>
+                          <span className={styles.columnDot} style={{ backgroundColor: col.color }} />
+                          {col.name}
+                          <span className={styles.columnCount}>{col.count}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 )}
                 <div className={styles.boardMeta}>
-                  Created {new Date(board.createdAt).toLocaleDateString()}
+                  {totalCards > 0 && (
+                    <span className={styles.cardCountMeta}>
+                      <FileText size={12} />
+                      {totalCards} {totalCards === 1 ? 'card' : 'cards'}
+                    </span>
+                  )}
+                  <span>Created {new Date(board.createdAt).toLocaleDateString()}</span>
                 </div>
               </Link>
               <div className={styles.cardActions}>
+                <button
+                  type="button"
+                  className={`${styles.favoriteButton} ${isFavorite(board.id) ? styles.favoriteButtonActive : ''}`}
+                  onClick={() => toggleFavorite({ id: board.id, type: 'board', name: board.name })}
+                  aria-label={isFavorite(board.id) ? 'Remove from favorites' : 'Add to favorites'}
+                >
+                  <Star size={14} />
+                </button>
                 {isGeneralBoard(board) ? (
                   <span className={styles.generalBadge}>General</span>
                 ) : (
@@ -250,13 +418,14 @@ export function BoardsListPage() {
                 )}
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {showCreate && (
-        <div className={styles.overlay} onClick={() => setShowCreate(false)}>
-          <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <Modal onClose={() => setShowCreate(false)} size="sm" ariaLabel="New Board">
+          <div className={styles.modal}>
             <div className={styles.modalTitle}>New Board</div>
             <div className={styles.field}>
               <label className={styles.label}>Name</label>
@@ -285,7 +454,7 @@ export function BoardsListPage() {
               </Button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

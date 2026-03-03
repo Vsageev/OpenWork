@@ -23,36 +23,38 @@ export function FilePreviewModal({ fileName, downloadUrl, onClose, onDownload }:
   const isHtml = HTML_EXTS.has(getFileExt(fileName));
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     const token = localStorage.getItem('ws_access_token');
 
     (async () => {
       try {
         const res = await fetch(downloadUrl, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error('Failed to fetch');
-        if (cancelled) return;
 
         if (isImagePreviewable(fileName)) {
           const blob = await res.blob();
-          if (!cancelled) setBlobUrl(URL.createObjectURL(blob));
+          setBlobUrl(URL.createObjectURL(blob));
         } else if (isHtml) {
           const text = await res.text();
-          if (!cancelled) setBlobUrl(URL.createObjectURL(new Blob([text], { type: 'text/html' })));
+          setBlobUrl(URL.createObjectURL(new Blob([text], { type: 'text/html' })));
         } else {
           const text = await res.text();
-          if (!cancelled) setTextContent(text);
+          setTextContent(text);
         }
-      } catch {
-        if (!cancelled) setTextContent('Failed to load file preview.');
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setTextContent('Failed to load file preview.');
+        }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     })();
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [downloadUrl, fileName]);
 

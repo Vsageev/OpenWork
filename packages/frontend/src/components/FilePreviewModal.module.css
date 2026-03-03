@@ -122,5 +122,5 @@
   width: 100%;
   height: 65vh;
   border: none;
-  background: #fff;
+  background: var(--color-card);
 }

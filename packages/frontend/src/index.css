@@ -21,6 +21,7 @@
   --color-text-inverse: #ffffff;
 
   /* Accent Colors */
+  --color-primary: #3b82f6;
   --color-primary-green: #43e660;
   --color-primary-brand: #2d2d2d;
   --color-link: #3b82f6;
@@ -63,8 +64,46 @@
 
   /* Layout */
   --sidebar-width: 240px;
+  --sidebar-collapsed-width: 64px;
   --header-height: 56px;
   --mobile-header-height: 56px;
+}
+
+/* ── Dark Theme ── */
+[data-theme='dark'] {
+  /* Base Colors */
+  --color-bg: #111114;
+  --color-surface: #1a1a1f;
+  --color-card: #1e1e24;
+  --color-border: #2e2e36;
+  --color-border-subtle: #252530;
+
+  /* Text Colors */
+  --color-text: #e8e8ed;
+  --color-text-secondary: #9a9aa8;
+  --color-text-tertiary: #6b6b7a;
+  --color-text-inverse: #111114;
+
+  /* Accent Colors */
+  --color-primary: #60a5fa;
+  --color-primary-green: #43e660;
+  --color-primary-brand: #a0a0b0;
+  --color-link: #60a5fa;
+  --color-warning-amber: #fbbf24;
+  --color-info-purple: #a78bfa;
+
+  /* Semantic Colors */
+  --color-success: #34d399;
+  --color-error: #f87171;
+  --color-warning: #fbbf24;
+  --color-info: #60a5fa;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  color-scheme: dark;
 }
 
 body {

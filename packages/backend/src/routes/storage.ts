@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
@@ -9,8 +10,10 @@ import {
   createFolder,
   createReference,
   uploadFile,
+  renameItem,
   deleteItem,
   getFilePath,
+  getDiskPath,
   getStats,
   browseFileSystem,
 } from '../services/storage.js';
@@ -214,6 +217,75 @@ export async function storageRoutes(app: FastifyInstance) {
           .header('Content-Type', contentType)
           .header('Content-Disposition', `attachment; filename="${fileName}"`)
           .send(fs.createReadStream(diskPath));
+      } catch (err) {
+        return reply.badRequest((err as Error).message);
+      }
+    },
+  );
+
+  // Rename file or folder
+  typedApp.patch(
+    '/api/storage/rename',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Storage'],
+        summary: 'Rename a file or folder',
+        body: z.object({
+          path: z.string().min(1),
+          newName: z.string().min(1).max(255),
+        }),
+      },
+    },
+    async (request, reply) => {
+      try {
+        const entry = renameItem(request.body.path, request.body.newName);
+        return reply.send(entry);
+      } catch (err) {
+        return reply.badRequest((err as Error).message);
+      }
+    },
+  );
+
+  // Reveal file/folder in host OS file manager
+  typedApp.post(
+    '/api/storage/reveal',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Storage'],
+        summary: 'Open a file or folder location in the OS file manager',
+        body: z.object({
+          path: z.string().min(1),
+        }),
+      },
+    },
+    async (request, reply) => {
+      try {
+        const diskPath = getDiskPath(request.body.path);
+        if (!diskPath) {
+          return reply.notFound('Path not found');
+        }
+
+        const platform = process.platform;
+        if (platform === 'darwin') {
+          const stat = fs.statSync(diskPath);
+          // -R selects the item in Finder; for folders open the folder itself
+          if (stat.isDirectory()) {
+            spawn('open', [diskPath], { detached: true, stdio: 'ignore' }).unref();
+          } else {
+            spawn('open', ['-R', diskPath], { detached: true, stdio: 'ignore' }).unref();
+          }
+        } else if (platform === 'win32') {
+          spawn('explorer', [`/select,${diskPath}`], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+          // Linux: open the containing directory
+          const stat = fs.statSync(diskPath);
+          const dir = stat.isDirectory() ? diskPath : path.dirname(diskPath);
+          spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+        }
+
+        return reply.status(204).send();
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }

@@ -283,6 +283,93 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({ message: 'Logged out successfully' });
   });
 
+  // Change password
+  const changePasswordBody = z.object({
+    currentPassword: z.string().min(1),
+    newPassword: z.string().min(8).max(128),
+  });
+
+  typedApp.patch('/api/auth/password', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Change password', body: changePasswordBody } }, async (request, reply) => {
+    const { sub } = request.user;
+    const { currentPassword, newPassword } = request.body;
+
+    const user = store.getById('users', sub);
+    if (!user) {
+      throw ApiError.unauthorized('user_not_found', 'User not found');
+    }
+
+    const valid = await verifyPassword(currentPassword, user.passwordHash as string);
+    if (!valid) {
+      throw ApiError.unauthorized('invalid_password', 'Current password is incorrect');
+    }
+
+    const passwordCheck = validatePasswordStrength(newPassword);
+    if (!passwordCheck.valid) {
+      throw ApiError.badRequest('weak_password', passwordCheck.errors.join('. '), 'Password must be at least 8 characters with uppercase, lowercase, number, and special character');
+    }
+
+    const newHash = await hashPassword(newPassword);
+    store.update('users', sub, { passwordHash: newHash });
+
+    await createAuditLog({
+      userId: sub,
+      action: 'password_changed',
+      entityType: 'user',
+      entityId: sub,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return reply.send({ message: 'Password changed successfully' });
+  });
+
+  // Update profile
+  const updateProfileBody = z.object({
+    firstName: z.string().min(1).max(100).optional(),
+    lastName: z.string().min(1).max(100).optional(),
+  });
+
+  typedApp.patch('/api/auth/profile', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Update profile', body: updateProfileBody } }, async (request, reply) => {
+    const { sub } = request.user;
+    const updates: Record<string, unknown> = {};
+
+    if (request.body.firstName !== undefined) updates.firstName = request.body.firstName;
+    if (request.body.lastName !== undefined) updates.lastName = request.body.lastName;
+
+    if (Object.keys(updates).length === 0) {
+      throw ApiError.badRequest('no_updates', 'No fields to update');
+    }
+
+    const user = store.getById('users', sub);
+    if (!user) {
+      throw ApiError.unauthorized('user_not_found', 'User not found');
+    }
+
+    store.update('users', sub, updates);
+    const updated = store.getById('users', sub);
+
+    await createAuditLog({
+      userId: sub,
+      action: 'profile_updated',
+      entityType: 'user',
+      entityId: sub,
+      changes: updates,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return reply.send({
+      user: {
+        id: updated!.id,
+        email: updated!.email,
+        firstName: updated!.firstName,
+        lastName: updated!.lastName,
+        type: (updated!.type as string | undefined) ?? 'human',
+        createdAt: updated!.createdAt,
+      },
+    });
+  });
+
   // --- TOTP 2FA Management (requires auth) ---
 
   // Begin TOTP setup - generates secret and returns QR URI

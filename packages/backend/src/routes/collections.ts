@@ -14,6 +14,22 @@ import {
 } from '../services/collections.js';
 import { getWorkspaceById } from '../services/workspaces.js';
 import { listCards } from '../services/cards.js';
+import { runCollectionAgentBatch } from '../services/collection-batch.js';
+
+const agentBatchCardFiltersSchema = z.object({
+  search: z.string().optional(),
+  assigneeId: z.string().optional(),
+  completed: z.boolean().optional(),
+  priority: z.enum(['high', 'medium', 'low']).optional(),
+  tagId: z.string().optional(),
+});
+
+const agentBatchConfigSchema = z.object({
+  agentId: z.string().nullable().optional(),
+  prompt: z.string().nullable().optional(),
+  maxParallel: z.number().int().min(1).max(20).optional(),
+  cardFilters: agentBatchCardFiltersSchema.optional(),
+});
 
 const createCollectionBody = z.object({
   name: z.string().min(1).max(255),
@@ -23,6 +39,7 @@ const createCollectionBody = z.object({
 const updateCollectionBody = z.object({
   name: z.string().min(1).max(255).optional(),
   description: z.string().nullable().optional(),
+  agentBatchConfig: agentBatchConfigSchema.nullable().optional(),
 });
 
 export async function collectionRoutes(app: FastifyInstance) {
@@ -41,6 +58,7 @@ export async function collectionRoutes(app: FastifyInstance) {
           workspaceId: z.uuid().optional(),
           limit: z.coerce.number().optional(),
           offset: z.coerce.number().optional(),
+          withCardCounts: z.coerce.boolean().optional(),
         }),
       },
     },
@@ -58,6 +76,7 @@ export async function collectionRoutes(app: FastifyInstance) {
         search: request.query.search,
         limit: request.query.limit,
         offset: request.query.offset,
+        withCardCounts: request.query.withCardCounts,
       });
 
       return reply.send({
@@ -173,6 +192,43 @@ export async function collectionRoutes(app: FastifyInstance) {
       }
 
       return reply.send(updated);
+    },
+  );
+
+  // Trigger agent batch run on collection cards
+  typedApp.post(
+    '/api/collections/:id/agent-batch',
+    {
+      onRequest: [app.authenticate, requirePermission('cards:read')],
+      schema: {
+        tags: ['Collections'],
+        summary: 'Run an agent on filtered cards in a collection',
+        params: z.object({ id: z.uuid() }),
+        body: z.object({
+          agentId: z.string(),
+          prompt: z.string().min(1).max(10000),
+          maxParallel: z.number().int().min(1).max(20).optional(),
+          cardFilters: agentBatchCardFiltersSchema.optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const collection = await getCollectionById(request.params.id);
+      if (!collection) {
+        return reply.notFound('Collection not found');
+      }
+
+      const { agentId, prompt, maxParallel = 3, cardFilters = {} } = request.body;
+
+      const result = await runCollectionAgentBatch({
+        collectionId: request.params.id,
+        agentId,
+        prompt,
+        maxParallel,
+        cardFilters,
+      });
+
+      return reply.status(202).send(result);
     },
   );
 

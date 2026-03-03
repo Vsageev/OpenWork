@@ -139,6 +139,7 @@ export interface CreateColumnData {
   color?: string;
   position: number;
   assignAgentId?: string | null;
+  wipLimit?: number | null;
 }
 
 export interface UpdateColumnData {
@@ -146,6 +147,7 @@ export interface UpdateColumnData {
   color?: string;
   position?: number;
   assignAgentId?: string | null;
+  wipLimit?: number | null;
 }
 
 export async function listBoards(query: BoardListQuery) {
@@ -398,6 +400,7 @@ export async function createColumn(boardId: string, data: CreateColumnData) {
     color: data.color ?? '#6B7280',
     position: data.position,
     assignAgentId: data.assignAgentId ?? null,
+    wipLimit: data.wipLimit ?? null,
   });
 }
 

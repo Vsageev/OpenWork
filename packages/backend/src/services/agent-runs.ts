@@ -85,19 +85,39 @@ export function getAgentRun(runId: string) {
   return store.getById('agent_runs', runId) ?? null;
 }
 
+export function killAgentRun(runId: string): { ok: boolean; error?: string } {
+  const run = store.getById('agent_runs', runId);
+  if (!run) return { ok: false, error: 'Run not found' };
+  if (run.status !== 'running') return { ok: false, error: 'Run is not active' };
+
+  const pid = run.pid as number | null;
+  if (pid) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Process may have already exited
+    }
+  }
+
+  completeAgentRun(runId, 'Killed by user');
+  return { ok: true };
+}
+
 interface ListAgentRunsParams {
   status?: RunStatus;
   agentId?: string;
+  triggerType?: TriggerType;
   limit?: number;
   offset?: number;
 }
 
 export function listAgentRuns(params: ListAgentRunsParams = {}) {
-  const { status, agentId, limit = 50, offset = 0 } = params;
+  const { status, agentId, triggerType, limit = 50, offset = 0 } = params;
 
   const all = store.find('agent_runs', (r: Record<string, unknown>) => {
     if (status && r.status !== status) return false;
     if (agentId && r.agentId !== agentId) return false;
+    if (triggerType && r.triggerType !== triggerType) return false;
     return true;
   });
 
@@ -192,6 +212,46 @@ export function reconcileRunsOnStartup(
   }
 
   return stale;
+}
+
+/**
+ * Delete completed/error run records older than the given number of days.
+ * Also removes their log directories from disk.
+ * Running runs are never deleted.
+ * Returns the number of records deleted.
+ */
+export function cleanupOldRunRecords(olderThanDays: number): number {
+  const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+
+  const toDelete = store.find('agent_runs', (r: Record<string, unknown>) => {
+    if (r.status === 'running') return false;
+    const finished = r.finishedAt ?? r.startedAt;
+    return new Date(finished as string).getTime() < cutoff;
+  });
+
+  let deleted = 0;
+  for (const run of toDelete) {
+    const runId = run.id as string;
+
+    // Remove log directory if it exists
+    const logDir = path.join(RUNS_DIR, runId);
+    if (fs.existsSync(logDir)) {
+      try {
+        fs.rmSync(logDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort
+      }
+    }
+
+    store.delete('agent_runs', runId);
+    deleted++;
+  }
+
+  if (deleted > 0) {
+    console.log(`[agent-runs] Deleted ${deleted} old run record${deleted === 1 ? '' : 's'} (older than ${olderThanDays}d)`);
+  }
+
+  return deleted;
 }
 
 /**

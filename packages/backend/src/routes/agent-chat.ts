@@ -8,6 +8,7 @@ import { store } from '../db/index.js';
 import { getAgent } from '../services/agents.js';
 import { uploadFile } from '../services/storage.js';
 import { validateUploadedFile } from '../utils/file-validation.js';
+import { createAgentRateLimiter } from '../lib/api-helpers.js';
 import {
   listAgentConversations,
   createAgentConversation,
@@ -21,6 +22,9 @@ import {
   isAgentBusy,
   subscribeToRunOutput,
 } from '../services/agent-chat.js';
+
+// Rate limiter for agent prompt execution — shared across all requests in this process
+const promptRateLimiter = createAgentRateLimiter();
 
 function attachSocketErrorHandler(request: FastifyRequest, reply: FastifyReply) {
   reply.raw.socket?.on('error', (err: NodeJS.ErrnoException) => {
@@ -274,6 +278,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const agent = getAgent(request.params.id);
       if (!agent) return reply.notFound('Agent not found');
 
+      // Rate limit per user per agent to prevent prompt spam
+      const userId = (request.user as { sub: string }).sub;
+      const rateLimitKey = `${userId}:${request.params.id}`;
+      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
+        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
+      }
+
       if (isAgentBusy(request.params.id, request.body.conversationId)) {
         return reply.status(409).send({
           statusCode: 409,
@@ -327,6 +338,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const agent = getAgent(request.params.id);
       if (!agent) return reply.notFound('Agent not found');
+
+      // Rate limit per user per agent
+      const userId = (request.user as { sub: string }).sub;
+      const rateLimitKey = `${userId}:${request.params.id}`;
+      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
+        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
+      }
 
       if (isAgentBusy(request.params.id, request.body.conversationId)) {
         return reply.status(409).send({

@@ -5,6 +5,11 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
+  TRUST_PROXY: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
+  BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
 
   DATA_DIR: z.string().default('./data'),
 

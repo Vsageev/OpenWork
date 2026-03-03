@@ -52,3 +52,15 @@ export interface AuthTokens {
 export interface AuthResponse extends AuthTokens {
   user: AuthUser;
 }
+
+// Re-export utilities
+export {
+  formatBytes,
+  formatDate,
+  formatTimeAgo,
+  createListResponse,
+  safeJsonParse,
+  debounce,
+} from './utils.js';
+
+export type { ListResponse } from './utils.js';

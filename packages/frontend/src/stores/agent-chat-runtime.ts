@@ -32,6 +32,7 @@ interface StartAgentChatStreamResult {
 }
 
 const STREAM_RETENTION_MS = 2 * 60 * 1000;
+const MAX_STREAMS = 100;
 const STREAM_STORAGE_KEY = 'agent-chat-streams:v1';
 const UNREAD_STORAGE_KEY = 'agent-chat-unread-conversation-ids:v1';
 
@@ -161,8 +162,28 @@ function persistUnreadConversationIds(ids: string[]) {
   }
 }
 
+function evictOldestStreams() {
+  if (streamsById.size <= MAX_STREAMS) return;
+
+  // Sort all entries oldest-first; prefer evicting completed/error streams first
+  const entries = Array.from(streamsById.values()).sort((a, b) => {
+    const aFinished = a.status !== 'streaming' ? 0 : 1;
+    const bFinished = b.status !== 'streaming' ? 0 : 1;
+    if (aFinished !== bFinished) return aFinished - bFinished;
+    return a.updatedAt - b.updatedAt;
+  });
+
+  const toRemove = entries.slice(0, streamsById.size - MAX_STREAMS);
+  for (const s of toRemove) {
+    const timer = cleanupTimers.get(s.id);
+    if (timer) { clearTimeout(timer); cleanupTimers.delete(s.id); }
+    streamsById.delete(s.id);
+  }
+}
+
 function commitStream(next: AgentChatStreamState) {
   streamsById.set(next.id, next);
+  evictOldestStreams();
   updateSnapshot();
   notify();
 }

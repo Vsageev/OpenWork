@@ -14,6 +14,7 @@ import {
   removeCardLink,
   listCardComments,
   createCardComment,
+  updateCardComment,
   deleteCardComment,
 } from '../services/cards.js';
 
@@ -50,6 +51,12 @@ export async function cardRoutes(app: FastifyInstance) {
           collectionId: z.uuid().optional(),
           assigneeId: z.uuid().optional(),
           search: z.string().optional(),
+          completed: z.coerce.boolean().optional(),
+          priority: z.enum(['high', 'medium', 'low']).optional(),
+          dueDateBefore: z.string().optional(),
+          dueDateAfter: z.string().optional(),
+          tagId: z.uuid().optional(),
+          countOnly: z.coerce.boolean().optional(),
           limit: z.coerce.number().optional(),
           offset: z.coerce.number().optional(),
         }),
@@ -60,9 +67,18 @@ export async function cardRoutes(app: FastifyInstance) {
         collectionId: request.query.collectionId,
         assigneeId: request.query.assigneeId,
         search: request.query.search,
-        limit: request.query.limit,
-        offset: request.query.offset,
+        completed: request.query.completed,
+        priority: request.query.priority,
+        dueDateBefore: request.query.dueDateBefore,
+        dueDateAfter: request.query.dueDateAfter,
+        tagId: request.query.tagId,
+        limit: request.query.countOnly ? 0 : request.query.limit,
+        offset: request.query.countOnly ? 0 : request.query.offset,
       });
+
+      if (request.query.countOnly) {
+        return reply.send({ total });
+      }
 
       return reply.send({
         total,
@@ -322,6 +338,33 @@ export async function cardRoutes(app: FastifyInstance) {
       );
 
       return reply.status(201).send(comment);
+    },
+  );
+
+  // Update card comment
+  typedApp.patch(
+    '/api/cards/:id/comments/:commentId',
+    {
+      onRequest: [app.authenticate, requirePermission('cards:update')],
+      schema: {
+        tags: ['Cards'],
+        summary: 'Update a comment on a card',
+        params: z.object({ id: z.uuid(), commentId: z.uuid() }),
+        body: z.object({ content: z.string().min(1).max(5000) }),
+      },
+    },
+    async (request, reply) => {
+      const updated = await updateCardComment(request.params.commentId, request.body.content, {
+        userId: request.user.sub,
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      });
+
+      if (!updated) {
+        return reply.notFound('Comment not found');
+      }
+
+      return reply.send(updated);
     },
   );
 

@@ -43,49 +43,6 @@
   color: var(--color-text-tertiary);
 }
 
-/* Alerts */
-.alert {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  border-radius: var(--radius-md);
-  color: var(--color-error);
-  font-size: 14px;
-  margin-bottom: var(--space-4);
-  animation: slideIn 0.3s ease-out;
-}
-
-.success {
-  position: fixed;
-  bottom: var(--space-5);
-  right: var(--space-5);
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-card);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  border-radius: var(--radius-md);
-  color: var(--color-success);
-  font-size: 14px;
-  box-shadow: var(--shadow-lg);
-  animation: toastIn 0.3s ease-out;
-}
-
-@keyframes toastIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 /* Loading */
 .loadingState {
   display: flex;
@@ -118,6 +75,78 @@
   background: rgba(59, 130, 246, 0.05);
 }
 
+/* Search filter */
+.searchRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.searchInputWrapper {
+  position: relative;
+  flex: 1;
+  max-width: 360px;
+}
+
+.searchIcon {
+  position: absolute;
+  left: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  padding: var(--space-2) var(--space-3) var(--space-2) calc(var(--space-3) + 18px);
+  font-size: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-text);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.searchInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.searchInput:focus {
+  border-color: var(--color-primary-brand);
+}
+
+.searchClear {
+  position: absolute;
+  right: var(--space-2);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.searchClear:hover {
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.searchCount {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
 /* File list */
 .fileList {
   border: 1px solid var(--color-border);
@@ -128,7 +157,7 @@
 
 .fileHeader {
   display: grid;
-  grid-template-columns: 1fr 100px 180px auto;
+  grid-template-columns: 32px 1fr 100px 180px auto;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   background: var(--color-surface);
@@ -145,9 +174,95 @@
   gap: var(--space-1);
 }
 
+.sortHeader {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.sortHeader:hover {
+  color: var(--color-text);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.colCheck {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  flex-shrink: 0;
+}
+
+.checkBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  transition: color var(--transition-fast);
+}
+
+.checkBtn:hover {
+  color: var(--color-primary-brand);
+}
+
+/* Bulk actions bar */
+.bulkBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: rgba(59, 130, 246, 0.06);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.15);
+}
+
+.bulkCount {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary-brand);
+  margin-right: var(--space-2);
+}
+
+.bulkClear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  margin-left: auto;
+  padding: 0;
+  transition: all var(--transition-fast);
+}
+
+.bulkClear:hover {
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
 .fileRow {
   display: grid;
-  grid-template-columns: 1fr 100px 180px 120px;
+  grid-template-columns: 32px 1fr 100px 180px 150px;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   align-items: center;
@@ -161,6 +276,14 @@
 
 .fileRow:hover {
   background: var(--color-surface);
+}
+
+.fileRowSelected {
+  background: rgba(59, 130, 246, 0.04);
+}
+
+.fileRowSelected:hover {
+  background: rgba(59, 130, 246, 0.08);
 }
 
 .colName {
@@ -237,6 +360,44 @@ button.colName:hover .fileName {
   border-radius: 2px;
 }
 
+/* Rename inline */
+.renameInput {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 14px;
+  border: 1px solid var(--color-primary-brand);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  color: var(--color-text);
+  outline: none;
+}
+
+.renameConfirmBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--color-success);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.renameConfirmBtn:hover {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.renameConfirmBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Icon buttons */
 .iconBtn {
   display: flex;
@@ -289,6 +450,40 @@ button.colName:hover .fileName {
   flex-shrink: 0;
 }
 
+/* Upload progress */
+.uploadProgress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-4);
+  animation: slideIn 0.3s ease-out;
+}
+
+.uploadProgressBar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.uploadProgressFill {
+  height: 100%;
+  background: var(--color-primary-brand);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.uploadProgressText {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
 /* Drop target wrapper — sits around rows, below header */
 .dropTarget {
   position: relative;
@@ -300,4 +495,50 @@ button.colName:hover .fileName {
   background: rgba(59, 130, 246, 0.05);
 }
 
+/* Keyboard shortcut hints */
+.shortcutHints {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 6px var(--space-4);
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  flex-shrink: 0;
+}
 
+.shortcutHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.shortcutHint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: var(--color-card);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  line-height: 1;
+}
+
+@media (max-width: 640px) {
+  .fileHeader,
+  .fileRow {
+    grid-template-columns: 28px 1fr 80px auto;
+  }
+
+  .colDate {
+    display: none;
+  }
+}

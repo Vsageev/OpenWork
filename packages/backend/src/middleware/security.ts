@@ -4,10 +4,8 @@ import { env } from '../config/env.js';
 /**
  * OWASP-aligned security hardening middleware.
  * Registers global hooks and decorators for:
- * - JSON body size limits
  * - Cache-control on sensitive responses
  * - JWT secret validation in production
- * - Request ID tracing
  */
 export function registerSecurityMiddleware(app: FastifyInstance) {
   // ── Warn if using default JWT secret ─────────────────────────────────
@@ -20,22 +18,6 @@ export function registerSecurityMiddleware(app: FastifyInstance) {
     );
     process.exit(1);
   }
-
-  // ── Limit JSON payload body size (1 MB) ──────────────────────────────
-  app.addHook('onRequest', async (request, reply) => {
-    const contentLength = request.headers['content-length'];
-    if (contentLength && parseInt(contentLength, 10) > 1_048_576) {
-      // Skip for multipart (file uploads have their own limit)
-      const contentType = request.headers['content-type'] || '';
-      if (!contentType.includes('multipart')) {
-        return reply.status(413).send({
-          statusCode: 413,
-          error: 'Payload Too Large',
-          message: 'Request body exceeds the 1 MB limit',
-        });
-      }
-    }
-  });
 
   // ── Add security-relevant response headers ───────────────────────────
   app.addHook('onSend', async (_request, reply) => {

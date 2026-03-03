@@ -1,31 +1,53 @@
+// Re-export shared utilities for frontend convenience
+export { formatBytes as formatFileSize, formatDate as formatFileDate } from 'shared';
+
+// Frontend-specific file utilities
+
+/**
+ * Strip common Markdown syntax for plain-text previews.
+ * Removes bold, italic, headers, code, links, images, blockquotes, and lists
+ * so board card descriptions render as clean text rather than raw symbols.
+ */
+export function stripMarkdown(text: string): string {
+  return text
+    // Images: ![alt](url)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Links: [text](url)
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    // Headers: # ## ###
+    .replace(/^#{1,6}\s+/gm, '')
+    // Bold + italic: ***text*** or ___text___
+    .replace(/\*{3}(.+?)\*{3}/g, '$1')
+    .replace(/_{3}(.+?)_{3}/g, '$1')
+    // Bold: **text** or __text__
+    .replace(/\*{2}(.+?)\*{2}/g, '$1')
+    .replace(/_{2}(.+?)_{2}/g, '$1')
+    // Italic: *text* or _text_
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    // Inline code: `code`
+    .replace(/`([^`]+)`/g, '$1')
+    // Fenced code blocks
+    .replace(/```[\s\S]*?```/g, '')
+    // Blockquotes
+    .replace(/^>\s+/gm, '')
+    // Unordered list markers
+    .replace(/^[-*+]\s+/gm, '')
+    // Ordered list markers
+    .replace(/^\d+\.\s+/gm, '')
+    // Horizontal rules
+    .replace(/^[-*_]{3,}$/gm, '')
+    // Collapse multiple spaces
+    .replace(/  +/g, ' ')
+    .trim();
+}
+
 export interface FileEntry {
   name: string;
   path: string;
   type: 'file' | 'folder';
   size: number;
   createdAt: string;
-}
-
-export function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '—';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let i = 0;
-  let size = bytes;
-  while (size >= 1024 && i < units.length - 1) {
-    size /= 1024;
-    i++;
-  }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-export function formatFileDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 export function getFileExt(name: string): string {

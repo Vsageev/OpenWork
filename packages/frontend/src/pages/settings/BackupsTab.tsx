@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Plus, Upload, Download, RotateCcw, Trash2 } from 'lucide-react';
 import { Button, Card, Tooltip } from '../../ui';
 import { api, getAccessToken, ApiError } from '../../lib/api';
+import { formatBytes, formatDate } from 'shared';
 import styles from './SettingsPage.module.css';
 
 interface BackupEntry {
@@ -13,16 +14,6 @@ interface BackupEntry {
 interface BackupsResponse {
   count: number;
   backups: BackupEntry[];
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString();
 }
 
 export function BackupsTab() {
