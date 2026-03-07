@@ -2,15 +2,16 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Trash2, Plus, X, Link2, Columns3, GripVertical, FolderOpen,
-  FileText, User, Send, Check, Pencil, Loader2, ChevronDown, Copy, CloudOff, Circle, CircleCheck, Star, ListChecks, History,
-  Bold, Italic, Code, List, Heading2, ChevronLeft, ChevronRight, Keyboard,
+  Trash2, Plus, X, Link2, Columns3, FolderOpen,
+  FileText, User, Send, Check, Pencil, Loader2, ChevronDown, Copy, CloudOff, Star, History,
+  Bold, Italic, Code, List, Heading2, ChevronLeft, ChevronRight, Keyboard, Image,
 } from 'lucide-react';
 import { Breadcrumb, Button, MarkdownContent, PageLoader, Tooltip } from '../../ui';
 import type { BreadcrumbItem } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
-import { api, ApiError } from '../../lib/api';
+import { api, apiUpload, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
+import { getImagesFromClipboardData, getImagesFromFileList, prepareImageForUpload } from '../../lib/image-upload';
 import { useConfirm } from '../../hooks/useConfirm';
 import { addRecentVisit } from '../../lib/recent-visits';
 import { useFavorites } from '../../hooks/useFavorites';
@@ -44,11 +45,20 @@ interface CardDetail {
   updatedAt: string;
 }
 
+interface CardCommentAttachment {
+  type: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storagePath: string;
+}
+
 interface CardComment {
   id: string;
   cardId: string;
   authorId: string;
   content: string;
+  attachments?: CardCommentAttachment[] | null;
   author: {
     id: string;
     firstName: string;
@@ -60,6 +70,16 @@ interface CardComment {
   } | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface DescriptionImageUploadResponse {
+  images: Array<{
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    storagePath: string;
+    markdown: string;
+  }>;
 }
 
 interface BoardColumnInfo {
@@ -90,6 +110,36 @@ interface AgentEntry {
 
 function ini(f: string, l: string) {
   return `${f[0] ?? ''}${l[0] ?? ''}`.toUpperCase();
+}
+
+/* ── CommentImage component ──────────────────────────── */
+
+function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    const token = localStorage.getItem('ws_access_token');
+    fetch(`/api/storage/download?path=${encodeURIComponent(storagePath)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to load image');
+        return res.blob();
+      })
+      .then((blob) => {
+        revoke = URL.createObjectURL(blob);
+        setSrc(revoke);
+      })
+      .catch(() => setSrc(null));
+
+    return () => {
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [storagePath]);
+
+  if (!src) return <div className={styles.commentImagePlaceholder}>Loading image…</div>;
+  return <img className={styles.commentImage} src={src} alt={alt} />;
 }
 
 /* ── Assignee picker (portal) ─────────────────────────── */
@@ -198,8 +248,6 @@ function formatAuditEntry(entry: AuditLogEntry): string {
   if (action === 'update' && changes) {
     // customFields is a nested object — inspect its keys for meaningful changes
     if (changes.customFields && typeof changes.customFields === 'object') {
-      const cf = changes.customFields as Record<string, unknown>;
-      if ('checklist' in cf) return 'Checklist updated';
       return 'Fields updated';
     }
     const keys = Object.keys(changes).filter((k) => k !== 'updatedAt');
@@ -238,6 +286,10 @@ export function CardDetailPage() {
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editCommentDraft, setEditCommentDraft] = useState('');
   const [savingEditComment, setSavingEditComment] = useState(false);
+  const [stagedImages, setStagedImages] = useState<{ file: File; previewUrl: string }[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  const commentFileInputRef = useRef<HTMLInputElement>(null);
+  const MAX_COMMENT_IMAGES = 10;
 
   // Activity view
   const [activityView, setActivityView] = useState<'comments' | 'history'>('comments');
@@ -251,9 +303,11 @@ export function CardDetailPage() {
   const [draftDesc, setDraftDesc] = useState('');
   const [descPreview, setDescPreview] = useState(false);
   const [descSaveStatus, setDescSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [uploadingDescImages, setUploadingDescImages] = useState(false);
   const descAutosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const descTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const descFileInputRef = useRef<HTMLInputElement>(null);
   const descSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   // Tag management
@@ -474,6 +528,63 @@ export function CardDetailPage() {
     setDescSaveStatus('idle');
   }
 
+  function updateDescriptionDraft(nextText: string, selection?: { start: number; end: number }) {
+    setDraftDesc(nextText);
+    scheduleDescAutosave(nextText);
+    requestAnimationFrame(() => {
+      const ta = descTextareaRef.current;
+      if (!ta) return;
+      ta.style.height = 'auto';
+      ta.style.height = `${Math.max(220, ta.scrollHeight)}px`;
+      if (selection) {
+        ta.focus();
+        ta.setSelectionRange(selection.start, selection.end);
+        descSelectionRef.current = selection;
+      }
+    });
+  }
+
+  function insertDescriptionText(textToInsert: string) {
+    const start = descSelectionRef.current.start;
+    const end = descSelectionRef.current.end;
+    const currentText = descTextareaRef.current?.value ?? draftDesc;
+    const nextText = `${currentText.slice(0, start)}${textToInsert}${currentText.slice(end)}`;
+    const cursor = start + textToInsert.length;
+    updateDescriptionDraft(nextText, { start: cursor, end: cursor });
+  }
+
+  async function uploadDescriptionImages(files: File[]) {
+    if (!card || files.length === 0) return;
+    setUploadingDescImages(true);
+    try {
+      const formData = new FormData();
+      for (const file of files.slice(0, MAX_COMMENT_IMAGES)) {
+        const prepared = await prepareImageForUpload(file);
+        formData.append('files', prepared, prepared.name);
+      }
+      const response = await apiUpload<DescriptionImageUploadResponse>(`/cards/${card.id}/description/images/upload`, formData);
+      const snippet = response.images.map((image) => image.markdown).join('\n\n');
+      if (snippet) insertDescriptionText(snippet);
+    } catch (e) {
+      if (e instanceof ApiError) toast.error(e.message);
+    } finally {
+      setUploadingDescImages(false);
+    }
+  }
+
+  function handleDescriptionPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getImagesFromClipboardData(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void uploadDescriptionImages(files);
+  }
+
+  function handleDescriptionFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = getImagesFromFileList(e.target.files);
+    if (files.length > 0) void uploadDescriptionImages(files);
+    e.target.value = '';
+  }
+
   /* ── Markdown toolbar ─────────────────────────────────── */
 
   function insertFormat(type: 'bold' | 'italic' | 'code' | 'link' | 'bullet' | 'heading') {
@@ -555,15 +666,7 @@ export function CardDetailPage() {
       }
     }
 
-    setDraftDesc(newText);
-    scheduleDescAutosave(newText);
-    // Restore focus and selection after state update
-    requestAnimationFrame(() => {
-      ta.focus();
-      ta.setSelectionRange(newStart, newEnd);
-      ta.style.height = 'auto';
-      ta.style.height = `${Math.max(220, ta.scrollHeight)}px`;
-    });
+    updateDescriptionDraft(newText, { start: newStart, end: newEnd });
   }
 
   // Warn before closing tab with unsaved description changes
@@ -660,136 +763,11 @@ export function CardDetailPage() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [showCollectionPicker]);
 
-  /* ── Checklist ────────────────────────────────────────── */
-
-  interface ChecklistItem { id: string; text: string; done: boolean }
-  const checklist: ChecklistItem[] = useMemo(
-    () => (card?.customFields?.checklist as ChecklistItem[] | undefined) ?? [],
-    [card?.customFields?.checklist],
-  );
-  const checklistDone = useMemo(() => checklist.filter((i) => i.done).length, [checklist]);
-  const checklistProgress = checklist.length > 0 ? Math.round((checklistDone / checklist.length) * 100) : 0;
-  const [newChecklistItem, setNewChecklistItem] = useState('');
-  const [addingChecklist, setAddingChecklist] = useState(false);
-  const checklistInputRef = useRef<HTMLInputElement>(null);
-  const [dragChecklistId, setDragChecklistId] = useState<string | null>(null);
-  const [dragOverChecklistId, setDragOverChecklistId] = useState<string | null>(null);
-  const [editingChecklistId, setEditingChecklistId] = useState<string | null>(null);
-  const [editChecklistDraft, setEditChecklistDraft] = useState('');
-  const editChecklistInputRef = useRef<HTMLInputElement>(null);
-
-  async function saveChecklist(items: ChecklistItem[]) {
-    if (!card) return;
-    const prevCustomFields = card.customFields;
-    const newCustomFields = { ...card.customFields, checklist: items };
-    setCard({ ...card, customFields: newCustomFields });
-    try {
-      await api(`/cards/${card.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ customFields: newCustomFields }),
-      });
-    } catch (e) {
-      setCard({ ...card, customFields: prevCustomFields });
-      if (e instanceof ApiError) toast.error(e.message);
-      else toast.error('Failed to update checklist');
-    }
-  }
-
-  function addChecklistItem() {
-    const text = newChecklistItem.trim();
-    if (!text) return;
-    const item: ChecklistItem = { id: `cl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, done: false };
-    setNewChecklistItem('');
-    void saveChecklist([...checklist, item]);
-  }
-
-  function toggleChecklistItem(itemId: string) {
-    const updated = checklist.map((i) => (i.id === itemId ? { ...i, done: !i.done } : i));
-    void saveChecklist(updated);
-    if (updated.length > 0 && updated.every((i) => i.done)) {
-      toast.success('All checklist items done!');
-    }
-  }
-
-  function removeChecklistItem(itemId: string) {
-    void saveChecklist(checklist.filter((i) => i.id !== itemId));
-  }
-
-  function clearCompletedChecklist() {
-    const remaining = checklist.filter((i) => !i.done);
-    if (remaining.length === checklist.length) return;
-    void saveChecklist(remaining);
-  }
-
-  function startEditChecklistItem(itemId: string) {
-    const item = checklist.find((i) => i.id === itemId);
-    if (!item) return;
-    setEditingChecklistId(itemId);
-    setEditChecklistDraft(item.text);
-    setTimeout(() => editChecklistInputRef.current?.focus(), 0);
-  }
-
-  function saveChecklistItemEdit() {
-    if (!editingChecklistId) return;
-    const text = editChecklistDraft.trim();
-    if (!text) {
-      // Empty text = remove the item
-      removeChecklistItem(editingChecklistId);
-    } else {
-      const item = checklist.find((i) => i.id === editingChecklistId);
-      if (item && text !== item.text) {
-        void saveChecklist(checklist.map((i) => (i.id === editingChecklistId ? { ...i, text } : i)));
-      }
-    }
-    setEditingChecklistId(null);
-    setEditChecklistDraft('');
-  }
-
-  function cancelChecklistItemEdit() {
-    setEditingChecklistId(null);
-    setEditChecklistDraft('');
-  }
-
-  function onChecklistDragStart(e: React.DragEvent, itemId: string) {
-    setDragChecklistId(itemId);
-    e.dataTransfer.effectAllowed = 'move';
-  }
-
-  function onChecklistDragOver(e: React.DragEvent, itemId: string) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (itemId !== dragOverChecklistId) setDragOverChecklistId(itemId);
-  }
-
-  function onChecklistDrop(e: React.DragEvent, targetId: string) {
-    e.preventDefault();
-    if (!dragChecklistId || dragChecklistId === targetId) {
-      setDragChecklistId(null);
-      setDragOverChecklistId(null);
-      return;
-    }
-    const fromIdx = checklist.findIndex((i) => i.id === dragChecklistId);
-    const toIdx = checklist.findIndex((i) => i.id === targetId);
-    if (fromIdx === -1 || toIdx === -1) return;
-    const reordered = [...checklist];
-    const [moved] = reordered.splice(fromIdx, 1);
-    reordered.splice(toIdx, 0, moved);
-    setDragChecklistId(null);
-    setDragOverChecklistId(null);
-    void saveChecklist(reordered);
-  }
-
-  function onChecklistDragEnd() {
-    setDragChecklistId(null);
-    setDragOverChecklistId(null);
-  }
-
   /* ── Custom fields ──────────────────────────────────── */
 
-  const SYSTEM_CF_KEYS = useMemo(() => new Set(['checklist']), []);
   const cfEntries = useMemo(
-    () => Object.entries(card?.customFields || {}).filter(([key]) => !SYSTEM_CF_KEYS.has(key)),
-    [card?.customFields, SYSTEM_CF_KEYS],
+    () => Object.entries(card?.customFields || {}),
+    [card?.customFields],
   );
   const tagIds = useMemo(() => new Set(card?.tags.map((t) => t.id) ?? []), [card?.tags]);
 
@@ -1027,18 +1005,72 @@ export function CardDetailPage() {
     }
   }
 
+  /* ── Image staging for comments ──────────────────────── */
+
+  function stageCommentImages(files: File[]) {
+    setStagedImages((prev) => {
+      const remaining = MAX_COMMENT_IMAGES - prev.length;
+      const toAdd = files.slice(0, remaining).map((file) => ({
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+      return [...prev, ...toAdd];
+    });
+  }
+
+  function removeStagedImage(index: number) {
+    setStagedImages((prev) => {
+      const next = [...prev];
+      URL.revokeObjectURL(next[index].previewUrl);
+      next.splice(index, 1);
+      return next;
+    });
+  }
+
+  function clearStagedImages() {
+    setStagedImages((prev) => {
+      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
+      return [];
+    });
+  }
+
+  function handleCommentPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getImagesFromClipboardData(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    stageCommentImages(files);
+  }
+
+  function handleCommentFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = getImagesFromFileList(e.target.files);
+    if (files.length > 0) stageCommentImages(files);
+    e.target.value = '';
+  }
+
   /* ── Comment actions ────────────────────────────────── */
 
   async function addComment() {
-    if (!card || !newComment.trim()) return;
+    if (!card || (!newComment.trim() && stagedImages.length === 0)) return;
     setSubmittingComment(true);
     try {
-      await api(`/cards/${card.id}/comments`, { method: 'POST', body: JSON.stringify({ content: newComment.trim() }) });
+      if (stagedImages.length > 0) {
+        setUploadingImages(true);
+        const fd = new FormData();
+        if (newComment.trim()) fd.append('caption', newComment.trim());
+        for (const staged of stagedImages) {
+          const prepared = await prepareImageForUpload(staged.file);
+          fd.append('files', prepared, prepared.name);
+        }
+        await apiUpload(`/cards/${card.id}/comments/upload`, fd);
+        clearStagedImages();
+      } else {
+        await api(`/cards/${card.id}/comments`, { method: 'POST', body: JSON.stringify({ content: newComment.trim() }) });
+      }
       setNewComment('');
       if (commentTextareaRef.current) commentTextareaRef.current.style.height = '';
       fetchComments();
     } catch (e) { if (e instanceof ApiError) toast.error(e.message); }
-    finally { setSubmittingComment(false); }
+    finally { setSubmittingComment(false); setUploadingImages(false); }
   }
 
   async function deleteComment(cid: string) {
@@ -1371,10 +1403,27 @@ export function CardDetailPage() {
                   </div>
                   {!descPreview && (
                     <div className={styles.mdToolbar}>
+                      <input
+                        ref={descFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className={styles.commentHiddenFileInput}
+                        onChange={handleDescriptionFileSelect}
+                      />
                       <button type="button" className={styles.mdToolbarBtn} title="Bold (Ctrl+B)" onClick={() => insertFormat('bold')}><Bold size={13} /></button>
                       <button type="button" className={styles.mdToolbarBtn} title="Italic (Ctrl+I)" onClick={() => insertFormat('italic')}><Italic size={13} /></button>
                       <button type="button" className={styles.mdToolbarBtn} title="Inline code" onClick={() => insertFormat('code')}><Code size={13} /></button>
                       <button type="button" className={styles.mdToolbarBtn} title="Link" onClick={() => insertFormat('link')}><Link2 size={13} /></button>
+                      <button
+                        type="button"
+                        className={styles.mdToolbarBtn}
+                        title="Insert images"
+                        onClick={() => descFileInputRef.current?.click()}
+                        disabled={uploadingDescImages}
+                      >
+                        <Image size={13} />
+                      </button>
                       <span className={styles.mdToolbarSep} />
                       <button type="button" className={styles.mdToolbarBtn} title="Bullet list" onClick={() => insertFormat('bullet')}><List size={13} /></button>
                       <button type="button" className={styles.mdToolbarBtn} title="Heading" onClick={() => insertFormat('heading')}><Heading2 size={13} /></button>
@@ -1394,12 +1443,13 @@ export function CardDetailPage() {
                       className={styles.descriptionTextarea}
                       value={draftDesc}
                       onChange={(e) => {
-                        setDraftDesc(e.target.value);
-                        scheduleDescAutosave(e.target.value);
-                        // Auto-grow
-                        e.target.style.height = 'auto';
-                        e.target.style.height = `${Math.max(220, e.target.scrollHeight)}px`;
+                        descSelectionRef.current = {
+                          start: e.currentTarget.selectionStart,
+                          end: e.currentTarget.selectionEnd,
+                        };
+                        updateDescriptionDraft(e.target.value);
                       }}
+                      onPaste={handleDescriptionPaste}
                       placeholder="Add a description..."
                       onSelect={(e) => {
                         const t = e.currentTarget;
@@ -1437,7 +1487,7 @@ export function CardDetailPage() {
                   )}
                   <div className={styles.descriptionActions}>
                     <span className={styles.descriptionHint}>
-                      Markdown supported &middot; Esc to close
+                      {uploadingDescImages ? 'Uploading images...' : 'Markdown supported · paste or attach images · Esc to close'}
                     </span>
                     <Button variant="ghost" size="sm" onClick={() => closeDescEditor()}>
                       Done
@@ -1454,152 +1504,6 @@ export function CardDetailPage() {
                   <FileText size={14} />
                   Add a description...
                 </div>
-              )}
-            </div>
-
-            {/* Checklist */}
-            <div className={styles.checklistSection}>
-              <div className={styles.checklistHeader}>
-                <ListChecks size={13} />
-                <span className={styles.checklistTitle}>Checklist</span>
-                {checklist.length > 0 && (
-                  <span className={styles.checklistCount}>{checklistDone}/{checklist.length}</span>
-                )}
-                {checklistDone > 0 && (
-                  <button
-                    className={styles.checklistClearBtn}
-                    onClick={clearCompletedChecklist}
-                    title="Clear completed items"
-                  >
-                    Clear completed
-                  </button>
-                )}
-              </div>
-
-              {checklist.length > 0 && (
-                <>
-                  <div className={styles.checklistProgress}>
-                    <div
-                      className={`${styles.checklistProgressBar}${checklistProgress === 100 ? ` ${styles.checklistProgressComplete}` : ''}`}
-                      style={{ width: `${checklistProgress}%` }}
-                    />
-                  </div>
-                  <div className={styles.checklistItems}>
-                    {checklist.map((item) => (
-                      <div
-                        key={item.id}
-                        className={`${styles.checklistItem}${item.done ? ` ${styles.checklistItemDone}` : ''}${dragOverChecklistId === item.id && dragChecklistId !== item.id ? ` ${styles.checklistItemDropTarget}` : ''}${dragChecklistId === item.id ? ` ${styles.checklistItemDragging}` : ''}`}
-                        draggable
-                        onDragStart={(e) => onChecklistDragStart(e, item.id)}
-                        onDragOver={(e) => onChecklistDragOver(e, item.id)}
-                        onDrop={(e) => onChecklistDrop(e, item.id)}
-                        onDragEnd={onChecklistDragEnd}
-                      >
-                        <span className={styles.checklistDragHandle} title="Drag to reorder">
-                          <GripVertical size={14} />
-                        </span>
-                        <button
-                          className={`${styles.checklistCheck}${item.done ? ` ${styles.checklistCheckDone}` : ''}`}
-                          onClick={() => toggleChecklistItem(item.id)}
-                          aria-label={item.done ? 'Mark as incomplete' : 'Mark as complete'}
-                        >
-                          {item.done ? <CircleCheck size={16} /> : <Circle size={16} />}
-                        </button>
-                        {editingChecklistId === item.id ? (
-                          <input
-                            ref={editChecklistInputRef}
-                            className={styles.checklistEditInput}
-                            value={editChecklistDraft}
-                            onChange={(e) => setEditChecklistDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') saveChecklistItemEdit();
-                              if (e.key === 'Escape') cancelChecklistItemEdit();
-                            }}
-                            onBlur={saveChecklistItemEdit}
-                          />
-                        ) : (
-                          <span
-                            className={`${styles.checklistText}${item.done ? ` ${styles.checklistTextDone}` : ''}`}
-                            onDoubleClick={() => startEditChecklistItem(item.id)}
-                            title="Double-click to edit"
-                          >
-                            {item.text}
-                          </span>
-                        )}
-                        {editingChecklistId !== item.id && (
-                          <button
-                            className={styles.checklistEditBtn}
-                            onClick={() => startEditChecklistItem(item.id)}
-                            title="Edit item"
-                          >
-                            <Pencil size={12} />
-                          </button>
-                        )}
-                        <button
-                          className={styles.checklistRemove}
-                          onClick={() => removeChecklistItem(item.id)}
-                          title="Remove item"
-                        >
-                          <X size={12} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {addingChecklist ? (
-                <div className={styles.checklistAddForm}>
-                  <input
-                    ref={checklistInputRef}
-                    className={styles.checklistAddInput}
-                    value={newChecklistItem}
-                    onChange={(e) => setNewChecklistItem(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && newChecklistItem.trim()) {
-                        addChecklistItem();
-                      }
-                      if (e.key === 'Escape') {
-                        setAddingChecklist(false);
-                        setNewChecklistItem('');
-                      }
-                    }}
-                    placeholder="Add a checklist item..."
-                    autoFocus
-                  />
-                  <div className={styles.checklistAddActions}>
-                    <button
-                      className={styles.checklistAddSubmit}
-                      onClick={() => {
-                        addChecklistItem();
-                        checklistInputRef.current?.focus();
-                      }}
-                      disabled={!newChecklistItem.trim()}
-                    >
-                      Add
-                    </button>
-                    <button
-                      className={styles.checklistAddCancel}
-                      onClick={() => {
-                        setAddingChecklist(false);
-                        setNewChecklistItem('');
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  className={styles.checklistAddBtn}
-                  onClick={() => {
-                    setAddingChecklist(true);
-                    setTimeout(() => checklistInputRef.current?.focus(), 0);
-                  }}
-                >
-                  <Plus size={13} />
-                  Add checklist item
-                </button>
               )}
             </div>
           </div>
@@ -1707,9 +1611,20 @@ export function CardDetailPage() {
                             </div>
                           </div>
                         ) : (
-                          <div className={styles.commentText}>
-                            <MarkdownContent compact>{c.content}</MarkdownContent>
-                          </div>
+                          <>
+                            {c.attachments && c.attachments.length > 0 && (
+                              <div className={styles.commentImages}>
+                                {c.attachments.map((att, i) => (
+                                  <CommentImage key={i} storagePath={att.storagePath} alt={att.fileName} />
+                                ))}
+                              </div>
+                            )}
+                            {c.content && (
+                              <div className={styles.commentText}>
+                                <MarkdownContent compact>{c.content}</MarkdownContent>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                       <div className={styles.commentActions}>
@@ -1733,32 +1648,67 @@ export function CardDetailPage() {
 
               {activityView === 'comments' && (
                 <div className={styles.commentForm}>
-                  <textarea
-                    ref={commentTextareaRef}
-                    className={styles.commentTextarea}
-                    placeholder="Write a comment..."
-                    value={newComment}
-                    onChange={(e) => {
-                      setNewComment(e.target.value);
-                      e.target.style.height = 'auto';
-                      e.target.style.height = `${e.target.scrollHeight}px`;
-                    }}
-                    rows={1}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addComment();
-                    }}
-                  />
-                  <Tooltip label="Send">
-                    <button
-                      className={styles.commentSend}
-                      onClick={addComment}
-                      disabled={!newComment.trim() || submittingComment}
-                      aria-label="Send"
-                    >
-                      <Send size={14} />
-                    </button>
-                  </Tooltip>
-                  {newComment.trim() && (
+                  {uploadingImages && <div className={styles.commentUploadingIndicator}>Uploading images…</div>}
+                  {stagedImages.length > 0 && (
+                    <div className={styles.commentStagedImagesRow}>
+                      {stagedImages.map((img, i) => (
+                        <div key={img.previewUrl} className={styles.commentStagedImagePreview}>
+                          <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} />
+                          <button className={styles.commentStagedImageRemove} onClick={() => removeStagedImage(i)} aria-label="Remove image">
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className={styles.commentInputRow}>
+                    <input
+                      ref={commentFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className={styles.commentHiddenFileInput}
+                      onChange={handleCommentFileSelect}
+                    />
+                    <Tooltip label={stagedImages.length >= MAX_COMMENT_IMAGES ? `Max ${MAX_COMMENT_IMAGES} images` : 'Attach images'}>
+                      <button
+                        className={styles.commentAttachBtn}
+                        onClick={() => commentFileInputRef.current?.click()}
+                        disabled={uploadingImages || stagedImages.length >= MAX_COMMENT_IMAGES}
+                        aria-label="Attach images"
+                      >
+                        <Image size={14} />
+                      </button>
+                    </Tooltip>
+                    <textarea
+                      ref={commentTextareaRef}
+                      className={styles.commentTextarea}
+                      placeholder={stagedImages.length > 0 ? 'Add a caption… (optional)' : 'Write a comment...'}
+                      value={newComment}
+                      onChange={(e) => {
+                        setNewComment(e.target.value);
+                        e.target.style.height = 'auto';
+                        e.target.style.height = `${e.target.scrollHeight}px`;
+                      }}
+                      rows={1}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addComment();
+                      }}
+                      onPaste={handleCommentPaste}
+                      disabled={uploadingImages}
+                    />
+                    <Tooltip label="Send">
+                      <button
+                        className={styles.commentSend}
+                        onClick={addComment}
+                        disabled={(!newComment.trim() && stagedImages.length === 0) || submittingComment}
+                        aria-label="Send"
+                      >
+                        <Send size={14} />
+                      </button>
+                    </Tooltip>
+                  </div>
+                  {(newComment.trim() || stagedImages.length > 0) && (
                     <span className={styles.commentHint}>
                       {navigator.platform?.includes('Mac') ? '\u2318' : 'Ctrl+'}Enter to send
                     </span>

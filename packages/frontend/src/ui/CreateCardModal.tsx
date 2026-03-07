@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Check, Search, FileText, FolderOpen, ChevronDown, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Check, Search, FileText, FolderOpen, ChevronDown, CheckCircle2, AlertCircle, Image } from 'lucide-react';
 import { Button } from './Button';
 import { Input } from './Input';
-import { Textarea } from './Textarea';
 import { Modal } from './Modal';
+import { MarkdownContent } from './MarkdownContent';
 import { AgentAvatar } from '../components/AgentAvatar';
-import { api } from '../lib/api';
+import { ApiError, api, apiUpload } from '../lib/api';
+import { getImagesFromClipboardData, getImagesFromFileList, prepareImageForUpload } from '../lib/image-upload';
 import { useAuth } from '../stores/useAuth';
 import styles from './CreateCardModal.module.css';
 
@@ -17,6 +18,15 @@ interface AgentEntry {
 interface Tag { id: string; name: string; color: string }
 interface CardResult { id: string; name: string }
 interface CollectionEntry { id: string; name: string }
+interface DescriptionImageUploadResponse {
+  images: Array<{
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    storagePath: string;
+    markdown: string;
+  }>;
+}
 
 export interface CreateCardData {
   name: string;
@@ -43,13 +53,19 @@ interface CreateCardModalProps {
 }
 
 export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allowCreateAnother = true, defaultName, defaultDescription }: CreateCardModalProps) {
+  const MAX_DESCRIPTION_IMAGES = 10;
   const { user: currentUser } = useAuth();
   const [name, setName] = useState(defaultName ?? '');
   const [description, setDescription] = useState(defaultDescription ?? '');
+  const [descriptionPreview, setDescriptionPreview] = useState(false);
+  const [uploadingDescriptionImages, setUploadingDescriptionImages] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [justCreated, setJustCreated] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  const descriptionFileInputRef = useRef<HTMLInputElement>(null);
+  const descriptionSelectionRef = useRef({ start: 0, end: 0 });
 
   // Assignee
   const [assigneeId, setAssigneeId] = useState<string | null>(null);
@@ -156,6 +172,7 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
   const resetForm = useCallback(() => {
     setName('');
     setDescription('');
+    setDescriptionPreview(false);
     setSelectedTagIds(new Set());
     setLinkedCards([]);
     setLinkSearch('');
@@ -227,6 +244,61 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
     setLinkedCards((prev) => prev.filter((c) => c.id !== cardId));
   }
 
+  function updateDescriptionDraft(nextText: string, selection?: { start: number; end: number }) {
+    setDescription(nextText);
+    if (!selection) return;
+    requestAnimationFrame(() => {
+      const textarea = descriptionRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(selection.start, selection.end);
+      descriptionSelectionRef.current = selection;
+    });
+  }
+
+  function insertDescriptionText(textToInsert: string) {
+    const start = descriptionSelectionRef.current.start;
+    const end = descriptionSelectionRef.current.end;
+    const currentText = descriptionRef.current?.value ?? description;
+    const nextText = `${currentText.slice(0, start)}${textToInsert}${currentText.slice(end)}`;
+    const cursor = start + textToInsert.length;
+    updateDescriptionDraft(nextText, { start: cursor, end: cursor });
+  }
+
+  async function uploadDescriptionImages(files: File[]) {
+    if (files.length === 0) return;
+    setUploadingDescriptionImages(true);
+    setSubmitError(null);
+    try {
+      const formData = new FormData();
+      for (const file of files.slice(0, MAX_DESCRIPTION_IMAGES)) {
+        const prepared = await prepareImageForUpload(file);
+        formData.append('files', prepared, prepared.name);
+      }
+      const response = await apiUpload<DescriptionImageUploadResponse>('/cards/description/images/upload', formData);
+      const snippet = response.images.map((image) => image.markdown).join('\n\n');
+      if (snippet) insertDescriptionText(snippet);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to upload images';
+      setSubmitError(message);
+    } finally {
+      setUploadingDescriptionImages(false);
+    }
+  }
+
+  function handleDescriptionPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getImagesFromClipboardData(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void uploadDescriptionImages(files);
+  }
+
+  function handleDescriptionFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = getImagesFromFileList(e.target.files);
+    if (files.length > 0) void uploadDescriptionImages(files);
+    e.target.value = '';
+  }
+
   // Resolve assignee display
   const selectedUser = users.find((u) => u.id === assigneeId);
   const selectedAgent = agents.find((a) => a.id === assigneeId);
@@ -292,13 +364,88 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
             onChange={(e) => { setName(e.target.value); setSubmitError(null); }}
             placeholder="Card name"
           />
-          <Textarea
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Add a brief description (optional)"
-            rows={3}
-          />
+          <div className={styles.section}>
+            <div className={styles.descriptionHeader}>
+              <span className={styles.sectionLabel}>Description</span>
+              <div className={styles.descriptionTabs}>
+                <button
+                  type="button"
+                  className={`${styles.descriptionTab}${!descriptionPreview ? ` ${styles.descriptionTabActive}` : ''}`}
+                  onClick={() => setDescriptionPreview(false)}
+                >
+                  Write
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.descriptionTab}${descriptionPreview ? ` ${styles.descriptionTabActive}` : ''}`}
+                  onClick={() => setDescriptionPreview(true)}
+                >
+                  Preview
+                </button>
+              </div>
+            </div>
+            <input
+              ref={descriptionFileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className={styles.hiddenFileInput}
+              onChange={handleDescriptionFileSelect}
+            />
+            {descriptionPreview ? (
+              <div className={styles.descriptionPreview}>
+                {description.trim() ? (
+                  <MarkdownContent>{description}</MarkdownContent>
+                ) : (
+                  <span className={styles.descriptionPreviewEmpty}>Nothing to preview</span>
+                )}
+              </div>
+            ) : (
+              <textarea
+                ref={descriptionRef}
+                className={styles.descriptionTextarea}
+                value={description}
+                onChange={(e) => {
+                  descriptionSelectionRef.current = {
+                    start: e.currentTarget.selectionStart,
+                    end: e.currentTarget.selectionEnd,
+                  };
+                  setDescription(e.target.value);
+                  setSubmitError(null);
+                }}
+                onPaste={handleDescriptionPaste}
+                onSelect={(e) => {
+                  descriptionSelectionRef.current = {
+                    start: e.currentTarget.selectionStart,
+                    end: e.currentTarget.selectionEnd,
+                  };
+                }}
+                onBlur={(e) => {
+                  descriptionSelectionRef.current = {
+                    start: e.currentTarget.selectionStart,
+                    end: e.currentTarget.selectionEnd,
+                  };
+                }}
+                placeholder="Add a description... Markdown supported."
+                rows={6}
+                disabled={uploadingDescriptionImages}
+              />
+            )}
+            <div className={styles.descriptionActions}>
+              <span className={styles.descriptionHint}>
+                {uploadingDescriptionImages ? 'Uploading images...' : 'Paste or attach images. Markdown preview is live.'}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => descriptionFileInputRef.current?.click()}
+                disabled={uploadingDescriptionImages}
+              >
+                <Image size={14} />
+                {uploadingDescriptionImages ? 'Uploading...' : 'Insert images'}
+              </Button>
+            </div>
+          </div>
 
           {/* Assignee */}
           <div className={styles.section}>

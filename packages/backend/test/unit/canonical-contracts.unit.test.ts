@@ -70,6 +70,36 @@ test('project settings ignore removed legacy key fields and expose canonical def
   assert.equal(stored.defaultAgentKeyId, 'canonical-key-id');
 });
 
+test('card schema rejects legacy checklist custom field payloads', async () => {
+  const { cardSchema } = await importFresh<typeof import('../../src/schemas/collections.ts')>(
+    '../../src/schemas/collections.ts',
+  );
+
+  const baseCard = {
+    id: 'card-1',
+    collectionId: 'collection-1',
+    name: 'Card',
+    description: null,
+    customFields: {},
+    createdById: 'user-1',
+    assigneeId: null,
+    position: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  assert.equal(cardSchema.safeParse(baseCard).success, true);
+  assert.equal(
+    cardSchema.safeParse({
+      ...baseCard,
+      customFields: {
+        checklist: [{ id: 'item-1', text: 'Legacy item', done: false }],
+      },
+    }).success,
+    false,
+  );
+});
+
 after(async () => {
   const { store } = await importFresh<typeof import('../../src/db/index.ts')>('../../src/db/index.ts');
   await store.flush();

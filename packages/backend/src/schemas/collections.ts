@@ -1,4 +1,5 @@
 import { z } from 'zod/v4';
+import { cardCustomFieldsSchema } from './cards.js';
 
 export const userSchema = z
   .object({
@@ -92,7 +93,7 @@ export const cardSchema = z
     collectionId: z.string(),
     name: z.string(),
     description: z.string().nullable(),
-    customFields: z.record(z.string(), z.unknown()),
+    customFields: cardCustomFieldsSchema,
     createdById: z.string(),
     assigneeId: z.string().nullable(),
     position: z.number(),

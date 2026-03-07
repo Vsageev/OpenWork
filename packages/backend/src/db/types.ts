@@ -260,6 +260,14 @@ export interface Workspace {
   updatedAt: string;
 }
 
+export interface AgentAvatarPreset {
+  id: string;
+  name: string;
+  avatarIcon: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;

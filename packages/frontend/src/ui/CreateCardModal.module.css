@@ -42,6 +42,10 @@
   gap: var(--space-4);
 }
 
+.hiddenFileInput {
+  display: none;
+}
+
 .actions {
   display: flex;
   gap: var(--space-2);
@@ -85,6 +89,89 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text-secondary);
+}
+
+.descriptionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.descriptionTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+.descriptionTab {
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: calc(var(--radius-md) - 3px);
+  cursor: pointer;
+}
+
+.descriptionTabActive {
+  background: var(--color-card);
+  color: var(--color-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.descriptionTextarea {
+  width: 100%;
+  min-height: 136px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.descriptionTextarea:focus {
+  border-color: var(--color-primary, #3B82F6);
+}
+
+.descriptionTextarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.descriptionPreview {
+  min-height: 136px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  overflow: auto;
+}
+
+.descriptionPreviewEmpty {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.descriptionActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.descriptionHint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
 }
 
 /* ── Assignee select ─────────────────────────────── */

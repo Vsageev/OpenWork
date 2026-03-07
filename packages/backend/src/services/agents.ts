@@ -38,6 +38,7 @@ interface PresetDef {
   description: string;
   files: PresetFileDef[];
 }
+
 function renderTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? '');
 }
@@ -133,6 +134,14 @@ export interface AgentGroupRecord {
   updatedAt: string;
 }
 
+export interface AgentAvatarPresetRecord {
+  id: string;
+  name: string;
+  avatarIcon: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 function asAgentGroup(rec: Record<string, unknown>): AgentGroupRecord {
   return {
     ...rec,
@@ -185,6 +194,105 @@ export function reorderAgentGroups(ids: string[]): AgentGroupRecord[] {
   return listAgentGroups();
 }
 
+function asAgentAvatarPreset(rec: Record<string, unknown>): AgentAvatarPresetRecord {
+  return {
+    ...rec,
+    name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Untitled preset',
+    avatarIcon: typeof rec.avatarIcon === 'string' ? rec.avatarIcon : 'spark',
+  } as AgentAvatarPresetRecord;
+}
+
+export function listAgentAvatarPresets(): AgentAvatarPresetRecord[] {
+  return store
+    .getAll('agentAvatarPresets')
+    .map(asAgentAvatarPreset)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export function createAgentAvatarPreset(params: {
+  name: string;
+  avatarIcon: string;
+}): AgentAvatarPresetRecord {
+  const record = store.insert('agentAvatarPresets', {
+    name: params.name.trim(),
+    avatarIcon: params.avatarIcon,
+  });
+  return asAgentAvatarPreset(record);
+}
+
+export function updateAgentAvatarPreset(
+  id: string,
+  data: Partial<Pick<AgentAvatarPresetRecord, 'name' | 'avatarIcon'>>,
+): AgentAvatarPresetRecord | null {
+  const patch: Record<string, unknown> = {};
+  if (data.name !== undefined) patch.name = data.name.trim();
+  if (data.avatarIcon !== undefined) patch.avatarIcon = data.avatarIcon;
+  const updated = store.update('agentAvatarPresets', id, patch);
+  return updated ? asAgentAvatarPreset(updated) : null;
+}
+
+export function deleteAgentAvatarPreset(id: string): boolean {
+  return Boolean(store.delete('agentAvatarPresets', id));
+}
+
+// ---------------------------------------------------------------------------
+// Agent color presets (saved bg+logo color combos)
+// ---------------------------------------------------------------------------
+
+export interface AgentColorPresetRecord {
+  id: string;
+  name: string;
+  bgColor: string;
+  logoColor: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function asAgentColorPreset(rec: Record<string, unknown>): AgentColorPresetRecord {
+  return {
+    ...rec,
+    name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Untitled',
+    bgColor: typeof rec.bgColor === 'string' ? rec.bgColor : '#1a1a2e',
+    logoColor: typeof rec.logoColor === 'string' ? rec.logoColor : '#e94560',
+  } as AgentColorPresetRecord;
+}
+
+export function listAgentColorPresets(): AgentColorPresetRecord[] {
+  return store
+    .getAll('agentColorPresets')
+    .map(asAgentColorPreset)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export function createAgentColorPreset(params: {
+  name: string;
+  bgColor: string;
+  logoColor: string;
+}): AgentColorPresetRecord {
+  const record = store.insert('agentColorPresets', {
+    name: params.name.trim(),
+    bgColor: params.bgColor,
+    logoColor: params.logoColor,
+  });
+  return asAgentColorPreset(record);
+}
+
+export function updateAgentColorPreset(
+  id: string,
+  data: Partial<Pick<AgentColorPresetRecord, 'name' | 'bgColor' | 'logoColor'>>,
+): AgentColorPresetRecord | null {
+  const patch: Record<string, unknown> = {};
+  if (data.name !== undefined) patch.name = data.name.trim();
+  if (data.bgColor !== undefined) patch.bgColor = data.bgColor;
+  if (data.logoColor !== undefined) patch.logoColor = data.logoColor;
+  const updated = store.update('agentColorPresets', id, patch);
+  return updated ? asAgentColorPreset(updated) : null;
+}
+
+export function deleteAgentColorPreset(id: string): boolean {
+  return Boolean(store.delete('agentColorPresets', id));
+}
+
 // ---------------------------------------------------------------------------
 // Agent record interface
 // ---------------------------------------------------------------------------
@@ -230,6 +338,71 @@ function ensureAgentsDir() {
 
 function agentDir(agentId: string): string {
   return path.join(AGENTS_DIR, agentId);
+}
+
+function normalizePresetModelKey(model: string): string {
+  return model.trim().toLowerCase();
+}
+
+function getPresetApplicableFiles(preset: PresetDef, model: string): PresetFileDef[] {
+  const normalizedModel = normalizePresetModelKey(model);
+  return preset.files.filter(
+    (file) =>
+      !file.models ||
+      file.models.some((candidate) => normalizePresetModelKey(candidate) === normalizedModel),
+  );
+}
+
+function getPresetModelScopedFiles(preset: PresetDef, model: string): PresetFileDef[] {
+  const normalizedModel = normalizePresetModelKey(model);
+  return preset.files.filter((file) =>
+    file.models?.some((candidate) => normalizePresetModelKey(candidate) === normalizedModel),
+  );
+}
+
+function areEquivalentPresetFiles(left: PresetFileDef, right: PresetFileDef): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type === 'file' && right.type === 'file') {
+    return left.template === right.template;
+  }
+  if (left.type === 'symlink' && right.type === 'symlink') {
+    return left.target === right.target;
+  }
+  return false;
+}
+
+function syncPresetModelScopedFiles(
+  agentId: string,
+  presetId: string,
+  previousModel: string,
+  nextModel: string,
+): void {
+  if (previousModel === nextModel) return;
+
+  const preset = AGENT_PRESETS[presetId];
+  if (!preset) return;
+
+  const previousFiles = getPresetModelScopedFiles(preset, previousModel);
+  const nextFiles = getPresetModelScopedFiles(preset, nextModel);
+  if (previousFiles.length === 0 || nextFiles.length === 0) return;
+
+  const dir = agentDir(agentId);
+
+  for (const nextFile of nextFiles) {
+    const nextPath = path.join(dir, nextFile.name);
+    if (fs.existsSync(nextPath)) continue;
+
+    const previousFile = previousFiles.find(
+      (candidate) =>
+        candidate.name !== nextFile.name && areEquivalentPresetFiles(candidate, nextFile),
+    );
+    if (!previousFile) continue;
+
+    const previousPath = path.join(dir, previousFile.name);
+    if (!fs.existsSync(previousPath)) continue;
+
+    fs.renameSync(previousPath, nextPath);
+  }
 }
 
 function asAgent(rec: Record<string, unknown>): AgentRecord {
@@ -390,9 +563,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
     const dir = agentDir(record.id as string);
     fs.mkdirSync(dir, { recursive: true });
 
-    const applicableFiles = preset.files.filter(
-      (f) => !f.models || f.models.includes(params.model),
-    );
+    const applicableFiles = getPresetApplicableFiles(preset, params.model);
 
     for (const fileDef of applicableFiles) {
       const filePath = path.join(dir, fileDef.name);
@@ -443,6 +614,7 @@ export function updateAgent(
 ): AgentRecord | null {
   const current = store.getById('agents', id);
   if (!current) return null;
+  const currentAgent = asAgent(current);
 
   const patch: Record<string, unknown> = {};
   if (data.name !== undefined) patch.name = data.name;
@@ -460,6 +632,10 @@ export function updateAgent(
 
   const updated = store.update('agents', id, patch);
   if (!updated) return null;
+
+  if (data.model !== undefined) {
+    syncPresetModelScopedFiles(id, currentAgent.preset, currentAgent.model, data.model);
+  }
 
   if (data.name !== undefined) {
     const serviceUserId = updated.serviceUserId as string | null | undefined;

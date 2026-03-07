@@ -89,6 +89,8 @@ import {
   randomPalette,
   randomIcon,
   type AvatarConfig,
+  type SavedAvatarPreset,
+  type SavedColorPreset,
 } from '../components/AgentAvatar';
 import { useWorkspace } from '../stores/WorkspaceContext';
 import styles from './AgentsPage.module.css';
@@ -174,6 +176,9 @@ interface Preset {
   name: string;
   description: string;
 }
+
+type AvatarPreset = SavedAvatarPreset;
+type ColorPreset = SavedColorPreset;
 
 interface ChatConversation {
   id: string;
@@ -1015,6 +1020,8 @@ export function AgentsPage() {
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [avatarPresets, setAvatarPresets] = useState<AvatarPreset[]>([]);
+  const [colorPresets, setColorPresets] = useState<ColorPreset[]>([]);
   const [cliStatus, setCliStatus] = useState<CliInfo[]>([]);
 
   // ── Chat / Files tab ──
@@ -1089,6 +1096,23 @@ export function AgentsPage() {
   const [editNameValue, setEditNameValue] = useState('');
   const [editingAvatar, setEditingAvatar] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
+  const avatarPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!editingAvatar) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (avatarPickerRef.current?.contains(target)) return;
+      // Don't close if clicking inside a portaled modal (e.g. the icon drawing modal)
+      if (target instanceof Element && target.closest('[role="dialog"][aria-modal="true"]')) return;
+      setEditingAvatar(false);
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [editingAvatar]);
 
   // ── Cron jobs (settings modal) ──
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
@@ -1268,6 +1292,24 @@ export function AgentsPage() {
       setLoading(false);
     }
   }, [activeWorkspaceId]);
+
+  const fetchAvatarPresets = useCallback(async () => {
+    try {
+      const data = await api<{ entries: AvatarPreset[] }>('/agent-avatar-presets');
+      setAvatarPresets(data.entries);
+    } catch {
+      /* silently fail */
+    }
+  }, []);
+
+  const fetchColorPresets = useCallback(async () => {
+    try {
+      const data = await api<{ entries: ColorPreset[] }>('/agent-color-presets');
+      setColorPresets(data.entries);
+    } catch {
+      /* silently fail */
+    }
+  }, []);
 
   /* ── Fetch conversations for an agent ── */
   const fetchConversations = useCallback(async (agentId: string) => {
@@ -1471,6 +1513,8 @@ export function AgentsPage() {
     let cancelled = false;
     async function load() {
       fetchGroups();
+      fetchAvatarPresets();
+      fetchColorPresets();
       const entries = await fetchAgents();
       if (cancelled || entries.length === 0) return;
 
@@ -1547,6 +1591,8 @@ export function AgentsPage() {
     };
   }, [
     fetchAgents,
+    fetchAvatarPresets,
+    fetchColorPresets,
     fetchGroups,
     fetchMessages,
     requestedAgentId,
@@ -2219,8 +2265,95 @@ export function AgentsPage() {
       });
       setAgents((prev) => prev.map((a) => (a.id === agentId ? updated : a)));
       if (settingsAgent?.id === agentId) setSettingsAgent(updated);
-    } catch {
-      /* silently fail */
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to update avatar';
+      toast.error(message);
+      throw error;
+    }
+  }
+
+  async function handleCreateAvatarPreset(input: { name: string; icon: string }) {
+    try {
+      const created = await api<AvatarPreset>('/agent-avatar-presets', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: input.name,
+          avatarIcon: input.icon,
+        }),
+      });
+      setAvatarPresets((prev) => [created, ...prev]);
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to save avatar shape preset';
+      toast.error(message);
+      throw error;
+    }
+  }
+
+  async function handleRenameAvatarPreset(presetId: string, name: string) {
+    try {
+      const updated = await api<AvatarPreset>(`/agent-avatar-presets/${presetId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      });
+      setAvatarPresets((prev) => prev.map((preset) => (preset.id === presetId ? updated : preset)));
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to rename avatar preset';
+      toast.error(message);
+      throw error;
+    }
+  }
+
+  async function handleDeleteAvatarPreset(presetId: string) {
+    try {
+      await api(`/agent-avatar-presets/${presetId}`, { method: 'DELETE' });
+      setAvatarPresets((prev) => prev.filter((preset) => preset.id !== presetId));
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to delete avatar preset';
+      toast.error(message);
+      throw error;
+    }
+  }
+
+  async function handleCreateColorPreset(input: { name: string; bgColor: string; logoColor: string }) {
+    try {
+      const created = await api<ColorPreset>('/agent-color-presets', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      setColorPresets((prev) => [created, ...prev]);
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to save color preset';
+      toast.error(message);
+      throw error;
+    }
+  }
+
+  async function handleDeleteColorPreset(presetId: string) {
+    try {
+      await api(`/agent-color-presets/${presetId}`, { method: 'DELETE' });
+      setColorPresets((prev) => prev.filter((preset) => preset.id !== presetId));
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message
+          ? error.message
+          : 'Failed to delete color preset';
+      toast.error(message);
+      throw error;
     }
   }
 
@@ -2858,7 +2991,16 @@ export function AgentsPage() {
                           />
                           <span className={styles.sidebarGroupName}>Ungrouped</span>
                           <span className={styles.sidebarGroupCount}>{ungrouped.length}</span>
-                          <span style={{ width: 20, flexShrink: 0 }} />
+                          <button
+                            className={styles.sidebarGroupAddBtn}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openCreate();
+                            }}
+                            title="Add agent"
+                          >
+                            <Plus size={13} />
+                          </button>
                         </div>
                       )}
                       {(!showHeader || !isCollapsed) &&
@@ -3305,6 +3447,13 @@ export function AgentsPage() {
                   <AgentAvatarPicker
                     value={form.avatar}
                     onChange={(avatar) => setForm((f) => ({ ...f, avatar }))}
+                    savedPresets={avatarPresets}
+                    onCreatePreset={handleCreateAvatarPreset}
+                    onRenamePreset={handleRenameAvatarPreset}
+                    onDeletePreset={handleDeleteAvatarPreset}
+                    savedColorPresets={colorPresets}
+                    onCreateColorPreset={handleCreateColorPreset}
+                    onDeleteColorPreset={handleDeleteColorPreset}
                   />
                 </div>
 
@@ -3598,12 +3747,12 @@ export function AgentsPage() {
           <div className={styles.settingsModalWide} onClick={(e) => e.stopPropagation()}>
             {/* Hero header with avatar, name, status */}
             <div className={styles.settingsHero}>
-              <div className={styles.settingsAvatarWrap}>
+              <div ref={avatarPickerRef} className={styles.settingsAvatarWrap}>
                 <button
                   type="button"
                   className={styles.settingsAvatarBtn}
                   onClick={() => setEditingAvatar((v) => !v)}
-                  title="Edit avatar"
+                  aria-label="Edit avatar"
                 >
                   <AgentAvatar
                     icon={settingsAgent.avatarIcon || 'spark'}
@@ -3624,6 +3773,13 @@ export function AgentsPage() {
                         logoColor: settingsAgent.avatarLogoColor || '#e94560',
                       }}
                       onChange={(avatar) => handleChangeAvatar(settingsAgent.id, avatar)}
+                      savedPresets={avatarPresets}
+                      onCreatePreset={handleCreateAvatarPreset}
+                      onRenamePreset={handleRenameAvatarPreset}
+                      onDeletePreset={handleDeleteAvatarPreset}
+                      savedColorPresets={colorPresets}
+                      onCreateColorPreset={handleCreateColorPreset}
+                      onDeleteColorPreset={handleDeleteColorPreset}
                     />
                   </div>
                 )}

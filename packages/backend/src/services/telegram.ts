@@ -3,6 +3,7 @@ import { store } from '../db/index.js';
 import { env } from '../config/env.js';
 import { createAuditLog } from './audit-log.js';
 import { startNgrokTunnel, stopNgrokTunnel, getNgrokTunnelUrl } from './ngrok.js';
+import { validateWebhookUrl } from '../utils/url-validator.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -35,6 +36,23 @@ async function telegramRequest<T>(token: string, method: string, body?: Record<s
   }
 
   return data.result!;
+}
+
+function normalizeWebhookBaseUrl(rawUrl?: string | null): string | null {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) return null;
+
+  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+  const normalized = withProtocol.replace(/\/+$/, '');
+  const validation = validateWebhookUrl(normalized);
+
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Invalid webhook URL');
+  }
+
+  return normalized;
 }
 
 /**
@@ -94,7 +112,7 @@ export async function connectBot(
     const tunnelUrl = await startNgrokTunnel();
     ngrokUrl = tunnelUrl;
   } else {
-    ngrokUrl = options?.ngrokUrl?.replace(/\/+$/, '') || null;
+    ngrokUrl = normalizeWebhookBaseUrl(options?.ngrokUrl);
   }
   const baseUrl = ngrokUrl || env.TELEGRAM_WEBHOOK_BASE_URL;
   let webhookUrl: string | null = null;
@@ -235,7 +253,7 @@ export async function refreshWebhook(
     ngrokUrl = tunnelUrl;
     ngrokAuto = true;
   } else if (options?.ngrokUrl !== undefined) {
-    ngrokUrl = options.ngrokUrl?.replace(/\/+$/, '') || null;
+    ngrokUrl = normalizeWebhookBaseUrl(options.ngrokUrl);
     ngrokAuto = false;
   } else if (bot.ngrokAuto) {
     // Re-use auto tunnel — get current URL or start new one
@@ -328,6 +346,28 @@ export async function updateAutoGreeting(
   }
 
   return updated ? sanitizeBot(updated) : null;
+}
+
+/**
+ * Re-establish managed ngrok tunnels/webhooks for bots that opted into auto mode.
+ * This prevents Telegram delivery from silently breaking after a backend restart.
+ */
+export async function restoreManagedTelegramWebhooks(): Promise<void> {
+  const autoBots = store.find('telegramBots', (r) => r.ngrokAuto === true);
+
+  if (autoBots.length === 0) return;
+
+  for (const bot of autoBots) {
+    try {
+      await refreshWebhook(bot.id as string);
+      console.log(`[telegram] Restored managed webhook for bot ${(bot.botUsername as string) ?? (bot.botId as string)}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      console.error(
+        `[telegram] Failed to restore managed webhook for bot ${(bot.botUsername as string) ?? (bot.botId as string)}: ${message}`,
+      );
+    }
+  }
 }
 
 /**

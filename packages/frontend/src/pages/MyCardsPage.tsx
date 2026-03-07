@@ -9,7 +9,6 @@ import {
   AlertTriangle,
   RotateCcw,
   FolderOpen,
-  ListChecks,
   Square,
   CheckSquare,
   Minus,
@@ -17,6 +16,9 @@ import {
   ChevronDown,
   ChevronRight,
   Layers,
+  ExternalLink,
+  Copy,
+  MousePointer,
 } from 'lucide-react';
 import { PageHeader } from '../layout';
 import { Button, Tooltip } from '../ui';
@@ -150,10 +152,14 @@ export function MyCardsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
+  const [selectionMode, setSelectionMode] = useState(false);
   const [bulkActionsOpen, setBulkActionsOpen] = useState<string | null>(null);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const bulkBarRef = useRef<HTMLDivElement>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; cardId: string } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api<{ entries: { id: string; name: string }[]; total: number }>('/collections?limit=200')
@@ -249,7 +255,24 @@ export function MyCardsPage() {
   }, [bulkActionsOpen]);
 
   useEffect(() => {
+    if (!contextMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu(null);
+      }
+    }
+    function handleScroll() { setContextMenu(null); }
+    document.addEventListener('mousedown', handleClick);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
     setSelectedCardIds(new Set());
+    setSelectionMode(false);
   }, [search, tagFilters]);
 
   const toggleSelectCard = useCallback((cardId: string) => {
@@ -257,6 +280,7 @@ export function MyCardsPage() {
       const next = new Set(prev);
       if (next.has(cardId)) next.delete(cardId);
       else next.add(cardId);
+      if (next.size === 0) setSelectionMode(false);
       return next;
     });
   }, []);
@@ -286,6 +310,7 @@ export function MyCardsPage() {
     if (failed > 0) toast.error(`${failed} card${failed !== 1 ? 's' : ''} failed to delete`);
     else toast.success(`${deleted} card${deleted !== 1 ? 's' : ''} deleted`);
     setSelectedCardIds(new Set());
+    setSelectionMode(false);
     setBulkProcessing(false);
   }, [selectedCardIds, bulkProcessing, confirm]);
 
@@ -361,9 +386,11 @@ export function MyCardsPage() {
 
       if (e.key === 'a' && (e.metaKey || e.ctrlKey) && allVisibleCards.length > 0) {
         e.preventDefault();
-        if (selectedCardIds.size === allVisibleCards.length) {
+        if (selectionMode && selectedCardIds.size === allVisibleCards.length) {
           setSelectedCardIds(new Set());
+          setSelectionMode(false);
         } else {
+          setSelectionMode(true);
           setSelectedCardIds(new Set(allVisibleCards.map((c) => c.id)));
         }
         return;
@@ -371,8 +398,11 @@ export function MyCardsPage() {
 
       if (e.key === 'Escape') {
         e.preventDefault();
-        if (selectedCardIds.size > 0) {
+        if (contextMenu) {
+          setContextMenu(null);
+        } else if (selectionMode) {
           setSelectedCardIds(new Set());
+          setSelectionMode(false);
           setBulkActionsOpen(null);
         } else if (focusedIndex >= 0) {
           setFocusedIndex(-1);
@@ -401,7 +431,7 @@ export function MyCardsPage() {
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [allVisibleCards, focusedIndex, quickViewCardId, navigate, selectedCardIds, toggleSelectCard]);
+  }, [allVisibleCards, focusedIndex, quickViewCardId, navigate, selectedCardIds, selectionMode, toggleSelectCard, contextMenu]);
 
   useEffect(() => {
     if (focusedIndex >= 0 && focusedIndex < allVisibleCards.length) {
@@ -426,6 +456,19 @@ export function MyCardsPage() {
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [cards]);
 
+  const handleCardContextMenu = useCallback((e: React.MouseEvent, cardId: string) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, cardId });
+  }, []);
+
+  const enterSelectionMode = useCallback((cardId?: string) => {
+    setSelectionMode(true);
+    if (cardId) {
+      setSelectedCardIds(new Set([cardId]));
+    }
+    setContextMenu(null);
+  }, []);
+
   function renderCardRow(card: CardItem, index: number) {
     const isFocused = focusedIndex === index;
     const isSelected = selectedCardIds.has(card.id);
@@ -434,19 +477,29 @@ export function MyCardsPage() {
         key={card.id}
         className={`${styles.cardRow}${isFocused ? ` ${styles.cardRowFocused}` : ''}${isSelected ? ` ${styles.cardRowSelected}` : ''}`}
         ref={(el) => { if (el) cardRowRefs.current.set(card.id, el); else cardRowRefs.current.delete(card.id); }}
+        onContextMenu={(e) => handleCardContextMenu(e, card.id)}
       >
-        <button
-          className={`${styles.selectBtn}${hasSelection ? ` ${styles.selectBtnVisible}` : ''}`}
-          onClick={() => toggleSelectCard(card.id)}
-          aria-label={isSelected ? 'Deselect' : 'Select'}
-          tabIndex={-1}
-        >
-          {isSelected ? <CheckSquare size={15} /> : <Square size={15} />}
-        </button>
+        {selectionMode && (
+          <button
+            className={`${styles.selectBtn} ${styles.selectBtnVisible}`}
+            onClick={() => toggleSelectCard(card.id)}
+            aria-label={isSelected ? 'Deselect' : 'Select'}
+            tabIndex={-1}
+          >
+            {isSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+          </button>
+        )}
         <Link
           to={`/cards/${card.id}`}
           className={`${styles.cardItem}${quickViewCardId === card.id ? ` ${styles.cardItemActive}` : ''}`}
-          onClick={(e) => openQuickView(e, card.id)}
+          onClick={(e) => {
+            if (selectionMode) {
+              e.preventDefault();
+              toggleSelectCard(card.id);
+            } else {
+              openQuickView(e, card.id);
+            }
+          }}
           tabIndex={-1}
         >
           <div className={styles.cardLeft}>
@@ -465,18 +518,6 @@ export function MyCardsPage() {
             )}
           </div>
           <div className={styles.cardRight}>
-            {(() => {
-              const cl = card.customFields?.checklist as { id: string; text: string; done: boolean }[] | undefined;
-              if (!cl || cl.length === 0) return null;
-              const done = cl.filter((i) => i.done).length;
-              const allDone = done === cl.length;
-              return (
-                <span className={`${styles.cardChecklist}${allDone ? ` ${styles.cardChecklistComplete}` : ''}`}>
-                  <ListChecks size={12} />
-                  {done}/{cl.length}
-                </span>
-              );
-            })()}
             {card.tags && card.tags.length > 0 && (
               <div className={styles.cardTagsGroup}>
                 {card.tags.slice(0, 2).map((tag) => (
@@ -763,13 +804,88 @@ export function MyCardsPage() {
             <Tooltip label="Clear selection">
               <button
                 className={styles.bulkClearBtn}
-                onClick={() => { setSelectedCardIds(new Set()); setBulkActionsOpen(null); }}
+                onClick={() => { setSelectedCardIds(new Set()); setSelectionMode(false); setBulkActionsOpen(null); }}
                 aria-label="Clear selection"
               >
                 <X size={14} />
               </button>
             </Tooltip>
           </div>
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className={styles.contextMenu}
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+        >
+          <button
+            className={styles.contextMenuItem}
+            onClick={() => {
+              setQuickViewCardId(contextMenu.cardId);
+              setContextMenu(null);
+            }}
+          >
+            <FileText size={14} />
+            Open
+          </button>
+          <button
+            className={styles.contextMenuItem}
+            onClick={() => {
+              navigate(`/cards/${contextMenu.cardId}`);
+              setContextMenu(null);
+            }}
+          >
+            <ExternalLink size={14} />
+            Open full page
+          </button>
+          <button
+            className={styles.contextMenuItem}
+            onClick={() => {
+              void navigator.clipboard.writeText(`${window.location.origin}/cards/${contextMenu.cardId}`);
+              toast.success('Link copied');
+              setContextMenu(null);
+            }}
+          >
+            <Copy size={14} />
+            Copy link
+          </button>
+          <div className={styles.contextMenuDivider} />
+          <button
+            className={styles.contextMenuItem}
+            onClick={() => enterSelectionMode(contextMenu.cardId)}
+          >
+            <MousePointer size={14} />
+            Select
+          </button>
+          <div className={styles.contextMenuDivider} />
+          <button
+            className={`${styles.contextMenuItem} ${styles.contextMenuItemDanger}`}
+            onClick={async () => {
+              const cardId = contextMenu.cardId;
+              setContextMenu(null);
+              const ok = await confirm({
+                title: 'Delete card',
+                message: 'Are you sure you want to delete this card? This cannot be undone.',
+                confirmLabel: 'Delete',
+                variant: 'danger',
+              });
+              if (!ok) return;
+              try {
+                await api(`/cards/${cardId}`, { method: 'DELETE' });
+                setCards((prev) => prev.filter((c) => c.id !== cardId));
+                setTotal((t) => Math.max(0, t - 1));
+                setTotalCount((t) => Math.max(0, t - 1));
+                toast.success('Card deleted');
+              } catch {
+                toast.error('Failed to delete card');
+              }
+            }}
+          >
+            <Trash2 size={14} />
+            Delete
+          </button>
         </div>
       )}
 

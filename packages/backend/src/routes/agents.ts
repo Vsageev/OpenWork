@@ -10,6 +10,14 @@ import cron from 'node-cron';
 import {
   checkCliStatus,
   listPresets,
+  listAgentAvatarPresets,
+  createAgentAvatarPreset,
+  updateAgentAvatarPreset,
+  deleteAgentAvatarPreset,
+  listAgentColorPresets,
+  createAgentColorPreset,
+  updateAgentColorPreset,
+  deleteAgentColorPreset,
   asPublicAgent,
   createAgent,
   listAgents,
@@ -33,6 +41,10 @@ import {
 import { getWorkspaceById } from '../services/workspaces.js';
 import { syncAgentCronJobs } from '../services/agent-cron.js';
 import { getProjectDefaultAgentKeyId } from '../services/project-settings.js';
+
+const avatarIconSchema = z.string().max(128);
+const avatarColorSchema = z.string().max(20);
+const avatarPresetNameSchema = z.string().trim().min(1).max(80);
 
 export async function agentRoutes(app: FastifyInstance) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
@@ -99,6 +111,152 @@ export async function agentRoutes(app: FastifyInstance) {
     },
   );
 
+  typedApp.get(
+    '/api/agent-avatar-presets',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'List saved agent avatar presets',
+      },
+    },
+    async (_request, reply) => {
+      return reply.send({ entries: listAgentAvatarPresets() });
+    },
+  );
+
+  typedApp.post(
+    '/api/agent-avatar-presets',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Create a saved agent avatar preset',
+        body: z.object({
+          name: avatarPresetNameSchema,
+          avatarIcon: avatarIconSchema,
+        }),
+      },
+    },
+    async (request, reply) => {
+      const preset = createAgentAvatarPreset(request.body);
+      return reply.status(201).send(preset);
+    },
+  );
+
+  typedApp.patch(
+    '/api/agent-avatar-presets/:id',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Update a saved agent avatar preset',
+        params: z.object({ id: z.string() }),
+        body: z.object({
+          name: avatarPresetNameSchema.optional(),
+          avatarIcon: avatarIconSchema.optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const preset = updateAgentAvatarPreset(request.params.id, request.body);
+      if (!preset) return reply.notFound('Avatar preset not found');
+      return reply.send(preset);
+    },
+  );
+
+  typedApp.delete(
+    '/api/agent-avatar-presets/:id',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Delete a saved agent avatar preset',
+        params: z.object({ id: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      const deleted = deleteAgentAvatarPreset(request.params.id);
+      if (!deleted) return reply.notFound('Avatar preset not found');
+      return reply.status(204).send();
+    },
+  );
+
+  // ── Color presets ──
+
+  typedApp.get(
+    '/api/agent-color-presets',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'List saved agent color presets',
+      },
+    },
+    async (_request, reply) => {
+      return reply.send({ entries: listAgentColorPresets() });
+    },
+  );
+
+  typedApp.post(
+    '/api/agent-color-presets',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Create a saved agent color preset',
+        body: z.object({
+          name: avatarPresetNameSchema,
+          bgColor: avatarColorSchema,
+          logoColor: avatarColorSchema,
+        }),
+      },
+    },
+    async (request, reply) => {
+      const preset = createAgentColorPreset(request.body);
+      return reply.status(201).send(preset);
+    },
+  );
+
+  typedApp.patch(
+    '/api/agent-color-presets/:id',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Update a saved agent color preset',
+        params: z.object({ id: z.string() }),
+        body: z.object({
+          name: avatarPresetNameSchema.optional(),
+          bgColor: avatarColorSchema.optional(),
+          logoColor: avatarColorSchema.optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const preset = updateAgentColorPreset(request.params.id, request.body);
+      if (!preset) return reply.notFound('Color preset not found');
+      return reply.send(preset);
+    },
+  );
+
+  typedApp.delete(
+    '/api/agent-color-presets/:id',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Delete a saved agent color preset',
+        params: z.object({ id: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      const deleted = deleteAgentColorPreset(request.params.id);
+      if (!deleted) return reply.notFound('Color preset not found');
+      return reply.status(204).send();
+    },
+  );
+
   // Create agent
   typedApp.post(
     '/api/agents',
@@ -118,9 +276,9 @@ export async function agentRoutes(app: FastifyInstance) {
           workspaceId: z.uuid().optional(),
           skipPermissions: z.boolean().optional(),
           groupId: z.string().nullable().optional(),
-          avatarIcon: z.string().max(50).optional(),
-          avatarBgColor: z.string().max(20).optional(),
-          avatarLogoColor: z.string().max(20).optional(),
+          avatarIcon: avatarIconSchema.optional(),
+          avatarBgColor: avatarColorSchema.optional(),
+          avatarLogoColor: avatarColorSchema.optional(),
         }),
       },
     },
@@ -222,9 +380,9 @@ export async function agentRoutes(app: FastifyInstance) {
           status: z.enum(['active', 'inactive', 'error']).optional(),
           skipPermissions: z.boolean().optional(),
           groupId: z.string().nullable().optional(),
-          avatarIcon: z.string().max(50).optional(),
-          avatarBgColor: z.string().max(20).optional(),
-          avatarLogoColor: z.string().max(20).optional(),
+          avatarIcon: avatarIconSchema.optional(),
+          avatarBgColor: avatarColorSchema.optional(),
+          avatarLogoColor: avatarColorSchema.optional(),
           cronJobs: z
             .array(
               z.object({

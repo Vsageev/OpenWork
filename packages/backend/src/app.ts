@@ -48,6 +48,7 @@ import { initAllBoardCronJobs } from './services/board-cron.js';
 import { reconcileRunsOnStartup, cleanupOldRunLogs } from './services/agent-runs.js';
 import { initializeAgentChatQueue, reattachRunningProcess, RUNS_DIR } from './services/agent-chat.js';
 import { initializeAgentBatchQueue } from './services/agent-batch-queue.js';
+import { restoreManagedTelegramWebhooks } from './services/telegram.js';
 
 function buildHttpsOptions(): SecureContextOptions | undefined {
   if (!env.TLS_CERT_PATH || !env.TLS_KEY_PATH) return undefined;
@@ -146,6 +147,9 @@ export async function buildApp() {
 
   // Apply persisted rate-limit settings to the in-memory limiter
   initRateLimiterFromSettings();
+
+  // Restore Telegram webhooks for bots using backend-managed ngrok tunnels.
+  await restoreManagedTelegramWebhooks();
 
   // Initialize agent cron jobs
   initAllCronJobs();

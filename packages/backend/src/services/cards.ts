@@ -399,11 +399,13 @@ export async function createCardComment(
   cardId: string,
   content: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
+  attachments?: Array<{ type: string; fileName: string; mimeType: string; fileSize: number; storagePath: string }>,
 ) {
   const comment = store.insert('cardComments', {
     cardId,
     authorId: audit?.userId,
     content,
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
   }) as any;
 
   if (audit) {

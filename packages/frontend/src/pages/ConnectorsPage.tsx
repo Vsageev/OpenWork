@@ -48,6 +48,12 @@ const CONNECTOR_TYPES = [
 
 type ConnectorTypeId = (typeof CONNECTOR_TYPES)[number]['id'];
 
+function normalizeNgrokUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 export function ConnectorsPage() {
   useDocumentTitle('Connectors');
   const [connectors, setConnectors] = useState<Connector[]>([]);
@@ -129,7 +135,7 @@ export function ConnectorsPage() {
         body: JSON.stringify({
           type: selectedType,
           token: token.trim(),
-          ngrokUrl: ngrokAuto ? 'auto' : (ngrokUrl.trim() || undefined),
+          ngrokUrl: ngrokAuto ? 'auto' : (normalizeNgrokUrl(ngrokUrl) || undefined),
         }),
       });
       closeCreate();
@@ -185,9 +191,18 @@ export function ConnectorsPage() {
     if (!settingsConnector) return;
     setSavingSettings(true);
     try {
+      const settingsToSave = settingsConnector.type === 'telegram'
+        ? {
+          ...editSettings,
+          ngrokUrl: (editSettings.ngrokAuto as boolean)
+            ? null
+            : normalizeNgrokUrl((editSettings.ngrokUrl as string) ?? '') || null,
+        }
+        : editSettings;
+
       await api(`/connectors/${settingsConnector.id}/settings`, {
         method: 'PATCH',
-        body: JSON.stringify(editSettings),
+        body: JSON.stringify(settingsToSave),
       });
       toast.success('Settings saved');
       setSettingsConnector(null);

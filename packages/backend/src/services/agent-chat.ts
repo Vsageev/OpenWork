@@ -40,8 +40,7 @@ const CHAT_MODE_SYSTEM_PROMPT =
   'If a request cannot be fully completed due to tool or permission limits, explain the limitation briefly and provide the best actionable alternative.';
 
 const TASK_MODE_SYSTEM_PROMPT =
-  'You are a task execution agent. Complete the assigned task and report results. ' +
-  'Refer to CHANNELS.MD for response instructions.';
+  'You are a task execution agent. Complete the assigned task and report results.';
 
 interface BuildCliOptions {
   model: string;
@@ -329,6 +328,13 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     isUnread: markUnread,
   });
 
+  if (params.direction === 'outbound') {
+    autoTitleIfNeeded(
+      params.conversationId,
+      buildAutoTitleFromMessage(params.content, params.type ?? 'text', params.attachments),
+    );
+  }
+
   return msg;
 }
 
@@ -350,9 +356,38 @@ function saveMessage(
 // Auto-title helper
 // ---------------------------------------------------------------------------
 
-function autoTitleIfNeeded(conversationId: string, prompt: string) {
+function buildAutoTitleFromMessage(
+  content: string,
+  type: AgentConversationMessageType | 'image',
+  attachments?: unknown[] | null,
+): string | null {
+  const trimmed = content.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+
+  if (type !== 'image') {
+    return null;
+  }
+
+  const parsedAttachments = parseAttachments(attachments);
+  const imageNames = parsedAttachments
+    .filter((attachment) => attachment.type === 'image' && typeof attachment.fileName === 'string')
+    .map((attachment) => attachment.fileName as string);
+
+  if (imageNames.length === 1) {
+    return `Image: ${imageNames[0]}`;
+  }
+  if (imageNames.length > 1) {
+    return `Images: ${imageNames.slice(0, 2).join(', ')}${imageNames.length > 2 ? ', ...' : ''}`;
+  }
+
+  return 'Image upload';
+}
+
+function autoTitleIfNeeded(conversationId: string, prompt: string | null) {
   const conv = store.getById('conversations', conversationId);
-  if (!conv || conv.subject) return;
+  if (!conv || conv.subject || !prompt) return;
 
   const text = prompt.slice(0, 60);
   const subject = text.length < prompt.length ? text + '...' : text;
@@ -447,7 +482,6 @@ function buildPromptWithHistory(
     'Do not ask project-setup questions unless the user explicitly asks for coding/project help. ' +
     `You have workspace API access via $WORKSPACE_API_URL and $WORKSPACE_API_KEY env vars. ` +
     `Do not use /api/messages for this chat thread. ` +
-    'See CHANNELS.MD for how to send progress updates and final answers. ' +
     'See CLAUDE.MD for endpoint examples.';
 
   if (history.length === 0 && currentPrompt) {
@@ -1170,9 +1204,6 @@ export function executePrompt(
     // Save user message
     saveMessage(conversationId, 'outbound', prompt);
 
-    // Auto-title conversation on first message
-    autoTitleIfNeeded(conversationId, prompt);
-
     spawnChatProcess(agentId, conversationId, fullPrompt, [], {
       onRunCreated: options.onRunCreated,
       onDone: resolve,
@@ -1807,7 +1838,7 @@ export function executeCronTask(
 
   const prompt =
     `${triggerContext}` +
-    `You have been triggered by a scheduled cron job. See CHANNELS.MD for how to respond.\n` +
+    `You have been triggered by a scheduled cron job.\n` +
     `This is a background automation run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
     `**Task:** ${job.prompt}\n\n` +
     `Complete this task.`;
@@ -1866,13 +1897,13 @@ export function executeCardTask(
 
   const prompt = customPrompt
     ? `${triggerContext}` +
-      `You are running a batch task on a card. See CHANNELS.MD for how to respond.\n` +
+      `You are running a batch task on a card.\n` +
       `This is a task assignment run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
       `**Card:** ${card.name}\n` +
       `${descriptionLine}\n\n` +
       `**Task:**\n${customPrompt}`
     : `${triggerContext}` +
-      `You have been assigned the following card. See CHANNELS.MD for how to respond.\n` +
+      `You have been assigned the following card.\n` +
       `This is a task assignment run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n\n` +
       `**Card:** ${card.name}\n` +
       `${descriptionLine}\n\n` +

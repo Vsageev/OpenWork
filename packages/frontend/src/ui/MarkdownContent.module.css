@@ -71,6 +71,15 @@
   border-radius: var(--radius-md);
 }
 
+.imagePlaceholder {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  font-style: italic;
+}
+
 /* ── Lists ─────────────────────────────────────────────── */
 
 .markdown ul,

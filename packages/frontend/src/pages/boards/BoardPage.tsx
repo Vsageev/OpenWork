@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Bot, FolderOpen, ChevronDown, Check, Clock, Search, X, ExternalLink, ArrowRight, MoveRight, Copy, CopyPlus, SearchX, ChevronsLeft, ChevronsRight, SlidersHorizontal, Star, Tag, Users, ArrowUpDown, ListChecks, GripVertical, RefreshCw, MoreHorizontal, Layers, User, AlignLeft } from 'lucide-react';
+import { Plus, Trash2, Bot, FolderOpen, ChevronDown, Check, Clock, Search, X, ExternalLink, ArrowRight, MoveRight, Copy, CopyPlus, SearchX, ChevronsLeft, ChevronsRight, SlidersHorizontal, Star, Tag, Users, ArrowUpDown, GripVertical, RefreshCw, MoreHorizontal, Layers, User, AlignLeft } from 'lucide-react';
 import { Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
 import { ActiveBatchRunsBanner } from '../../components/ActiveBatchRunsBanner';
@@ -2146,26 +2146,6 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
               {bc.card?.description && (
                 <div className={styles.cardDesc}>{stripMarkdown(bc.card.description)}</div>
               )}
-              {(() => {
-                const cl = bc.card?.customFields?.checklist as { id: string; text: string; done: boolean }[] | undefined;
-                if (!cl || cl.length === 0) return null;
-                const done = cl.filter((i) => i.done).length;
-                const pct = Math.round((done / cl.length) * 100);
-                return (
-                  <div className={styles.cardChecklist}>
-                    <div className={styles.cardChecklistBar}>
-                      <div
-                        className={`${styles.cardChecklistFill}${pct === 100 ? ` ${styles.cardChecklistComplete}` : ''}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <span className={`${styles.cardChecklistLabel}${pct === 100 ? ` ${styles.cardChecklistLabelComplete}` : ''}`}>
-                      <ListChecks size={10} />
-                      {done}/{cl.length}
-                    </span>
-                  </div>
-                );
-              })()}
               {(() => {
                 const assignee = bc.card?.assignee;
                 if (!assignee) return null;

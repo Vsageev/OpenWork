@@ -13,15 +13,17 @@ async function buildTestApp(): Promise<FastifyInstance> {
   app.setSerializerCompiler(serializerCompiler);
   await app.register(sensible);
 
-  const [{ registerJwt }, { agentRunRoutes }, { settingsRoutes }] = await Promise.all([
+  const [{ registerJwt }, { agentRunRoutes }, { settingsRoutes }, { cardRoutes }] = await Promise.all([
     importFresh<typeof import('../../src/plugins/jwt.ts')>('../../src/plugins/jwt.ts'),
     importFresh<typeof import('../../src/routes/agent-runs.ts')>('../../src/routes/agent-runs.ts'),
     importFresh<typeof import('../../src/routes/settings.ts')>('../../src/routes/settings.ts'),
+    importFresh<typeof import('../../src/routes/cards.ts')>('../../src/routes/cards.ts'),
   ]);
 
   await registerJwt(app);
   await app.register(agentRunRoutes);
   await app.register(settingsRoutes);
+  await app.register(cardRoutes);
 
   return app;
 }
@@ -176,6 +178,66 @@ test('agent default settings reject legacy payload keys instead of silently stri
   });
   assert.equal(getResponse.statusCode, 200);
   assert.deepEqual(Object.keys(getResponse.json()).sort(), ['defaultAgentKeyId']);
+
+  await app.close();
+});
+
+test('card routes reject legacy checklist payloads instead of silently stripping them', async () => {
+  const app = await buildTestApp();
+  const auth = await createAuthHeader(app);
+
+  const createResponse = await app.inject({
+    method: 'POST',
+    url: '/api/cards',
+    headers: {
+      authorization: auth,
+      'content-type': 'application/json',
+    },
+    payload: {
+      collectionId: '11111111-1111-4111-8111-111111111111',
+      name: 'Card with legacy checklist',
+      customFields: {
+        checklist: [{ id: 'item-1', text: 'Legacy item', done: false }],
+      },
+    },
+  });
+
+  assert.equal(createResponse.statusCode, 400);
+
+  const validCreateResponse = await app.inject({
+    method: 'POST',
+    url: '/api/cards',
+    headers: {
+      authorization: auth,
+      'content-type': 'application/json',
+    },
+    payload: {
+      collectionId: '11111111-1111-4111-8111-111111111111',
+      name: 'Card without legacy checklist',
+      customFields: {
+        priority: 'high',
+      },
+    },
+  });
+
+  assert.equal(validCreateResponse.statusCode, 201);
+  const created = validCreateResponse.json();
+
+  const patchResponse = await app.inject({
+    method: 'PATCH',
+    url: `/api/cards/${created.id as string}`,
+    headers: {
+      authorization: auth,
+      'content-type': 'application/json',
+    },
+    payload: {
+      customFields: {
+        checklist: [{ id: 'item-2', text: 'Still legacy', done: true }],
+      },
+    },
+  });
+
+  assert.equal(patchResponse.statusCode, 400);
 
   await app.close();
 });

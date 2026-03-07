@@ -374,9 +374,11 @@
   align-items: flex-start;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
+  margin: 0 6px;
   cursor: pointer;
   border-bottom: 1px solid var(--color-border-subtle);
-  transition: background var(--transition-fast);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
   text-decoration: none;
   color: inherit;
 }
@@ -387,25 +389,24 @@
 }
 
 .conversationItemActive {
-  background: rgba(59, 130, 246, 0.06);
-  border-left: 3px solid var(--color-link);
-  padding-left: calc(var(--space-4) - 3px);
+  background: rgba(59, 130, 246, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+  border-bottom-color: transparent;
 }
 
 .conversationItemActive:hover {
-  background: rgba(59, 130, 246, 0.08);
+  background: rgba(59, 130, 246, 0.10);
 }
 
 .conversationItemFocused {
   background: var(--color-surface);
-  outline: 2px solid rgba(59, 130, 246, 0.35);
-  outline-offset: -2px;
-  border-radius: 2px;
+  box-shadow: inset 0 0 0 1.5px rgba(59, 130, 246, 0.35);
+  border-radius: var(--radius-md);
 }
 
 .conversationItemActive .convName,
 .conversationItemActive .convSubject {
-  color: #000;
+  color: var(--color-link);
   font-weight: 600;
 }
 

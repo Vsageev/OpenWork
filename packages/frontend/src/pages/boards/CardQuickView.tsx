@@ -1,14 +1,15 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   X, ExternalLink, User, Send, Columns3, FileText,
   Link2, MessageSquare, ChevronDown, Pencil, Check, Trash2, Loader2, UserPlus,
-  ChevronLeft, ChevronRight, Copy, Circle, CircleCheck, ListChecks, Plus,
+  ChevronLeft, ChevronRight, Copy, Image,
 } from 'lucide-react';
 import { Button, MarkdownContent, Tooltip } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
-import { api, ApiError } from '../../lib/api';
+import { api, apiUpload, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
+import { getImagesFromClipboardData, getImagesFromFileList, prepareImageForUpload } from '../../lib/image-upload';
 import { TimeAgo } from '../../components/TimeAgo';
 import { useConfirm } from '../../hooks/useConfirm';
 import styles from './CardQuickView.module.css';
@@ -41,11 +42,20 @@ interface CardDetail {
   updatedAt: string;
 }
 
+interface CardCommentAttachment {
+  type: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storagePath: string;
+}
+
 interface CardComment {
   id: string;
   cardId: string;
   authorId: string;
   content: string;
+  attachments?: CardCommentAttachment[] | null;
   author: {
     id: string;
     firstName: string;
@@ -57,6 +67,16 @@ interface CardComment {
   } | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface DescriptionImageUploadResponse {
+  images: Array<{
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    storagePath: string;
+    markdown: string;
+  }>;
 }
 
 interface BoardColumnInfo {
@@ -83,6 +103,34 @@ function ini(f: string, l: string) {
   return `${f[0] ?? ''}${l[0] ?? ''}`.toUpperCase();
 }
 
+function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    const token = localStorage.getItem('ws_access_token');
+    fetch(`/api/storage/download?path=${encodeURIComponent(storagePath)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to load image');
+        return res.blob();
+      })
+      .then((blob) => {
+        revoke = URL.createObjectURL(blob);
+        setSrc(revoke);
+      })
+      .catch(() => setSrc(null));
+
+    return () => {
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [storagePath]);
+
+  if (!src) return <div className={styles.commentImagePlaceholder}>Loading image…</div>;
+  return <img className={styles.commentImage} src={src} alt={alt} />;
+}
+
 export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdated, cardIds, onNavigate }: CardQuickViewProps) {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [card, setCard] = useState<CardDetail | null>(null);
@@ -98,6 +146,7 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState('');
   const [savingDesc, setSavingDesc] = useState(false);
+  const [uploadingDescImages, setUploadingDescImages] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editCommentDraft, setEditCommentDraft] = useState('');
   const [savingEditComment, setSavingEditComment] = useState(false);
@@ -105,11 +154,17 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
   const [assigneeUsers, setAssigneeUsers] = useState<UserEntry[]>([]);
   const [assigneeAgents, setAssigneeAgents] = useState<AgentListEntry[]>([]);
   const [loadingAssignees, setLoadingAssignees] = useState(false);
+  const [stagedImages, setStagedImages] = useState<{ file: File; previewUrl: string }[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  const commentFileInputRef = useRef<HTMLInputElement>(null);
+  const MAX_COMMENT_IMAGES = 10;
   const cancelTitleEditRef = useRef(false);
   const assigneeDropdownRef = useRef<HTMLDivElement>(null);
   const commentInputRef = useRef<HTMLTextAreaElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const descTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const descFileInputRef = useRef<HTMLInputElement>(null);
+  const descSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   const [linkCopied, setLinkCopied] = useState(false);
 
@@ -264,14 +319,66 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
     }
   }
 
+  function stageCommentImages(files: File[]) {
+    setStagedImages((prev) => {
+      const remaining = MAX_COMMENT_IMAGES - prev.length;
+      const toAdd = files.slice(0, remaining).map((file) => ({
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+      return [...prev, ...toAdd];
+    });
+  }
+
+  function removeStagedImage(index: number) {
+    setStagedImages((prev) => {
+      const next = [...prev];
+      URL.revokeObjectURL(next[index].previewUrl);
+      next.splice(index, 1);
+      return next;
+    });
+  }
+
+  function clearStagedImages() {
+    setStagedImages((prev) => {
+      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
+      return [];
+    });
+  }
+
+  function handleCommentPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getImagesFromClipboardData(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    stageCommentImages(files);
+  }
+
+  function handleCommentFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = getImagesFromFileList(e.target.files);
+    if (files.length > 0) stageCommentImages(files);
+    e.target.value = '';
+  }
+
   async function addComment() {
-    if (!newComment.trim()) return;
+    if (!newComment.trim() && stagedImages.length === 0) return;
     setSubmitting(true);
     try {
-      await api(`/cards/${cardId}/comments`, {
-        method: 'POST',
-        body: JSON.stringify({ content: newComment.trim() }),
-      });
+      if (stagedImages.length > 0) {
+        setUploadingImages(true);
+        const fd = new FormData();
+        if (newComment.trim()) fd.append('caption', newComment.trim());
+        for (const staged of stagedImages) {
+          const prepared = await prepareImageForUpload(staged.file);
+          fd.append('files', prepared, prepared.name);
+        }
+        await apiUpload(`/cards/${cardId}/comments/upload`, fd);
+        clearStagedImages();
+      } else {
+        await api(`/cards/${cardId}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ content: newComment.trim() }),
+        });
+      }
       setNewComment('');
       if (commentInputRef.current) commentInputRef.current.style.height = '';
       fetchComments();
@@ -279,6 +386,7 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
       if (e instanceof ApiError) toast.error(e.message);
     } finally {
       setSubmitting(false);
+      setUploadingImages(false);
     }
   }
 
@@ -325,59 +433,6 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
     } finally {
       setSavingEditComment(false);
     }
-  }
-
-  // ── Checklist ───────────────────────────────────────
-  interface ChecklistItem { id: string; text: string; done: boolean }
-
-  const checklist: ChecklistItem[] = useMemo(
-    () => (card?.customFields?.checklist as ChecklistItem[] | undefined) ?? [],
-    [card?.customFields?.checklist],
-  );
-  const checklistDone = useMemo(() => checklist.filter((i) => i.done).length, [checklist]);
-  const checklistProgress = checklist.length > 0 ? Math.round((checklistDone / checklist.length) * 100) : 0;
-
-  const [newChecklistItem, setNewChecklistItem] = useState('');
-  const [addingChecklist, setAddingChecklist] = useState(false);
-  const checklistInputRef = useRef<HTMLInputElement>(null);
-
-  async function saveChecklist(items: ChecklistItem[]) {
-    if (!card) return;
-    const prevCustomFields = card.customFields;
-    const newCustomFields = { ...card.customFields, checklist: items };
-    setCard({ ...card, customFields: newCustomFields });
-    try {
-      await api(`/cards/${cardId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ customFields: newCustomFields }),
-      });
-      onCardUpdated?.(cardId, { customFields: newCustomFields });
-    } catch (e) {
-      setCard({ ...card, customFields: prevCustomFields });
-      if (e instanceof ApiError) toast.error(e.message);
-      else toast.error('Failed to update checklist');
-    }
-  }
-
-  function addChecklistItem() {
-    const text = newChecklistItem.trim();
-    if (!text) return;
-    const item: ChecklistItem = { id: `cl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, done: false };
-    setNewChecklistItem('');
-    void saveChecklist([...checklist, item]);
-  }
-
-  function toggleChecklistItem(itemId: string) {
-    const updated = checklist.map((i) => (i.id === itemId ? { ...i, done: !i.done } : i));
-    void saveChecklist(updated);
-    if (updated.length > 0 && updated.every((i) => i.done)) {
-      toast.success('All checklist items done!');
-    }
-  }
-
-  function removeChecklistItem(itemId: string) {
-    const updated = checklist.filter((i) => i.id !== itemId);
-    void saveChecklist(updated);
   }
 
   async function openAssigneePicker() {
@@ -443,7 +498,65 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
     if (!card) return;
     setDescDraft(card.description || '');
     setEditingDesc(true);
-    setTimeout(() => descTextareaRef.current?.focus(), 0);
+    setTimeout(() => {
+      const ta = descTextareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      descSelectionRef.current = { start: ta.selectionStart, end: ta.selectionEnd };
+    }, 0);
+  }
+
+  function updateDescriptionDraft(nextText: string, selection?: { start: number; end: number }) {
+    setDescDraft(nextText);
+    requestAnimationFrame(() => {
+      const ta = descTextareaRef.current;
+      if (!ta || !selection) return;
+      ta.focus();
+      ta.setSelectionRange(selection.start, selection.end);
+      descSelectionRef.current = selection;
+    });
+  }
+
+  function insertDescriptionText(textToInsert: string) {
+    const start = descSelectionRef.current.start;
+    const end = descSelectionRef.current.end;
+    const currentText = descTextareaRef.current?.value ?? descDraft;
+    const nextText = `${currentText.slice(0, start)}${textToInsert}${currentText.slice(end)}`;
+    const cursor = start + textToInsert.length;
+    updateDescriptionDraft(nextText, { start: cursor, end: cursor });
+  }
+
+  async function uploadDescriptionImages(files: File[]) {
+    if (!card || files.length === 0) return;
+    setUploadingDescImages(true);
+    try {
+      const formData = new FormData();
+      for (const file of files.slice(0, MAX_COMMENT_IMAGES)) {
+        const prepared = await prepareImageForUpload(file);
+        formData.append('files', prepared, prepared.name);
+      }
+      const response = await apiUpload<DescriptionImageUploadResponse>(`/cards/${card.id}/description/images/upload`, formData);
+      const snippet = response.images.map((image) => image.markdown).join('\n\n');
+      if (snippet) insertDescriptionText(snippet);
+    } catch (e) {
+      if (e instanceof ApiError) toast.error(e.message);
+      else toast.error('Failed to upload images');
+    } finally {
+      setUploadingDescImages(false);
+    }
+  }
+
+  function handleDescriptionPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getImagesFromClipboardData(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void uploadDescriptionImages(files);
+  }
+
+  function handleDescriptionFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = getImagesFromFileList(e.target.files);
+    if (files.length > 0) void uploadDescriptionImages(files);
+    e.target.value = '';
   }
 
   async function saveDesc() {
@@ -655,133 +768,68 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
                 ))}
               </div>
             )}
-
-            {/* Checklist */}
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>
-                <ListChecks size={12} />
-                Checklist
-                {checklist.length > 0 && (
-                  <span className={styles.commentCount}>
-                    {checklistDone}/{checklist.length}
-                  </span>
-                )}
-              </div>
-
-              {checklist.length > 0 && (
-                <>
-                  <div className={styles.checklistProgress}>
-                    <div
-                      className={`${styles.checklistProgressBar}${checklistProgress === 100 ? ` ${styles.checklistProgressComplete}` : ''}`}
-                      style={{ width: `${checklistProgress}%` }}
-                    />
-                  </div>
-                  <div className={styles.checklistItems}>
-                    {checklist.map((item) => (
-                      <div key={item.id} className={`${styles.checklistItem}${item.done ? ` ${styles.checklistItemDone}` : ''}`}>
-                        <button
-                          className={`${styles.checklistCheck}${item.done ? ` ${styles.checklistCheckDone}` : ''}`}
-                          onClick={() => toggleChecklistItem(item.id)}
-                          aria-label={item.done ? 'Mark as incomplete' : 'Mark as complete'}
-                        >
-                          {item.done ? <CircleCheck size={14} /> : <Circle size={14} />}
-                        </button>
-                        <span className={`${styles.checklistText}${item.done ? ` ${styles.checklistTextDone}` : ''}`}>
-                          {item.text}
-                        </span>
-                        <button
-                          className={styles.checklistRemove}
-                          onClick={() => removeChecklistItem(item.id)}
-                          title="Remove item"
-                        >
-                          <X size={11} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {addingChecklist ? (
-                <div className={styles.checklistAddForm}>
-                  <input
-                    ref={checklistInputRef}
-                    className={styles.checklistAddInput}
-                    value={newChecklistItem}
-                    onChange={(e) => setNewChecklistItem(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && newChecklistItem.trim()) {
-                        addChecklistItem();
-                        // Keep input focused for rapid entry
-                      }
-                      if (e.key === 'Escape') {
-                        setAddingChecklist(false);
-                        setNewChecklistItem('');
-                      }
-                    }}
-                    placeholder="Add an item..."
-                    autoFocus
-                  />
-                  <div className={styles.checklistAddActions}>
-                    <button
-                      className={styles.checklistAddSubmit}
-                      onClick={() => {
-                        addChecklistItem();
-                        checklistInputRef.current?.focus();
-                      }}
-                      disabled={!newChecklistItem.trim()}
-                    >
-                      Add
-                    </button>
-                    <button
-                      className={styles.checklistAddCancel}
-                      onClick={() => {
-                        setAddingChecklist(false);
-                        setNewChecklistItem('');
-                      }}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  className={styles.checklistAddBtn}
-                  onClick={() => {
-                    setAddingChecklist(true);
-                    setTimeout(() => checklistInputRef.current?.focus(), 0);
-                  }}
-                >
-                  <Plus size={12} />
-                  Add item
-                </button>
-              )}
-            </div>
-
             {/* Description */}
             <div className={styles.section}>
               <div className={styles.sectionTitle}>Description</div>
               {editingDesc ? (
                 <div className={styles.descEditWrap}>
+                  <input
+                    ref={descFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className={styles.commentHiddenFileInput}
+                    onChange={handleDescriptionFileSelect}
+                  />
                   <textarea
                     ref={descTextareaRef}
                     className={styles.descTextarea}
                     value={descDraft}
-                    onChange={(e) => setDescDraft(e.target.value)}
+                    onChange={(e) => {
+                      descSelectionRef.current = {
+                        start: e.currentTarget.selectionStart,
+                        end: e.currentTarget.selectionEnd,
+                      };
+                      setDescDraft(e.target.value);
+                    }}
+                    onPaste={handleDescriptionPaste}
                     placeholder="Write a description... (Markdown supported)"
-                    disabled={savingDesc}
+                    disabled={savingDesc || uploadingDescImages}
+                    onSelect={(e) => {
+                      descSelectionRef.current = {
+                        start: e.currentTarget.selectionStart,
+                        end: e.currentTarget.selectionEnd,
+                      };
+                    }}
+                    onBlur={(e) => {
+                      descSelectionRef.current = {
+                        start: e.currentTarget.selectionStart,
+                        end: e.currentTarget.selectionEnd,
+                      };
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') setEditingDesc(false);
                     }}
                     rows={4}
                   />
                   <div className={styles.descActions}>
-                    <Button variant="ghost" size="sm" onClick={() => setEditingDesc(false)} disabled={savingDesc}>
+                    <Tooltip label={uploadingDescImages ? 'Uploading images...' : 'Insert images'}>
+                      <button
+                        type="button"
+                        className={styles.commentAttachBtn}
+                        onClick={() => descFileInputRef.current?.click()}
+                        disabled={savingDesc || uploadingDescImages}
+                        aria-label="Insert images"
+                      >
+                        <Image size={14} />
+                      </button>
+                    </Tooltip>
+                    <Button variant="ghost" size="sm" onClick={() => setEditingDesc(false)} disabled={savingDesc || uploadingDescImages}>
                       Cancel
                     </Button>
-                    <Button size="sm" onClick={saveDesc} disabled={savingDesc}>
+                    <Button size="sm" onClick={saveDesc} disabled={savingDesc || uploadingDescImages}>
                       <Check size={14} />
-                      {savingDesc ? 'Saving...' : 'Save'}
+                      {uploadingDescImages ? 'Uploading...' : savingDesc ? 'Saving...' : 'Save'}
                     </Button>
                   </div>
                 </div>
@@ -932,9 +980,20 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
                             </div>
                           </div>
                         ) : (
-                          <div className={styles.commentContent}>
-                            <MarkdownContent compact>{c.content}</MarkdownContent>
-                          </div>
+                          <>
+                            {c.attachments && c.attachments.length > 0 && (
+                              <div className={styles.commentImages}>
+                                {c.attachments.map((att, i) => (
+                                  <CommentImage key={i} storagePath={att.storagePath} alt={att.fileName} />
+                                ))}
+                              </div>
+                            )}
+                            {c.content && (
+                              <div className={styles.commentContent}>
+                                <MarkdownContent compact>{c.content}</MarkdownContent>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                       {editingCommentId !== c.id && (
@@ -965,30 +1024,65 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
               )}
 
               <div className={styles.commentForm}>
-                <textarea
-                  ref={commentInputRef}
-                  className={styles.commentInput}
-                  placeholder="Write a comment..."
-                  value={newComment}
-                  onChange={(e) => {
-                    setNewComment(e.target.value);
-                    e.target.style.height = 'auto';
-                    e.target.style.height = `${e.target.scrollHeight}px`;
-                  }}
-                  rows={1}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addComment();
-                  }}
-                />
-                <Tooltip label="Send (Cmd+Enter)">
-                  <button
-                    className={styles.commentSend}
-                    onClick={addComment}
-                    disabled={!newComment.trim() || submitting}
-                  >
-                    <Send size={13} />
-                  </button>
-                </Tooltip>
+                {uploadingImages && <div className={styles.commentUploadingIndicator}>Uploading images…</div>}
+                {stagedImages.length > 0 && (
+                  <div className={styles.commentStagedImagesRow}>
+                    {stagedImages.map((img, i) => (
+                      <div key={img.previewUrl} className={styles.commentStagedImagePreview}>
+                        <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} />
+                        <button className={styles.commentStagedImageRemove} onClick={() => removeStagedImage(i)} aria-label="Remove image">
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className={styles.commentInputRow}>
+                  <input
+                    ref={commentFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className={styles.commentHiddenFileInput}
+                    onChange={handleCommentFileSelect}
+                  />
+                  <Tooltip label={stagedImages.length >= MAX_COMMENT_IMAGES ? `Max ${MAX_COMMENT_IMAGES} images` : 'Attach images'}>
+                    <button
+                      className={styles.commentAttachBtn}
+                      onClick={() => commentFileInputRef.current?.click()}
+                      disabled={uploadingImages || stagedImages.length >= MAX_COMMENT_IMAGES}
+                      aria-label="Attach images"
+                    >
+                      <Image size={13} />
+                    </button>
+                  </Tooltip>
+                  <textarea
+                    ref={commentInputRef}
+                    className={styles.commentInput}
+                    placeholder={stagedImages.length > 0 ? 'Add a caption… (optional)' : 'Write a comment...'}
+                    value={newComment}
+                    onChange={(e) => {
+                      setNewComment(e.target.value);
+                      e.target.style.height = 'auto';
+                      e.target.style.height = `${e.target.scrollHeight}px`;
+                    }}
+                    rows={1}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addComment();
+                    }}
+                    onPaste={handleCommentPaste}
+                    disabled={uploadingImages}
+                  />
+                  <Tooltip label="Send (Cmd+Enter)">
+                    <button
+                      className={styles.commentSend}
+                      onClick={addComment}
+                      disabled={(!newComment.trim() && stagedImages.length === 0) || submitting}
+                    >
+                      <Send size={13} />
+                    </button>
+                  </Tooltip>
+                </div>
               </div>
             </div>
           </div>

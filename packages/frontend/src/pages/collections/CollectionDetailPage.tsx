@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
-import { Plus, FileText, Trash2, User, X, Tag, CornerDownLeft, Star, Link2, ExternalLink, Users, ChevronDown, LayoutList, Table2, ChevronUp, Pencil, FolderInput, Layers, ChevronRight, Check, ListChecks, Bookmark, BookmarkPlus, Download, Copy, Bot } from 'lucide-react';
+import { Plus, FileText, Trash2, User, X, Tag, CornerDownLeft, Star, Link2, ExternalLink, Users, ChevronDown, LayoutList, Table2, ChevronUp, Pencil, FolderInput, Layers, ChevronRight, Check, Bookmark, BookmarkPlus, Download, Copy, Bot } from 'lucide-react';
 import { PageHeader } from '../../layout';
 import { Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
@@ -753,20 +753,16 @@ export function CollectionDetailPage() {
         return value;
       }
 
-      const headers = ['Name', 'Tags', 'Assignee', 'Checklist', 'Description', 'Created', 'Updated'];
+      const headers = ['Name', 'Tags', 'Assignee', 'Description', 'Created', 'Updated'];
       const rows = allCards.map((card) => {
         const tags = card.tags.map((t) => t.name).join('; ');
         const assignee = card.assignee
           ? `${card.assignee.firstName} ${card.assignee.lastName}`.trim()
           : '';
-        const checklist = card.customFields?.checklist as { done: boolean }[] | undefined;
-        const checklistStr = checklist && checklist.length > 0
-          ? `${checklist.filter((i) => i.done).length}/${checklist.length}`
-          : '';
         const description = stripMarkdown(card.description || '').replace(/\n+/g, ' ').trim();
         const created = new Date(card.createdAt).toLocaleDateString();
         const updated = new Date(card.updatedAt).toLocaleDateString();
-        return [card.name, tags, assignee, checklistStr, description, created, updated];
+        return [card.name, tags, assignee, description, created, updated];
       });
 
       const csvContent = [headers, ...rows]
@@ -1933,22 +1929,6 @@ export function CollectionDetailPage() {
                     {card.description && (
                       <div className={styles.cardDescription}>{stripMarkdown(card.description)}</div>
                     )}
-                    {(() => {
-                      const cl = card.customFields?.checklist as { id: string; done: boolean }[] | undefined;
-                      if (!cl || cl.length === 0) return null;
-                      const done = cl.filter((i) => i.done).length;
-                      const pct = Math.round((done / cl.length) * 100);
-                      return (
-                        <div className={styles.cardChecklist}>
-                          <div className={styles.cardChecklistBar}>
-                            <div className={`${styles.cardChecklistFill}${pct === 100 ? ` ${styles.cardChecklistComplete}` : ''}`} style={{ width: `${pct}%` }} />
-                          </div>
-                          <span className={`${styles.cardChecklistLabel}${pct === 100 ? ` ${styles.cardChecklistDone}` : ''}`}>
-                            <ListChecks size={11} /> {done}/{cl.length}
-                          </span>
-                        </div>
-                      );
-                    })()}
                   </div>
                   <div className={styles.cardFooter}>
                     <div className={styles.cardFooterLeft}>
