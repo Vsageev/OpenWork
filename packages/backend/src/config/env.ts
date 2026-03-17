@@ -15,7 +15,7 @@ const envSchema = z.object({
 
   DATA_DIR: z.string().default('./data'),
 
-  // Directory where agents create new projects (outside the workplace repo)
+  // Directory where agents create new projects (outside the OpenWork repo)
   PROJECTS_DIR: z
     .string()
     .default(path.join(os.homedir(), 'Projects', 'agent-builds')),

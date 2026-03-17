@@ -1,8 +1,8 @@
 /**
  * File upload validation (OWASP Unrestricted File Upload).
  *
- * Allowlist of safe MIME types for media uploads.
- * Blocks executable content that could be used for attacks.
+ * Strict uploads use a MIME allowlist.
+ * Relaxed uploads still block executable/script-like files by extension and MIME.
  */
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -59,17 +59,53 @@ const BLOCKED_EXTENSIONS = new Set([
   '.htaccess', '.htpasswd',
 ]);
 
+const BLOCKED_MIME_TYPES = new Set([
+  'application/x-msdownload',
+  'application/x-msdos-program',
+  'application/x-ms-installer',
+  'application/x-msi',
+  'application/x-bat',
+  'application/x-csh',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-executable',
+  'application/x-mach-binary',
+  'application/x-dosexec',
+  'application/x-httpd-php',
+  'application/x-php',
+  'application/javascript',
+  'text/javascript',
+]);
+
 export interface FileValidationResult {
   valid: boolean;
   error?: string;
 }
 
+export interface UploadedFileValidationOptions {
+  mode?: 'strict' | 'nonExecutable';
+}
+
+function normalizeMimeType(mimeType: string): string {
+  return mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+}
+
 export function validateUploadedFile(
   mimeType: string,
   filename: string,
+  options: UploadedFileValidationOptions = {},
 ): FileValidationResult {
-  // Check MIME type against allowlist
-  if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+  const mode = options.mode ?? 'strict';
+  const normalizedMimeType = normalizeMimeType(mimeType);
+
+  if (mode === 'strict') {
+    if (!ALLOWED_MIME_TYPES.has(normalizedMimeType)) {
+      return {
+        valid: false,
+        error: `File type "${mimeType}" is not allowed`,
+      };
+    }
+  } else if (normalizedMimeType && BLOCKED_MIME_TYPES.has(normalizedMimeType)) {
     return {
       valid: false,
       error: `File type "${mimeType}" is not allowed`,

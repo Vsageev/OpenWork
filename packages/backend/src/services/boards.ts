@@ -480,3 +480,7 @@ export async function removeCardFromBoard(boardId: string, cardId: string) {
   store.deleteWhere('boardCards', (r: any) => r.boardId === boardId && r.cardId === cardId);
   return true;
 }
+
+export async function clearBoardCards(boardId: string) {
+  return store.deleteWhere('boardCards', (r: any) => r.boardId === boardId);
+}

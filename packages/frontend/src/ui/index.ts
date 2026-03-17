@@ -10,6 +10,7 @@ export { PageLoader } from './PageLoader';
 export { ToastContainer } from './Toast';
 export { ErrorBoundary } from './ErrorBoundary';
 export { Tooltip } from './Tooltip';
+export { AnchoredOverlay } from './AnchoredOverlay';
 export { CronEditor } from './CronEditor';
 export { EntitySwitcher } from './EntitySwitcher';
 export { MarkdownContent } from './MarkdownContent';

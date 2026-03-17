@@ -2,9 +2,9 @@
 
 This is an experimenal preview. If anything broke - ask your cli agent to fix or contact me. Any feedback is alos welcomed
 
-# Workspace
+# OpenWork
 
-A workspace platform with boards, cards, folders, unified inbox, Telegram integration, AI agents, and webhook automation.
+OpenWork is a workspace platform with boards, cards, folders, unified inbox, Telegram integration, AI agents, and webhook automation.
 
 **Tech stack:** Fastify 5, JSON file store, React 19, Vite, TypeScript, Zod v4, pnpm workspaces.
 
@@ -18,7 +18,7 @@ A workspace platform with boards, cards, folders, unified inbox, Telegram integr
 ### 1. Clone and install
 
 ```bash
-git clone <repo-url> && cd workplace
+git clone <repo-url> && cd openwork
 pnpm install
 ```
 
@@ -62,7 +62,7 @@ packages/
   shared/      Shared TypeScript types
   widget/      Embeddable web form & chat widgets
 scripts/       Dev utility scripts (cert generation)
-docs/          Design system, API guidelines
+docs/          Design system and developer guides
 ```
 
 ### `packages/backend`
@@ -147,9 +147,9 @@ Run `pnpm db:bootstrap` from the repo root, or `cd packages/backend && pnpm db:b
 
 | Email                     | Password     |
 | ------------------------- | ------------ |
-| `admin@workspace.local`   | `admin123`   |
-| `manager@workspace.local` | `manager123` |
-| `agent1@workspace.local`  | `agent123`   |
+| `admin@openwork.local`    | `admin123`   |
+| `manager@openwork.local`  | `manager123` |
+| `agent1@openwork.local`   | `agent123`   |
 
 ## Docker (full stack)
 
@@ -166,7 +166,7 @@ See `packages/backend/.env.example` for all backend config.
 
 All project guidelines live in [`docs/`](./docs/):
 
-- [`docs/backend-api-design-guidelines.md`](./docs/backend-api-design-guidelines.md) — API patterns for AI agents (idempotency, batching, countOnly, conditional actions, error format)
+- [`docs/backend-development.md`](./docs/backend-development.md) — backend code authoring (routes, services, error handling)
 - [`docs/design-system.md`](./docs/design-system.md) — colors, typography, components, layout, animations
 
 ## License

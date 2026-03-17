@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { Plus, FileText, Trash2, User, X, Tag, CornerDownLeft, Star, Link2, ExternalLink, Users, ChevronDown, LayoutList, Table2, ChevronUp, Pencil, FolderInput, Layers, ChevronRight, Check, Bookmark, BookmarkPlus, Download, Copy, Bot } from 'lucide-react';
 import { PageHeader } from '../../layout';
-import { Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
+import { AnchoredOverlay, Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
 import { api, ApiError } from '../../lib/api';
 import { fetchProcessingCardAgents } from '../../lib/agent-batch';
@@ -277,13 +277,18 @@ export function CollectionDetailPage() {
   const [savingViewName, setSavingViewName] = useState('');
   const [showSaveViewInput, setShowSaveViewInput] = useState(false);
   const savedViewsDropdownRef = useRef<HTMLDivElement>(null);
+  const savedViewsOverlayRef = useRef<HTMLDivElement>(null);
   const saveViewInputRef = useRef<HTMLInputElement>(null);
 
   // Close saved views dropdown on outside click
   useEffect(() => {
     if (!showSavedViewsDropdown) return;
     const handler = (e: MouseEvent) => {
-      if (savedViewsDropdownRef.current && !savedViewsDropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !savedViewsDropdownRef.current?.contains(target) &&
+        !savedViewsOverlayRef.current?.contains(target)
+      ) {
         setShowSavedViewsDropdown(false);
         setShowSaveViewInput(false);
         setSavingViewName('');
@@ -1202,7 +1207,12 @@ export function CollectionDetailPage() {
               <ChevronDown size={12} />
             </button>
             {showSavedViewsDropdown && (
-              <div className={styles.savedViewsDropdown}>
+              <AnchoredOverlay
+                ref={savedViewsOverlayRef}
+                anchorRef={savedViewsDropdownRef}
+                className={styles.savedViewsDropdown}
+                placement="bottom-end"
+              >
                 <div className={styles.savedViewsHeader}>Saved Views</div>
                 {savedViews.length === 0 && !showSaveViewInput && (
                   <div className={styles.savedViewsEmpty}>No saved views yet</div>
@@ -1256,7 +1266,7 @@ export function CollectionDetailPage() {
                     Save current view
                   </button>
                 )}
-              </div>
+              </AnchoredOverlay>
             )}
           </div>
         </div>

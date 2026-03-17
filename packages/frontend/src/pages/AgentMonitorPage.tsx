@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Activity, MessageSquare, Clock, Zap, ChevronDown, ChevronRight, ChevronUp, Terminal, AlertTriangle, ExternalLink, X, Filter, Copy, Check, Trash2, Layers, Square, FileText, Brain, Wrench, Cpu, CircleAlert, Info, Hash } from 'lucide-react';
 import { PageHeader } from '../layout';
 import { api } from '../lib/api';
@@ -109,17 +109,39 @@ function formatTime(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+let elapsedNow = Date.now();
+let elapsedTicker: ReturnType<typeof setInterval> | null = null;
+const elapsedListeners = new Set<() => void>();
+
+function emitElapsedTick() {
+  elapsedNow = Date.now();
+  for (const listener of elapsedListeners) {
+    listener();
+  }
+}
+
+function subscribeToElapsedNow(listener: () => void) {
+  elapsedListeners.add(listener);
+  if (!elapsedTicker) {
+    elapsedTicker = setInterval(emitElapsedTick, 1000);
+  }
+
+  return () => {
+    elapsedListeners.delete(listener);
+    if (elapsedListeners.size === 0 && elapsedTicker) {
+      clearInterval(elapsedTicker);
+      elapsedTicker = null;
+    }
+  };
+}
+
+function getElapsedNowSnapshot() {
+  return elapsedNow;
+}
+
 function ElapsedTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState(() => Date.now() - new Date(startedAt).getTime());
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setElapsed(Date.now() - new Date(startedAt).getTime());
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [startedAt]);
-
-  return <span>{formatDuration(elapsed)}</span>;
+  const now = useSyncExternalStore(subscribeToElapsedNow, getElapsedNowSnapshot, getElapsedNowSnapshot);
+  return <span>{formatDuration(now - new Date(startedAt).getTime())}</span>;
 }
 
 function TriggerBadge({ type }: { type: AgentRun['triggerType'] }) {
@@ -787,6 +809,8 @@ function BatchErrorPanel({ batch }: { batch: AgentBatchRun }) {
 export function AgentMonitorPage() {
   useDocumentTitle('Monitor');
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const targetRunId = searchParams.get('runId');
   const [activeRuns, setActiveRuns] = useState<AgentRun[]>([]);
   const [historyRuns, setHistoryRuns] = useState<AgentRun[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -1038,6 +1062,34 @@ export function AgentMonitorPage() {
     });
   }, [statusFilter, triggerFilter, agentFilter, fetchHistory]);
 
+  useEffect(() => {
+    if (!targetRunId) return;
+    setExpandedRunId(targetRunId);
+
+    const exists =
+      activeRuns.some((run) => run.id === targetRunId) ||
+      historyRuns.some((run) => run.id === targetRunId);
+    if (exists) return;
+
+    let cancelled = false;
+    api<AgentRunDetail>(`/agent-runs/${targetRunId}`)
+      .then((run) => {
+        if (cancelled) return;
+        seedAgentAvatars([run]);
+        if (run.status === 'running') {
+          setActiveRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
+          return;
+        }
+        setHistoryRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
+        setHistoryTotal((prev) => prev + 1);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [targetRunId, activeRuns, historyRuns, seedAgentAvatars]);
+
   // Poll active runs every 4 seconds
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -1256,40 +1308,48 @@ export function AgentMonitorPage() {
         ) : (
           <div className={styles.runList}>
             {activeRuns.map((run) => (
-              <div
-                key={run.id}
-                className={`${styles.runRow} ${styles.activeRunRow}`}
-              >
-                <div className={styles.runAgent}>
-                  <AgentAvatar
-                    icon={agentAvatars[run.agentId]?.avatarIcon || 'spark'}
-                    bgColor={agentAvatars[run.agentId]?.avatarBgColor || '#1a1a2e'}
-                    logoColor={agentAvatars[run.agentId]?.avatarLogoColor || '#e94560'}
-                    size={24}
-                  />
+              <div key={run.id} className={styles.runEntry}>
+                <div
+                  className={`${styles.runRow} ${styles.activeRunRow}`}
+                  onClick={(e) => toggleExpand(e, run.id)}
+                >
+                  <span className={styles.expandToggle}>
+                    {expandedRunId === run.id
+                      ? <ChevronDown size={14} />
+                      : <ChevronRight size={14} />}
+                  </span>
+                  <div className={styles.runAgent}>
+                    <AgentAvatar
+                      icon={agentAvatars[run.agentId]?.avatarIcon || 'spark'}
+                      bgColor={agentAvatars[run.agentId]?.avatarBgColor || '#1a1a2e'}
+                      logoColor={agentAvatars[run.agentId]?.avatarLogoColor || '#e94560'}
+                      size={24}
+                    />
+                    <button
+                      className={styles.runAgentNameBtn}
+                      onClick={(e) => { e.stopPropagation(); navigate(`/agents?agentId=${run.agentId}`); }}
+                      title="Open agent"
+                    >
+                      {run.agentName}
+                    </button>
+                  </div>
+                  <TriggerBadge type={run.triggerType} />
+                  <StatusBadge status={run.status} />
+                  <span className={styles.runTime}>{formatTime(run.startedAt)}</span>
+                  <span className={styles.runDuration}>
+                    <ElapsedTimer startedAt={run.startedAt} />
+                  </span>
+                  <TriggerLink run={run} navigate={navigate} />
                   <button
-                    className={styles.runAgentNameBtn}
-                    onClick={(e) => { e.stopPropagation(); navigate(`/agents?agentId=${run.agentId}`); }}
-                    title="Open agent"
+                    className={styles.killButton}
+                    onClick={(e) => killRun(e, run.id)}
+                    disabled={killingRunId === run.id}
+                    title="Kill this run"
                   >
-                    {run.agentName}
+                    <X size={13} />
                   </button>
                 </div>
-                <TriggerBadge type={run.triggerType} />
-                <StatusBadge status={run.status} />
-                <span className={styles.runTime}>{formatTime(run.startedAt)}</span>
-                <span className={styles.runDuration}>
-                  <ElapsedTimer startedAt={run.startedAt} />
-                </span>
-                <TriggerLink run={run} navigate={navigate} />
-                <button
-                  className={styles.killButton}
-                  onClick={(e) => killRun(e, run.id)}
-                  disabled={killingRunId === run.id}
-                  title="Kill this run"
-                >
-                  <X size={13} />
-                </button>
+                {expandedRunId === run.id && <RunLogPanel runId={run.id} runStatus={run.status} />}
               </div>
             ))}
           </div>

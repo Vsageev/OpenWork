@@ -15,13 +15,13 @@ export async function registerSwagger(app: FastifyInstance) {
     openapi: {
       openapi: '3.0.3',
       info: {
-        title: 'Workspace API',
+        title: 'OpenWork API',
         description:
-          'Public REST API for the Workspace platform. Provides access to cards, boards, folders, and messages.\n\n' +
+          'Public REST API for the OpenWork platform. Provides access to cards, boards, folders, and messages.\n\n' +
           '## Authentication\n\n' +
           'All endpoints require a `Bearer` token in the `Authorization` header. Two authentication methods are supported:\n\n' +
           '- **JWT Token** — Obtained via `/api/auth/login`. Use `Authorization: Bearer <jwt>`.\n' +
-          '- **API Key** — Generated in the Workspace settings. API keys are prefixed with `ws_`. Use `Authorization: Bearer ws_<key>`.\n\n' +
+          '- **API Key** — Generated in the OpenWork settings. API keys are prefixed with `ws_`. Use `Authorization: Bearer ws_<key>`.\n\n' +
           'API keys have scoped permissions — only the permissions granted to the key will be available.\n\n' +
           '## Pagination\n\n' +
           'List endpoints support `limit` (1–100, default 50) and `offset` (default 0) query parameters.\n\n' +
@@ -30,7 +30,7 @@ export async function registerSwagger(app: FastifyInstance) {
           '## Errors\n\n' +
           'Errors follow a consistent format with `statusCode`, `error`, and `message` fields.',
         version: '1.0.0',
-        contact: { name: 'Workspace Support' },
+        contact: { name: 'OpenWork Support' },
       },
       servers: [{ url: '/', description: 'Current server' }],
       tags: [

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: packages/backend/Dockerfile
-    container_name: workplace-backend
+    container_name: openwork-backend
     restart: unless-stopped
     ports:
       - '${BACKEND_PORT:-3847}:3847'
@@ -21,7 +21,7 @@ services:
     build:
       context: .
       dockerfile: packages/frontend/Dockerfile
-    container_name: workplace-frontend
+    container_name: openwork-frontend
     restart: unless-stopped
     ports:
       - '${FRONTEND_PORT:-5173}:5173'

@@ -25,6 +25,7 @@ interface CreateAgentRunParams {
   stdoutPath?: string | null;
   stderrPath?: string | null;
   triggerPrompt?: string | null;
+  responseParentId?: string | null;
 }
 
 export function createAgentRun(params: CreateAgentRunParams): Record<string, unknown> {
@@ -43,6 +44,7 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
     stdoutPath: params.stdoutPath ?? null,
     stderrPath: params.stderrPath ?? null,
     triggerPrompt: params.triggerPrompt ?? null,
+    responseParentId: params.responseParentId ?? null,
     errorMessage: null,
     responseText: null,
     startedAt: new Date().toISOString(),
@@ -165,6 +167,7 @@ interface ListAgentRunsParams {
   status?: RunStatus;
   agentId?: string;
   triggerType?: TriggerType;
+  conversationId?: string;
   limit?: number;
   offset?: number;
 }
@@ -182,6 +185,7 @@ function toAgentRunSummary(run: Record<string, unknown>) {
     conversationId: run.conversationId ?? null,
     cardId: run.cardId ?? null,
     cronJobId: run.cronJobId ?? null,
+    responseParentId: run.responseParentId ?? null,
     errorMessage: run.errorMessage ?? null,
     responseText: run.responseText ?? null,
     startedAt: run.startedAt,
@@ -191,12 +195,13 @@ function toAgentRunSummary(run: Record<string, unknown>) {
 }
 
 export function listAgentRuns(params: ListAgentRunsParams = {}) {
-  const { status, agentId, triggerType, limit = 50, offset = 0 } = params;
+  const { status, agentId, triggerType, conversationId, limit = 50, offset = 0 } = params;
 
   const all = store.find('agent_runs', (r: Record<string, unknown>) => {
     if (status && r.status !== status) return false;
     if (agentId && r.agentId !== agentId) return false;
     if (triggerType && r.triggerType !== triggerType) return false;
+    if (conversationId && r.conversationId !== conversationId) return false;
     return true;
   });
 

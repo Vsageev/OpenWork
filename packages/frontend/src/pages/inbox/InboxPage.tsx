@@ -150,6 +150,7 @@ const CHANNEL_LABELS: Record<string, string> = {
 };
 
 const INBOX_REFRESH_INTERVAL_MS = 5000;
+const LOCAL_INBOX_DRAFTS_KEY = 'openwork_inbox_local_drafts';
 
 /* ── Helpers ── */
 
@@ -246,6 +247,58 @@ function areMessageListsEqual(a: Message[], b: Message[]): boolean {
     }
   }
   return true;
+}
+
+interface LocalInboxDraftMap {
+  [conversationId: string]: string;
+}
+
+function readLocalInboxDrafts(): LocalInboxDraftMap {
+  if (typeof window === 'undefined') return {};
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_INBOX_DRAFTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === 'string' && typeof entry[1] === 'string',
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalInboxDraft(conversationId: string, content: string) {
+  if (typeof window === 'undefined') return;
+
+  const drafts = readLocalInboxDrafts();
+  if (content) {
+    drafts[conversationId] = content;
+  } else {
+    delete drafts[conversationId];
+  }
+
+  try {
+    if (Object.keys(drafts).length === 0) {
+      window.localStorage.removeItem(LOCAL_INBOX_DRAFTS_KEY);
+    } else {
+      window.localStorage.setItem(LOCAL_INBOX_DRAFTS_KEY, JSON.stringify(drafts));
+    }
+  } catch {
+    // Ignore storage quota and serialization failures.
+  }
+}
+
+function getLocalInboxDraft(conversationId: string): string {
+  return readLocalInboxDrafts()[conversationId] ?? '';
+}
+
+function clearLocalInboxDraft(conversationId: string) {
+  writeLocalInboxDraft(conversationId, '');
 }
 
 /**
@@ -521,6 +574,34 @@ export function InboxPage() {
     api(`/conversations/${selectedId}/read`, { method: 'POST' }).catch(() => {});
   }, [selectedId, fetchMessages]);
 
+  const loadDraftForConversation = useCallback((conversationId: string) => {
+    api<PaginatedResponse<{ id: string; conversationId: string; content: string }>>(
+      `/message-drafts?conversationId=${conversationId}&limit=1`,
+    )
+      .then((data) => {
+        const draft = data.entries[0];
+        const localDraft = getLocalInboxDraft(conversationId);
+        setReplyText(localDraft || (draft ? draft.content : ''));
+        lastSavedDraftRef.current = draft
+          ? { conversationId, content: draft.content }
+          : null;
+      })
+      .catch(() => {
+        setReplyText(getLocalInboxDraft(conversationId));
+        lastSavedDraftRef.current = null;
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setReplyText('');
+      lastSavedDraftRef.current = null;
+      return;
+    }
+
+    loadDraftForConversation(selectedId);
+  }, [loadDraftForConversation, selectedId]);
+
   useEffect(() => {
     if (!selectedId) return;
 
@@ -556,6 +637,11 @@ export function InboxPage() {
   }, [messages]);
 
   /* ── Auto-save draft (debounced) ── */
+  useEffect(() => {
+    if (!selectedId) return;
+    writeLocalInboxDraft(selectedId, replyText);
+  }, [replyText, selectedId]);
+
   useEffect(() => {
     if (!selectedId) return;
 
@@ -675,22 +761,6 @@ export function InboxPage() {
     setKeyboardOpen(false);
     setKeyboardRows([]);
     setDraftSavedIndicator(false);
-
-    // Load draft for the selected conversation
-    api<PaginatedResponse<{ id: string; conversationId: string; content: string }>>(
-      `/message-drafts?conversationId=${id}&limit=1`,
-    )
-      .then((data) => {
-        const draft = data.entries[0];
-        setReplyText(draft ? draft.content : '');
-        lastSavedDraftRef.current = draft
-          ? { conversationId: id, content: draft.content }
-          : null;
-      })
-      .catch(() => {
-        setReplyText('');
-        lastSavedDraftRef.current = null;
-      });
   }
 
   /* ── Formatting helpers ── */
@@ -866,6 +936,7 @@ export function InboxPage() {
       // Clear draft for this conversation
       lastSavedDraftRef.current = null;
       if (selectedId) {
+        clearLocalInboxDraft(selectedId);
         api<PaginatedResponse<{ id: string; conversationId: string }>>(
           `/message-drafts?conversationId=${selectedId}&limit=1`,
         )

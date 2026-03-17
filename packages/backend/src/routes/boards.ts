@@ -18,6 +18,7 @@ import {
   addCardToBoard,
   moveCardOnBoard,
   removeCardFromBoard,
+  clearBoardCards,
 } from '../services/boards.js';
 import { getWorkspaceById } from '../services/workspaces.js';
 import {
@@ -267,6 +268,7 @@ export async function boardRoutes(app: FastifyInstance) {
       if (!updated) {
         return reply.notFound('Column not found');
       }
+
       return reply.send(updated);
     },
   );
@@ -287,6 +289,7 @@ export async function boardRoutes(app: FastifyInstance) {
       if (!deleted) {
         return reply.notFound('Column not found');
       }
+
       return reply.status(204).send();
     },
   );
@@ -370,6 +373,30 @@ export async function boardRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       await removeCardFromBoard(request.params.id, request.params.cardId);
+
+      return reply.status(204).send();
+    },
+  );
+
+  // Remove all cards from board
+  typedApp.delete(
+    '/api/boards/:id/cards',
+    {
+      onRequest: [app.authenticate, requirePermission('boards:update')],
+      schema: {
+        tags: ['Boards'],
+        summary: 'Remove all cards from a board',
+        params: z.object({ id: z.uuid() }),
+      },
+    },
+    async (request, reply) => {
+      const board = await getBoardById(request.params.id);
+      if (!board) {
+        return reply.notFound('Board not found');
+      }
+
+      await clearBoardCards(request.params.id);
+
       return reply.status(204).send();
     },
   );

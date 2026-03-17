@@ -174,7 +174,9 @@
   letter-spacing: 0.03em;
   color: var(--color-text-tertiary);
   background: var(--color-surface);
-  transition: color var(--transition-fast), background var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
   user-select: none;
 }
 
@@ -534,7 +536,9 @@
   margin: 0;
   border-radius: 0;
   cursor: pointer;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  transition:
+    background var(--transition-fast),
+    box-shadow var(--transition-fast);
   position: relative;
 }
 
@@ -589,8 +593,13 @@
 }
 
 @keyframes queuePulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
 }
 
 .agentGroupMeta {
@@ -629,7 +638,6 @@
   color: var(--color-text);
   background: var(--color-border);
 }
-
 
 /* Conversations inside agent group */
 .convList {
@@ -728,8 +736,15 @@
 }
 
 @keyframes conv-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.75); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.75);
+  }
 }
 
 .convItemTime {
@@ -754,7 +769,10 @@
   flex-shrink: 0;
   padding: 0;
   opacity: 0;
-  transition: opacity var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast),
+    background var(--transition-fast);
 }
 
 .convItemDelete:hover {
@@ -833,10 +851,13 @@
   color: var(--color-text-tertiary);
 }
 
-
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .spinIcon {
@@ -892,7 +913,9 @@
 }
 
 @keyframes chatSpin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .messageRow {
@@ -925,6 +948,14 @@
   min-width: 0;
 }
 
+.messagePlainText {
+  white-space: pre-wrap;
+}
+
+.messagePlainText {
+  color: inherit;
+}
+
 .messageBubbleUser {
   background: var(--color-primary-brand);
   color: var(--color-text-inverse);
@@ -951,7 +982,48 @@
   justify-content: flex-end;
 }
 
+.messageMonitorBtn,
 .copyBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast);
+  padding: 0;
+}
+
+.messageMonitorBtn {
+  width: auto;
+  gap: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.copyBtn {
+  width: 22px;
+}
+
+.messageContent:hover .messageMonitorBtn,
+.messageContent:hover .copyBtn {
+  opacity: 1;
+}
+
+.messageMonitorBtn:hover,
+.copyBtn:hover {
+  color: var(--color-text);
+}
+
+/* ── Edit message button ── */
+.editMsgBtn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -963,16 +1035,65 @@
   color: var(--color-text-tertiary);
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--transition-fast), color var(--transition-fast);
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast);
   padding: 0;
 }
 
-.messageContent:hover .copyBtn {
+.messageContent:hover .editMsgBtn {
   opacity: 1;
 }
 
-.copyBtn:hover {
+.editMsgBtn:hover {
   color: var(--color-text);
+}
+
+/* ── Branch navigation ── */
+.branchNav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+}
+
+.branchNavUser {
+  justify-content: flex-end;
+}
+
+.branchNavBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.branchNavBtn:hover:not(:disabled) {
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
+.branchNavBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.branchNavLabel {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  min-width: 28px;
+  text-align: center;
+  user-select: none;
 }
 
 /* Streaming cursor */
@@ -988,8 +1109,13 @@
 }
 
 @keyframes agents-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 /* ── Chat images ── */
@@ -1013,12 +1139,54 @@
   font-size: 13px;
 }
 
+.chatFileLink {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chatFileIcon,
+.chatFileDownload {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.chatFileMeta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.chatFileName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chatFileSize,
+.chatFileLoading {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
 .uploadingIndicator {
   font-size: 12px;
   color: var(--color-text-tertiary);
   padding: 0 0 var(--space-2);
 }
-
 
 /* ── Staged image preview ── */
 .stagedImagesRow {
@@ -1043,6 +1211,19 @@
   display: block;
 }
 
+.stagedImageThumbPlaceholder {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-surface);
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+
 .stagedImageRemove {
   position: absolute;
   top: -6px;
@@ -1057,12 +1238,63 @@
   background: var(--color-bg-primary);
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
 }
 
 .stagedImageRemove:hover {
   background: rgba(239, 68, 68, 0.1);
   color: #ef4444;
+}
+
+.stagedFileChip {
+  min-width: 0;
+  max-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+
+.stagedFileIcon {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.stagedFileMeta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stagedFileName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stagedFileSize {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.stagedFileRemove {
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* ── Reply box ── */
@@ -1077,29 +1309,80 @@
   border-top-color: var(--color-link);
 }
 
+.composerEditBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+
+.composerEditMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.composerEditCancel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  padding: var(--space-1) var(--space-3);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.composerEditCancel:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
 .replyRow {
   display: flex;
   align-items: flex-end;
-  gap: var(--space-3);
+  gap: 6px;
 }
 
 .hiddenFileInput {
   display: none;
 }
 
+.attachmentButtons {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-end;
+  gap: 2px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
 .attachBtn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
+  width: 32px;
   height: 44px;
   border: none;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-tertiary);
   cursor: pointer;
-  transition: color var(--transition-fast), background var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
   flex-shrink: 0;
+}
+
+.attachBtn svg {
+  width: 18px;
+  height: 18px;
 }
 
 .attachBtn:hover {
@@ -1163,7 +1446,6 @@
   cursor: not-allowed;
 }
 
-
 /* ── Streaming queue info ── */
 .streamingQueueInfo {
   display: inline-flex;
@@ -1183,13 +1465,33 @@
   opacity: 1;
 }
 
+.streamingActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.streamingActions .messageMonitorBtn {
+  opacity: 1;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+
+.streamingActions .messageMonitorBtn:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
 /* ── Stop run button ── */
 .stopRunBtn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 3px 10px;
-  margin-top: 6px;
   border-radius: var(--radius-sm);
   border: 1px solid rgba(239, 68, 68, 0.3);
   background: rgba(239, 68, 68, 0.08);
@@ -1522,6 +1824,75 @@
   margin-bottom: var(--space-2);
 }
 
+.createAvatarField {
+  position: relative;
+}
+
+.createAvatarTrigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.createAvatarTrigger:hover {
+  border-color: var(--color-text-secondary);
+  background: var(--color-surface);
+}
+
+.createAvatarTriggerText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.createAvatarTriggerTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.createAvatarTriggerHint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.createAvatarChevron {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  transition:
+    transform var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.createAvatarTrigger:hover .createAvatarChevron {
+  color: var(--color-text-secondary);
+}
+
+.createAvatarChevronOpen {
+  transform: rotate(180deg);
+}
+
+.createAvatarPickerPanel {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+}
+
 .modelGrid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1601,6 +1972,49 @@
   font-size: 11px;
   color: var(--color-text-tertiary);
   margin-top: var(--space-1);
+}
+
+.directoryPickerField {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+
+.directoryPickerFieldError {
+  border-color: var(--color-error);
+}
+
+.directoryPickerValue {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--color-text);
+}
+
+.directoryPickerValueText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directoryPickerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.directoryPickerError {
+  margin-top: var(--space-1);
+  font-size: 12px;
+  color: var(--color-error);
 }
 
 /* Preset picker */
@@ -2034,13 +2448,23 @@
 }
 
 @keyframes skFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes skSlideUp {
-  from { transform: translateY(12px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }
 
 .skillsPickerModal {
@@ -2199,9 +2623,9 @@
 }
 
 .skillsMgrModal {
-  width: 780px;
-  max-width: 92vw;
-  height: 600px;
+  width: 960px;
+  max-width: 94vw;
+  height: 680px;
   max-height: 85vh;
   background: var(--color-card);
   border: 1px solid var(--color-border);
@@ -2213,8 +2637,8 @@
 
 /* Left panel: skill list sidebar */
 .skillsMgrSidebar {
-  width: 240px;
-  min-width: 240px;
+  width: 280px;
+  min-width: 280px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--color-border);
@@ -2223,17 +2647,28 @@
 
 .skillsMgrSidebarHeader {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  align-items: flex-start;
+  gap: var(--space-3);
   padding: var(--space-3) var(--space-3);
   border-bottom: 1px solid var(--color-border);
+}
+
+.skillsMgrSidebarHeaderText {
+  flex: 1;
+  min-width: 0;
 }
 
 .skillsMgrSidebarTitle {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text);
-  flex: 1;
+}
+
+.skillsMgrSidebarSubtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
 }
 
 .skillsMgrNewBtn {
@@ -2268,8 +2703,11 @@
   gap: var(--space-2);
   padding: var(--space-2) var(--space-2);
   border-radius: var(--radius-md);
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
 }
 
 .skillsMgrItem:hover {
@@ -2279,6 +2717,11 @@
 .skillsMgrItemActive {
   background: var(--color-card);
   border: 1px solid var(--color-border);
+}
+
+.skillsMgrItemEditing {
+  background: var(--color-card);
+  border-color: rgba(45, 45, 45, 0.18);
 }
 
 .skillsMgrItemIcon {
@@ -2320,6 +2763,37 @@
   text-overflow: ellipsis;
 }
 
+.skillsMgrItemActions {
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.skillsMgrItem:hover .skillsMgrItemActions,
+.skillsMgrItemActive .skillsMgrItemActions {
+  opacity: 1;
+}
+
+.skillsMgrItemEditBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.skillsMgrItemEditBtn:hover {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
 .skillsMgrEmpty {
   display: flex;
   flex-direction: column;
@@ -2352,68 +2826,133 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  background: var(--color-card);
 }
 
-.skillsMgrMainHeader {
+/* ── Top bar ── */
+.skillsMgrTopBar {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
+  min-height: 48px;
 }
 
-.skillsMgrMainTitle {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
+.skillsMgrTopBarInner {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+form.skillsMgrTopBarInner {
+  flex-wrap: wrap;
+}
+
+.skillsMgrTopFields {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex: 1;
   min-width: 0;
+}
+
+.skillsMgrInlineInput {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  outline: none;
+  transition: border-color var(--transition-fast);
+  box-sizing: border-box;
+}
+
+.skillsMgrInlineInput:focus {
+  border-color: var(--color-primary-brand);
+}
+
+.skillsMgrInlineInputSub {
+  font-weight: 400;
+  color: var(--color-text-secondary);
+  flex: 2;
+}
+
+.skillsMgrInlineError {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.18);
+  color: var(--color-error);
+  font-size: 12px;
+}
+
+.skillsMgrTopIdentity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+}
+
+.skillsMgrTopIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.skillsMgrTopMeta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.skillsMgrTopName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.skillsMgrMainDesc {
+.skillsMgrTopDesc {
   font-size: 12px;
   color: var(--color-text-tertiary);
-  padding: 0 var(--space-4);
-  padding-top: var(--space-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.skillsMgrActions {
+.skillsMgrTopLabel {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.skillsMgrTopActions {
   display: flex;
   align-items: center;
   gap: var(--space-1);
   flex-shrink: 0;
 }
 
-.skillsMgrActionBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  padding: 5px 10px;
-  font-size: 12px;
-  font-weight: 500;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-card);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.skillsMgrActionBtn:hover {
-  background: var(--color-surface);
-  border-color: var(--color-text-tertiary);
-  color: var(--color-text);
-}
-
-.skillsMgrActionBtnIcon {
+.skillsMgrTopBtnIcon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2427,14 +2966,52 @@
   transition: all var(--transition-fast);
 }
 
-.skillsMgrActionBtnIcon:hover {
+.skillsMgrTopBtnIcon:hover {
   background: var(--color-surface);
   color: var(--color-text);
 }
 
-.skillsMgrActionBtnDanger:hover {
+.skillsMgrTopBtnDanger:hover {
   background: rgba(239, 68, 68, 0.08);
   color: var(--color-error);
+}
+
+.skillsMgrTopBtnGhost {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.skillsMgrTopBtnGhost:hover {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.skillsMgrTopBtnPrimary {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-primary-brand);
+  color: var(--color-text-inverse);
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.skillsMgrTopBtnPrimary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.skillsMgrTopBtnPrimary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .skillsMgrClose {
@@ -2449,6 +3026,7 @@
   color: var(--color-text-tertiary);
   cursor: pointer;
   transition: all var(--transition-fast);
+  flex-shrink: 0;
 }
 
 .skillsMgrClose:hover {
@@ -2456,35 +3034,21 @@
   color: var(--color-text);
 }
 
-/* File list in main panel */
-.skillsMgrFileToolbar {
+/* ── Body ── */
+.skillsMgrMainBody {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--color-border-subtle);
+  flex-direction: column;
 }
 
 .skillsMgrFileList {
   flex: 1;
   overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  box-sizing: border-box;
 }
 
-.skillsMgrFilesEmpty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-8) var(--space-4);
-  text-align: center;
-}
-
-.skillsMgrFilesEmptyText {
-  font-size: 13px;
-  color: var(--color-text-tertiary);
-}
-
-/* No skill selected placeholder */
 .skillsMgrPlaceholder {
   flex: 1;
   display: flex;
@@ -2498,214 +3062,35 @@
 
 .skillsMgrPlaceholderIcon {
   color: var(--color-text-tertiary);
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
 .skillsMgrPlaceholderText {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--color-text-tertiary);
-}
-
-.skillsMgrPlaceholderHint {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  opacity: 0.7;
   max-width: 260px;
   line-height: 1.5;
 }
 
-/* File editor view */
-.skillsMgrEditorHeader {
+.skillsMgrPlaceholderBtn {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.skillsMgrEditorPath {
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--color-text-secondary);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skillsMgrEditor {
-  flex: 1;
-  width: 100%;
-  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-1);
+  padding: 7px 14px;
   font-size: 13px;
-  font-family: var(--font-mono);
-  line-height: 1.6;
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: none;
-  outline: none;
-  resize: none;
-  box-sizing: border-box;
-  min-height: 0;
-}
-
-.skillsMgrEditorSaveBtn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 5px 14px;
-  font-size: 12px;
   font-weight: 500;
-  border: none;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-primary-brand);
-  color: var(--color-text-inverse);
-  cursor: pointer;
-  transition: opacity var(--transition-fast);
-}
-
-.skillsMgrEditorSaveBtn:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.skillsMgrEditorSaveBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.skillsMgrBackBtn {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 8px;
-  font-size: 12px;
-  font-weight: 500;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-secondary);
+  background: var(--color-card);
+  color: var(--color-text);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 
-.skillsMgrBackBtn:hover {
+.skillsMgrPlaceholderBtn:hover {
   background: var(--color-surface);
-  color: var(--color-text);
-}
-
-/* New file form */
-.skillsMgrNewFileForm {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.skillsMgrNewFileInput {
-  padding: var(--space-2) var(--space-4);
-  font-size: 13px;
-  font-family: var(--font-mono);
-  border: none;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-card);
-  color: var(--color-text);
-  outline: none;
-  box-sizing: border-box;
-}
-
-.skillsMgrNewFileInput:focus {
-  border-bottom-color: var(--color-primary-brand);
-}
-
-.skillsMgrNewFileActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  border-top: 1px solid var(--color-border);
-}
-
-.skillsMgrCancelBtn {
-  padding: 5px 12px;
-  font-size: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.skillsMgrCancelBtn:hover {
-  background: var(--color-surface);
-  color: var(--color-text);
-}
-
-.skillsMgrSaveBtn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 5px 14px;
-  font-size: 12px;
-  font-weight: 500;
-  border: none;
-  border-radius: var(--radius-md);
-  background: var(--color-primary-brand);
-  color: var(--color-text-inverse);
-  cursor: pointer;
-  transition: opacity var(--transition-fast);
-}
-
-.skillsMgrSaveBtn:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.skillsMgrSaveBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* Inline skill create/edit form in sidebar */
-.skillsMgrInlineForm {
-  margin: var(--space-1);
-  padding: var(--space-2) var(--space-2);
-  border: 1px solid var(--color-primary-brand);
-  border-radius: var(--radius-md);
-  background: var(--color-card);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.skillsMgrInlineLabel {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-}
-
-.skillsMgrInlineInput {
-  width: 100%;
-  padding: 5px 8px;
-  font-size: 13px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
-  outline: none;
-  box-sizing: border-box;
-  transition: border-color var(--transition-fast);
-}
-
-.skillsMgrInlineInput:focus {
-  border-color: var(--color-primary-brand);
-}
-
-.skillsMgrInlineActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-1);
+  border-color: var(--color-text-tertiary);
 }
 
 /* Actions row */
@@ -3404,6 +3789,37 @@ button.filesColName:hover .filesFileName {
   .filesPanel {
     padding: var(--space-3) var(--space-4);
   }
+
+  .skillsMgrModal {
+    width: calc(100vw - var(--space-4) * 2);
+    max-width: none;
+    height: calc(100vh - var(--space-4) * 2);
+    flex-direction: column;
+  }
+
+  .skillsMgrSidebar {
+    width: 100%;
+    min-width: 0;
+    max-height: 220px;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .skillsMgrTopBar {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .skillsMgrTopFields {
+    flex-direction: column;
+  }
+
+  .skillsMgrFileList {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .skillsMgrItemActions {
+    opacity: 1;
+  }
 }
 
 @media (max-width: 480px) {
@@ -3526,5 +3942,30 @@ button.filesColName:hover .filesFileName {
 
   .newConvBtn {
     padding-left: 36px;
+  }
+
+  .skillsMgrOverlay {
+    padding: var(--space-2);
+  }
+
+  .skillsMgrModal {
+    width: 100%;
+    height: 100%;
+  }
+
+  .skillsMgrSidebarHeader {
+    padding: var(--space-3);
+  }
+
+  .skillsMgrTopBar {
+    padding: var(--space-2);
+  }
+
+  .skillsMgrTopFields {
+    flex-direction: column;
+  }
+
+  .skillsMgrFileList {
+    padding: var(--space-2);
   }
 }

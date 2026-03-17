@@ -125,7 +125,7 @@ export function Sidebar({ onNavigate, onQuickCreateCard, unreadCount = 0, active
       {confirmDialog}
       {collapsed ? (
         <>
-          <Tooltip label={activeWorkspace?.name ?? 'Workplace'} position="right">
+          <Tooltip label={activeWorkspace?.name ?? 'OpenWork'} position="right">
             <div className={styles.logoCollapsed}>
               {(activeWorkspace?.name ?? 'W')[0]}
             </div>
@@ -144,7 +144,7 @@ export function Sidebar({ onNavigate, onQuickCreateCard, unreadCount = 0, active
         </>
       ) : (
         <div className={styles.logoRow}>
-          <div className={styles.logo}>{activeWorkspace?.name ?? 'Workplace'}</div>
+          <div className={styles.logo}>{activeWorkspace?.name ?? 'OpenWork'}</div>
           {onToggleCollapse && (
             <Tooltip label="Collapse sidebar" position="bottom">
               <button

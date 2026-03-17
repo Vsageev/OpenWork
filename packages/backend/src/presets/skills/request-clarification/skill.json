@@ -1,0 +1,4 @@
+{
+  "name": "request-clarification",
+  "description": "Resolve ambiguous requests by checking plausible contexts before acting"
+}

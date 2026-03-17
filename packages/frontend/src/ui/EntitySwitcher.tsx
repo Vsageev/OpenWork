@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown, Plus } from 'lucide-react';
+import { AnchoredOverlay } from './AnchoredOverlay';
 import styles from './EntitySwitcher.module.css';
 
 interface EntitySwitcherProps {
@@ -19,6 +20,7 @@ export function EntitySwitcher({ currentId, currentName, fetchEntries, basePath,
   const [entries, setEntries] = useState<{ id: string; name: string }[] | null>(null);
   const [loading, setLoading] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const handleOpen = useCallback(async () => {
     setOpen(true);
@@ -45,7 +47,12 @@ export function EntitySwitcher({ currentId, currentName, fetchEntries, basePath,
   useEffect(() => {
     if (!open) return;
     function onMouseDown(e: MouseEvent) {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(target) &&
+        !dropdownRef.current?.contains(target)
+      ) {
         setOpen(false);
       }
     }
@@ -79,7 +86,12 @@ export function EntitySwitcher({ currentId, currentName, fetchEntries, basePath,
       </button>
 
       {open && (
-        <div className={styles.dropdown}>
+        <AnchoredOverlay
+          ref={dropdownRef}
+          anchorRef={wrapperRef}
+          className={styles.dropdown}
+          matchAnchorWidth
+        >
           {loading ? (
             <div className={styles.loading}>Loading…</div>
           ) : (
@@ -119,7 +131,7 @@ export function EntitySwitcher({ currentId, currentName, fetchEntries, basePath,
               </Link>
             </>
           )}
-        </div>
+        </AnchoredOverlay>
       )}
     </div>
   );

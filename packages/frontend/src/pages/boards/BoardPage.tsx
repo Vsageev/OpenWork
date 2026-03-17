@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { memo, useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { Plus, Trash2, Bot, FolderOpen, ChevronDown, Check, Clock, Search, X, ExternalLink, ArrowRight, MoveRight, Copy, CopyPlus, SearchX, ChevronsLeft, ChevronsRight, SlidersHorizontal, Star, Tag, Users, ArrowUpDown, GripVertical, RefreshCw, MoreHorizontal, Layers, User, AlignLeft } from 'lucide-react';
-import { Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
+import { AnchoredOverlay, Button, EntitySwitcher, CreateCardModal, Modal } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
 import { ActiveBatchRunsBanner } from '../../components/ActiveBatchRunsBanner';
 
@@ -208,11 +208,14 @@ export function BoardPage() {
   const [error, setError] = useState('');
   const [showAddCard, setShowAddCard] = useState<string | null>(null);
   const [deletingBoard, setDeletingBoard] = useState(false);
+  const [clearingBoardCards, setClearingBoardCards] = useState(false);
   const [showBoardActions, setShowBoardActions] = useState(false);
   const boardActionsRef = useRef<HTMLDivElement>(null);
+  const boardActionsOverlayRef = useRef<HTMLDivElement>(null);
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [collections, setCollections] = useState<{ id: string; name: string }[]>([]);
   const [showCollectionPicker, setShowCollectionPicker] = useState(false);
+  const collectionPickerOverlayRef = useRef<HTMLDivElement>(null);
   const [showCronPanel, setShowCronPanel] = useState(false);
   const [showBatchRunPanel, setShowBatchRunPanel] = useState(false);
   const [filterText, setFilterText] = useState(() => id ? getFilterState(id).text : '');
@@ -618,7 +621,7 @@ export function BoardPage() {
     });
   }, [id]);
 
-  function handleDragStart(e: React.DragEvent, boardCard: BoardCardEntry) {
+  const handleDragStart = useCallback((e: React.DragEvent, boardCard: BoardCardEntry) => {
     dragCardRef.current = boardCard;
     isDraggingRef.current = true;
     e.dataTransfer.effectAllowed = 'move';
@@ -626,15 +629,15 @@ export function BoardPage() {
     requestAnimationFrame(() => {
       (e.currentTarget as HTMLElement).classList.add(styles.dragging);
     });
-  }
+  }, []);
 
-  function handleDragEnd(e: React.DragEvent) {
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
     dragCardRef.current = null;
     isDraggingRef.current = false;
     (e.currentTarget as HTMLElement).classList.remove(styles.dragging);
-  }
+  }, []);
 
-  function handleColumnDragStart(e: React.DragEvent, col: BoardColumn) {
+  const handleColumnDragStart = useCallback((e: React.DragEvent, col: BoardColumn) => {
     dragColumnRef.current = col;
     isDraggingRef.current = true;
     e.dataTransfer.effectAllowed = 'move';
@@ -642,29 +645,29 @@ export function BoardPage() {
     requestAnimationFrame(() => {
       (e.currentTarget as HTMLElement).classList.add(styles.columnDragging);
     });
-  }
+  }, []);
 
-  function handleColumnDragEnd(e: React.DragEvent) {
+  const handleColumnDragEnd = useCallback((e: React.DragEvent) => {
     dragColumnRef.current = null;
     isDraggingRef.current = false;
     setColumnDropTarget(null);
     (e.currentTarget as HTMLElement).classList.remove(styles.columnDragging);
-  }
+  }, []);
 
-  function handleColumnDragOver(e: React.DragEvent, targetColumnId: string) {
+  const handleColumnDragOver = useCallback((e: React.DragEvent, targetColumnId: string) => {
     if (!dragColumnRef.current) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     setColumnDropTarget(targetColumnId);
-  }
+  }, []);
 
-  function handleColumnDragLeave(e: React.DragEvent) {
+  const handleColumnDragLeave = useCallback((e: React.DragEvent) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node)) {
       setColumnDropTarget(null);
     }
-  }
+  }, []);
 
-  async function handleColumnDrop(e: React.DragEvent, targetColumnId: string) {
+  const handleColumnDrop = useCallback(async (e: React.DragEvent, targetColumnId: string) => {
     e.preventDefault();
     setColumnDropTarget(null);
     const draggedCol = dragColumnRef.current;
@@ -702,13 +705,13 @@ export function BoardPage() {
       await Promise.all(promises);
     } catch (err) {
       // Revert on failure
-      fetchBoard();
+      void fetchBoard();
       if (err instanceof ApiError) toast.error(err.message);
       else toast.error('Failed to reorder columns');
     }
-  }
+  }, [board, fetchBoard]);
 
-  async function handleDrop(e: React.DragEvent, targetColumnId: string) {
+  const handleDrop = useCallback(async (e: React.DragEvent, targetColumnId: string) => {
     e.preventDefault();
     const bc = dragCardRef.current;
     if (!bc || !board) return;
@@ -764,7 +767,7 @@ export function BoardPage() {
               body: JSON.stringify({ columnId: sourceColumnId }),
             }).catch(() => {
               toast.error('Failed to undo move');
-              fetchBoard();
+              void fetchBoard();
             });
           },
         },
@@ -782,9 +785,9 @@ export function BoardPage() {
       });
       if (err instanceof ApiError) setError(err.message);
     }
-  }
+  }, [board, confirm, fetchBoard]);
 
-  async function handleQuickAddCard(columnId: string, name: string, extra?: { description?: string | null; assigneeId?: string | null; tagIds?: string[] }) {
+  const handleQuickAddCard = useCallback(async (columnId: string, name: string, extra?: { description?: string | null; assigneeId?: string | null; tagIds?: string[] }) => {
     if (!board) return;
     try {
       const card = await api<CardData>('/cards', {
@@ -808,12 +811,12 @@ export function BoardPage() {
           ),
         );
       }
-      fetchBoard();
+      void fetchBoard();
     } catch (err) {
       if (err instanceof ApiError) toast.error(err.message);
       else toast.error('Failed to create card');
     }
-  }
+  }, [board, fetchBoard]);
 
   async function handleAddCard(data: { name: string; description: string | null; assigneeId: string | null; tagIds: string[]; linkedCardIds: string[] }) {
     if (!showAddCard || !board) return;
@@ -852,7 +855,7 @@ export function BoardPage() {
     }
   }
 
-  async function handleBulkAddCards(columnId: string, names: string[]) {
+  const handleBulkAddCards = useCallback(async (columnId: string, names: string[]) => {
     if (!board || names.length === 0) return;
     let created = 0;
     for (const name of names) {
@@ -874,28 +877,28 @@ export function BoardPage() {
         // Continue creating remaining cards even if one fails
       }
     }
-    fetchBoard();
+    void fetchBoard();
     if (created === names.length) {
       toast.success(`Created ${created} card${created !== 1 ? 's' : ''}`);
     } else {
       toast.warning(`Created ${created} of ${names.length} cards`);
     }
-  }
+  }, [board, fetchBoard]);
 
-  async function handleUpdateColumn(columnId: string, data: Record<string, unknown>) {
+  const handleUpdateColumn = useCallback(async (columnId: string, data: Record<string, unknown>) => {
     if (!board) return;
     try {
       await api(`/boards/${board.id}/columns/${columnId}`, {
         method: 'PATCH',
         body: JSON.stringify(data),
       });
-      fetchBoard();
+      void fetchBoard();
     } catch (err) {
       if (err instanceof ApiError) setError(err.message);
     }
-  }
+  }, [board, fetchBoard]);
 
-  async function handleAddColumn(name: string, color: string) {
+  const handleAddColumn = useCallback(async (name: string, color: string) => {
     if (!board) return;
     const maxPos = board.columns.reduce((max, c) => Math.max(max, c.position), 0);
     try {
@@ -903,13 +906,13 @@ export function BoardPage() {
         method: 'POST',
         body: JSON.stringify({ name, color, position: maxPos + 1 }),
       });
-      fetchBoard();
+      void fetchBoard();
     } catch (err) {
       if (err instanceof ApiError) setError(err.message);
     }
-  }
+  }, [board, fetchBoard]);
 
-  async function handleMoveCard(cardId: string, targetColumnId: string) {
+  const handleMoveCard = useCallback(async (cardId: string, targetColumnId: string) => {
     if (!board) return;
     const bc = board.cards.find((c) => c.cardId === cardId);
     if (!bc || bc.columnId === targetColumnId) return;
@@ -962,7 +965,7 @@ export function BoardPage() {
               body: JSON.stringify({ columnId: sourceColumnId }),
             }).catch(() => {
               toast.error('Failed to undo move');
-              fetchBoard();
+              void fetchBoard();
             });
           },
         },
@@ -980,9 +983,9 @@ export function BoardPage() {
       if (err instanceof ApiError) toast.error(err.message);
       else toast.error('Failed to move card');
     }
-  }
+  }, [board, confirm, fetchBoard]);
 
-  function handleCardUpdated(cardId: string, updates: { name?: string; description?: string | null; assigneeId?: string | null; assignee?: CardAssignee | null; customFields?: Record<string, unknown> }) {
+  const handleCardUpdated = useCallback((cardId: string, updates: { name?: string; description?: string | null; assigneeId?: string | null; assignee?: CardAssignee | null; customFields?: Record<string, unknown> }) => {
     if (!board) return;
     setBoard({
       ...board,
@@ -992,9 +995,9 @@ export function BoardPage() {
           : c,
       ),
     });
-  }
+  }, [board]);
 
-  function handleDeleteCard(cardId: string, cardName: string) {
+  const handleDeleteCard = useCallback((cardId: string, cardName: string) => {
     if (!board) return;
 
     // Optimistically remove card from the board
@@ -1036,9 +1039,9 @@ export function BoardPage() {
     }, 5000);
 
     pendingDeleteTimers.current.set(cardId, timer);
-  }
+  }, [board]);
 
-  async function handleDuplicateCard(cardId: string, columnId: string) {
+  const handleDuplicateCard = useCallback(async (cardId: string, columnId: string) => {
     if (!board) return;
     const entry = board.cards.find((c) => c.cardId === cardId);
     if (!entry?.card) return;
@@ -1066,14 +1069,14 @@ export function BoardPage() {
         body: JSON.stringify({ cardId: newCard.id, columnId }),
       });
       toast.success('Card duplicated');
-      fetchBoard();
+      void fetchBoard();
     } catch (err) {
       if (err instanceof ApiError) toast.error(err.message);
       else toast.error('Failed to duplicate card');
     }
-  }
+  }, [board, fetchBoard]);
 
-  async function handleDeleteColumn(columnId: string) {
+  const handleDeleteColumn = useCallback(async (columnId: string) => {
     if (!board) return;
     const col = board.columns.find((c) => c.id === columnId);
     const colCards = cardsByColumn.get(columnId) || [];
@@ -1089,16 +1092,20 @@ export function BoardPage() {
     if (!confirmed) return;
     try {
       await api(`/boards/${board.id}/columns/${columnId}`, { method: 'DELETE' });
-      fetchBoard();
+      void fetchBoard();
     } catch (err) {
       if (err instanceof ApiError) setError(err.message);
     }
-  }
+  }, [board, cardsByColumn, confirm, fetchBoard]);
 
   useEffect(() => {
     if (!showCollectionPicker) return;
     function onClickOutside(e: MouseEvent) {
-      if (collectionPickerRef.current && !collectionPickerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !collectionPickerRef.current?.contains(target) &&
+        !collectionPickerOverlayRef.current?.contains(target)
+      ) {
         setShowCollectionPicker(false);
       }
     }
@@ -1109,7 +1116,11 @@ export function BoardPage() {
   useEffect(() => {
     if (!showBoardActions) return;
     function onClickOutside(e: MouseEvent) {
-      if (boardActionsRef.current && !boardActionsRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !boardActionsRef.current?.contains(target) &&
+        !boardActionsOverlayRef.current?.contains(target)
+      ) {
         setShowBoardActions(false);
       }
     }
@@ -1152,6 +1163,33 @@ export function BoardPage() {
       else setError('Failed to delete board');
     } finally {
       setDeletingBoard(false);
+    }
+  }
+
+  async function handleClearBoardCards() {
+    if (!board) return;
+    const confirmed = await confirm({
+      title: 'Clear board cards',
+      message: `Remove all ${board.cards.length} card(s) from "${board.name}"?`,
+      confirmLabel: 'Clear cards',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
+
+    setClearingBoardCards(true);
+    try {
+      await api(`/boards/${board.id}/cards`, { method: 'DELETE' });
+      if (quickViewCardId && board.cards.some((bc) => bc.cardId === quickViewCardId)) {
+        setQuickViewCardId(null);
+      }
+      await fetchBoard();
+      toast.success('Board cards cleared');
+      setShowBoardActions(false);
+    } catch (err) {
+      if (err instanceof ApiError) setError(err.message);
+      else setError('Failed to clear board cards');
+    } finally {
+      setClearingBoardCards(false);
     }
   }
 
@@ -1228,7 +1266,12 @@ export function BoardPage() {
               <ChevronDown size={12} />
             </button>
             {showCollectionPicker && (
-              <div className={styles.collectionPickerMenu}>
+              <AnchoredOverlay
+                ref={collectionPickerOverlayRef}
+                anchorRef={collectionPickerRef}
+                className={styles.collectionPickerMenu}
+                matchAnchorWidth
+              >
                 <div className={styles.automationMenuTitle}>Default collection</div>
                 {collections.map((c) => (
                   <button
@@ -1240,7 +1283,7 @@ export function BoardPage() {
                     {c.id === board.defaultCollectionId && <Check size={12} style={{ marginLeft: 'auto' }} />}
                   </button>
                 ))}
-              </div>
+              </AnchoredOverlay>
             )}
           </div>
           <Button variant="secondary" onClick={() => setShowCronPanel(true)}>
@@ -1276,7 +1319,20 @@ export function BoardPage() {
                 <MoreHorizontal size={16} />
               </button>
               {showBoardActions && (
-                <div className={styles.boardActionsMenu}>
+                <AnchoredOverlay
+                  ref={boardActionsOverlayRef}
+                  anchorRef={boardActionsRef}
+                  className={styles.boardActionsMenu}
+                  placement="bottom-end"
+                >
+                  <button
+                    className={styles.boardActionsMenuItem}
+                    onClick={() => { setShowBoardActions(false); void handleClearBoardCards(); }}
+                    disabled={board.cards.length === 0 || clearingBoardCards}
+                  >
+                    <Trash2 size={14} />
+                    {clearingBoardCards ? 'Clearing cards...' : 'Clear cards'}
+                  </button>
                   <button
                     className={styles.boardActionsMenuItem}
                     onClick={() => { setShowBoardActions(false); void handleDeleteBoard(); }}
@@ -1285,7 +1341,7 @@ export function BoardPage() {
                     <Trash2 size={14} />
                     {deletingBoard ? 'Deleting...' : 'Delete board'}
                   </button>
-                </div>
+                </AnchoredOverlay>
               )}
             </div>
           )}
@@ -1538,20 +1594,23 @@ interface ColumnProps {
   isColumnDropTarget: boolean;
 }
 
-function Column({ column, cards, agents, users, tags, processingCards, currentUserId, allColumns, isCollapsed, onToggleCollapse, onDragStart, onDragEnd, onDrop, onAddCard, onQuickAddCard, onBulkAddCards, onUpdateColumn, onDeleteColumn, onDeleteCard, onMoveCard, onDuplicateCard, onCardClick, sortOption, onSortChange, onColumnDragStart, onColumnDragEnd, onColumnDragOver, onColumnDragLeave, onColumnDrop, isColumnDropTarget }: ColumnProps) {
+const Column = memo(function Column({ column, cards, agents, users, tags, processingCards, currentUserId, allColumns, isCollapsed, onToggleCollapse, onDragStart, onDragEnd, onDrop, onAddCard, onQuickAddCard, onBulkAddCards, onUpdateColumn, onDeleteColumn, onDeleteCard, onMoveCard, onDuplicateCard, onCardClick, sortOption, onSortChange, onColumnDragStart, onColumnDragEnd, onColumnDragOver, onColumnDragLeave, onColumnDrop, isColumnDropTarget }: ColumnProps) {
   const navigate = useNavigate();
   const [isDragOver, setIsDragOver] = useState(false);
   const [showAgentMenu, setShowAgentMenu] = useState(false);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(column.name);
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const colorPickerOverlayRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; cardId: string; columnId: string; cardName: string; cardAssignee?: CardAssignee | null; cardTags?: CardTag[] } | null>(null);
   const [showSortMenu, setShowSortMenu] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
+  const sortMenuOverlayRef = useRef<HTMLDivElement>(null);
   const [showWipInput, setShowWipInput] = useState(false);
   const [wipInputValue, setWipInputValue] = useState('');
   const wipInputRef = useRef<HTMLInputElement>(null);
   const wipWrapRef = useRef<HTMLDivElement>(null);
+  const wipOverlayRef = useRef<HTMLDivElement>(null);
   const [inlineAdd, setInlineAdd] = useState(false);
   const [inlineName, setInlineName] = useState('');
   const [inlineDesc, setInlineDesc] = useState('');
@@ -1565,6 +1624,7 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
   const [pastedLines, setPastedLines] = useState<string[] | null>(null);
   const cardListRef = useRef<HTMLDivElement>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
+  const agentMenuOverlayRef = useRef<HTMLDivElement>(null);
   const colorPickerRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -1572,7 +1632,11 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
   useEffect(() => {
     if (!showAgentMenu) return;
     function onClickOutside(e: MouseEvent) {
-      if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !agentMenuRef.current?.contains(target) &&
+        !agentMenuOverlayRef.current?.contains(target)
+      ) {
         setShowAgentMenu(false);
       }
     }
@@ -1583,7 +1647,11 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
   useEffect(() => {
     if (!showColorPicker) return;
     function onClickOutside(e: MouseEvent) {
-      if (colorPickerRef.current && !colorPickerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !colorPickerRef.current?.contains(target) &&
+        !colorPickerOverlayRef.current?.contains(target)
+      ) {
         setShowColorPicker(false);
       }
     }
@@ -1605,7 +1673,11 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
   useEffect(() => {
     if (!showSortMenu) return;
     function onClickOutside(e: MouseEvent) {
-      if (sortMenuRef.current && !sortMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !sortMenuRef.current?.contains(target) &&
+        !sortMenuOverlayRef.current?.contains(target)
+      ) {
         setShowSortMenu(false);
       }
     }
@@ -1616,7 +1688,11 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
   useEffect(() => {
     if (!showWipInput) return;
     function onClickOutside(e: MouseEvent) {
-      if (wipWrapRef.current && !wipWrapRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !wipWrapRef.current?.contains(target) &&
+        !wipOverlayRef.current?.contains(target)
+      ) {
         setShowWipInput(false);
       }
     }
@@ -1845,7 +1921,11 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
             title="Change color"
           />
           {showColorPicker && (
-            <div className={styles.colorPickerDropdown}>
+            <AnchoredOverlay
+              ref={colorPickerOverlayRef}
+              anchorRef={colorPickerRef}
+              className={styles.colorPickerDropdown}
+            >
               {COLUMN_COLORS.map((c) => (
                 <button
                   key={c}
@@ -1857,7 +1937,7 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
                   }}
                 />
               ))}
-            </div>
+            </AnchoredOverlay>
           )}
         </div>
         {isRenaming ? (
@@ -1905,7 +1985,12 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
             {column.wipLimit != null ? `${cards.length}/${column.wipLimit}` : cards.length}
           </button>
           {showWipInput && (
-            <div className={styles.wipPopover}>
+            <AnchoredOverlay
+              ref={wipOverlayRef}
+              anchorRef={wipWrapRef}
+              className={styles.wipPopover}
+              placement="bottom-end"
+            >
               <div className={styles.wipPopoverLabel}>WIP limit</div>
               <input
                 ref={wipInputRef}
@@ -1937,7 +2022,7 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
                   </button>
                 )}
               </div>
-            </div>
+            </AnchoredOverlay>
           )}
         </div>
         <div className={styles.columnHeaderActions}>
@@ -1967,7 +2052,12 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
               )}
             </button>
             {showAgentMenu && (
-              <div className={styles.automationMenu}>
+              <AnchoredOverlay
+                ref={agentMenuOverlayRef}
+                anchorRef={agentMenuRef}
+                className={styles.automationMenu}
+                placement="bottom-end"
+              >
                 <div className={styles.automationMenuTitle}>Auto-assign agent</div>
                 {agents.length === 0 && (
                   <div className={styles.automationMenuItem} style={{ color: 'var(--color-text-tertiary)' }}>
@@ -2001,7 +2091,7 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
                     </button>
                   </>
                 )}
-              </div>
+              </AnchoredOverlay>
             )}
           </div>
           <div className={styles.automationWrap} ref={sortMenuRef}>
@@ -2013,7 +2103,12 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
               <ArrowUpDown size={13} />
             </button>
             {showSortMenu && (
-              <div className={styles.automationMenu}>
+              <AnchoredOverlay
+                ref={sortMenuOverlayRef}
+                anchorRef={sortMenuRef}
+                className={styles.automationMenu}
+                placement="bottom-end"
+              >
                 <div className={styles.automationMenuTitle}>Sort cards</div>
                 {(Object.entries(SORT_LABELS) as [ColumnSortOption, string][]).map(([key, label]) => (
                   <button
@@ -2028,7 +2123,7 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
                     {sortOption === key && <Check size={12} style={{ marginLeft: 'auto' }} />}
                   </button>
                 ))}
-              </div>
+              </AnchoredOverlay>
             )}
           </div>
           <button
@@ -2464,7 +2559,9 @@ function Column({ column, cards, agents, users, tags, processingCards, currentUs
       )}
     </div>
   );
-}
+});
+
+Column.displayName = 'Column';
 
 function AddColumnButton({ onAdd }: { onAdd: (name: string, color: string) => void }) {
   const [open, setOpen] = useState(false);

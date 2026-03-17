@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Blocks, ChevronDown, ChevronRight, Folder, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Blocks, ChevronDown, ChevronRight, Folder, Pencil, Plus, Trash2 } from 'lucide-react';
 import { api, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { useConfirm } from '../../hooks/useConfirm';
@@ -23,12 +23,14 @@ function skillEndpoints(skillId: string) {
     createFolder: `/skills/${skillId}/files/folders`,
     upload: `/skills/${skillId}/files/upload`,
     download: (filePath: string) => `/skills/${skillId}/files/download?path=${enc(filePath)}`,
+    readTextContent: (filePath: string) => `/skills/${skillId}/files/content?path=${enc(filePath)}`,
+    writeTextContent: `/skills/${skillId}/files/content`,
     delete: (entryPath: string) => `/skills/${skillId}/files?path=${enc(entryPath)}`,
     reveal: `/skills/${skillId}/files/reveal`,
   };
 }
 
-/* ─── Skill Create/Edit Form ─── */
+/* ─── Skill Create Form (for new skills) ─── */
 
 function SkillForm({
   initial,
@@ -91,6 +93,96 @@ function SkillForm({
         </button>
       </div>
     </form>
+  );
+}
+
+/* ─── Edit Panel (expanded below the row) ─── */
+
+function SkillEditPanel({
+  skill,
+  saving,
+  onSave,
+  onCancel,
+}: {
+  skill: Skill;
+  saving: boolean;
+  onSave: (name: string, description: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(skill.name);
+  const [description, setDescription] = useState(skill.description);
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    nameRef.current?.focus();
+    nameRef.current?.select();
+  }, []);
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const trimmed = name.trim();
+      if (trimmed) onSave(trimmed, description.trim());
+    } else if (e.key === 'Escape') {
+      onCancel();
+    }
+  }
+
+  const canSave = name.trim().length > 0;
+
+  return (
+    <div className={styles.editPanel}>
+      <div className={styles.editPanelFields}>
+        <div className={styles.editPanelField}>
+          <label className={styles.fieldLabel}>Name</label>
+          <input
+            ref={nameRef}
+            className={styles.editPanelInput}
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Skill name"
+            maxLength={100}
+          />
+        </div>
+        <div className={styles.editPanelField}>
+          <label className={styles.fieldLabel}>Description</label>
+          <input
+            className={styles.editPanelInput}
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="One-line summary (optional)"
+            maxLength={500}
+          />
+        </div>
+      </div>
+
+      <div className={styles.editPanelDivider} />
+
+      <div className={styles.editPanelFiles}>
+        <FileBrowser
+          endpoints={skillEndpoints(skill.id)}
+          rootLabel="Files"
+          rootIcon={Folder}
+        />
+      </div>
+
+      <div className={styles.editPanelFooter}>
+        <button className={styles.cancelBtn} onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          className={styles.saveBtn}
+          disabled={!canSave || saving}
+          onClick={() => onSave(name.trim(), description.trim())}
+        >
+          {saving ? 'Saving...' : 'Save changes'}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -161,7 +253,7 @@ export function SkillsTab() {
   async function handleDelete(skill: Skill) {
     const confirmed = await confirm({
       title: 'Delete skill',
-      message: `Delete "${skill.name}"? This removes it from all agents and deletes all skill files. Cannot be undone.`,
+      message: `Delete "${skill.name}" from the preset library? Existing agent-local copies stay in place. Cannot be undone.`,
       confirmLabel: 'Delete',
       variant: 'danger',
     });
@@ -170,23 +262,25 @@ export function SkillsTab() {
       await api(`/skills/${skill.id}`, { method: 'DELETE' });
       setSkills((prev) => prev.filter((s) => s.id !== skill.id));
       if (expandedId === skill.id) setExpandedId(null);
+      if (editingId === skill.id) setEditingId(null);
       toast.success(`Skill "${skill.name}" deleted`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Failed to delete skill');
     }
   }
 
-  async function handleResync(skill: Skill) {
-    try {
-      await api(`/skills/${skill.id}/resync`, { method: 'POST' });
-      toast.success(`Pushed latest "${skill.name}" files to all agents`);
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to resync');
-    }
+  function toggleExpand(skillId: string) {
+    if (editingId === skillId) return;
+    setExpandedId((prev) => (prev === skillId ? null : skillId));
   }
 
-  function toggleExpand(skillId: string) {
-    setExpandedId((prev) => (prev === skillId ? null : skillId));
+  function startEditing(skillId: string) {
+    setEditingId(skillId);
+    setExpandedId(null);
+    setCreating(false);
+  }
+
+  function stopEditing() {
     setEditingId(null);
   }
 
@@ -209,8 +303,8 @@ export function SkillsTab() {
         <div className={styles.headerLeft}>
           <h3 className={styles.sectionTitle}>Skills</h3>
           <p className={styles.sectionDesc}>
-            Reusable instruction folders that can be attached to agents. Click a skill to browse and
-            manage its files.
+            Reusable preset-library skills that can be copied into agent workspaces. Click a skill to
+            browse and manage its files.
           </p>
         </div>
         {!creating && (
@@ -245,8 +339,8 @@ export function SkillsTab() {
           <Blocks size={36} strokeWidth={1.5} className={styles.emptyIcon} />
           <p className={styles.emptyTitle}>No skills yet</p>
           <p className={styles.emptyDesc}>
-            Create skills to package reusable instructions. Attach them to agents to automatically
-            copy the skill folder and add a reference in their CLAUDE.MD.
+            Create skills to package reusable instructions. Agents can copy them into their local
+            workspace and reference them from their instruction file.
           </p>
           <button className={styles.addBtnSecondary} onClick={() => setCreating(true)}>
             <Plus size={14} />
@@ -255,61 +349,40 @@ export function SkillsTab() {
         </div>
       ) : (
         <div className={styles.skillList}>
-          {skills.map((skill) => (
-            <div key={skill.id} className={styles.skillBlock}>
-              {editingId === skill.id ? (
-                <div className={styles.skillItem} style={{ padding: 0 }}>
-                  <div
-                    className={`${styles.formCard} ${styles.formCardActive}`}
-                    style={{ margin: 0, border: 'none', borderRadius: 0, width: '100%' }}
-                  >
-                    <SkillForm
-                      initial={{ name: skill.name, description: skill.description }}
-                      onSave={(name, description) => void handleUpdate(skill.id, name, description)}
-                      onCancel={() => setEditingId(null)}
-                      saving={saving}
-                    />
+          {skills.map((skill) => {
+            const isEditing = editingId === skill.id;
+            const isExpanded = expandedId === skill.id;
+            return (
+              <div
+                key={skill.id}
+                className={`${styles.skillBlock} ${isEditing ? styles.skillBlockEditing : ''}`}
+              >
+                <div
+                  className={`${styles.skillItem} ${isExpanded ? styles.skillItemExpanded : ''} ${isEditing ? styles.skillItemEditing : ''}`}
+                  onClick={isEditing ? undefined : () => toggleExpand(skill.id)}
+                >
+                  <div className={styles.skillExpandIcon}>
+                    {isExpanded && !isEditing ? (
+                      <ChevronDown size={14} />
+                    ) : !isEditing ? (
+                      <ChevronRight size={14} />
+                    ) : null}
                   </div>
-                </div>
-              ) : (
-                <>
-                  <div
-                    className={`${styles.skillItem} ${expandedId === skill.id ? styles.skillItemExpanded : ''}`}
-                    onClick={() => toggleExpand(skill.id)}
-                  >
-                    <div className={styles.skillExpandIcon}>
-                      {expandedId === skill.id ? (
-                        <ChevronDown size={14} />
-                      ) : (
-                        <ChevronRight size={14} />
-                      )}
-                    </div>
-                    <div className={styles.skillIcon}>
-                      <Blocks size={18} />
-                    </div>
-                    <div className={styles.skillInfo}>
-                      <div className={styles.skillName}>{skill.name}</div>
-                      {skill.description && (
-                        <div className={styles.skillDesc}>{skill.description}</div>
-                      )}
-                    </div>
+                  <div className={styles.skillIcon}>
+                    <Blocks size={18} />
+                  </div>
+                  <div className={styles.skillInfo}>
+                    <div className={styles.skillName}>{skill.name}</div>
+                    {skill.description && (
+                      <div className={styles.skillDesc}>{skill.description}</div>
+                    )}
+                  </div>
+                  {!isEditing && (
                     <div className={styles.skillActions} onClick={(e) => e.stopPropagation()}>
-                      <Tooltip label="Push latest files to all agents">
-                        <button
-                          className={styles.resyncBtn}
-                          onClick={() => void handleResync(skill)}
-                        >
-                          <RefreshCw size={12} />
-                          Resync
-                        </button>
-                      </Tooltip>
                       <Tooltip label="Edit skill">
                         <button
                           className={styles.iconBtn}
-                          onClick={() => {
-                            setEditingId(skill.id);
-                            setCreating(false);
-                          }}
+                          onClick={() => startEditing(skill.id)}
                         >
                           <Pencil size={14} />
                         </button>
@@ -323,21 +396,30 @@ export function SkillsTab() {
                         </button>
                       </Tooltip>
                     </div>
-                  </div>
-
-                  {expandedId === skill.id && (
-                    <div className={styles.explorer}>
-                      <FileBrowser
-                        endpoints={skillEndpoints(skill.id)}
-                        rootLabel="Files"
-                        rootIcon={Folder}
-                      />
-                    </div>
                   )}
-                </>
-              )}
-            </div>
-          ))}
+                </div>
+
+                {isEditing && (
+                  <SkillEditPanel
+                    skill={skill}
+                    saving={saving}
+                    onSave={(name, desc) => void handleUpdate(skill.id, name, desc)}
+                    onCancel={stopEditing}
+                  />
+                )}
+
+                {isExpanded && !isEditing && (
+                  <div className={styles.explorer}>
+                    <FileBrowser
+                      endpoints={skillEndpoints(skill.id)}
+                      rootLabel="Files"
+                      rootIcon={Folder}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

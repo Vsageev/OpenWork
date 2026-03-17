@@ -33,11 +33,23 @@ interface PresetSymlinkFileDef {
 
 type PresetFileDef = PresetTextFileDef | PresetSymlinkFileDef;
 
+interface PresetParameterDef {
+  key: string;
+  label: string;
+  description?: string;
+  placeholder?: string;
+  required: boolean;
+  type: 'text' | 'directory';
+  contentTemplate?: string;
+  emptyContentTemplate?: string;
+}
+
 interface PresetDef {
   id: string;
   name: string;
   description: string;
   files: PresetFileDef[];
+  parameters: PresetParameterDef[];
   defaultSkills: string[];
 }
 
@@ -59,6 +71,42 @@ function loadPresets(): Record<string, PresetDef> {
     if (!fs.existsSync(manifestPath)) continue;
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const parameters: PresetParameterDef[] = Array.isArray(manifest.parameters)
+      ? manifest.parameters.map(
+          (parameter: {
+            key: string;
+            label: string;
+            description?: string;
+            placeholder?: string;
+            required?: boolean;
+            type?: string;
+            contentTemplate?: string;
+            emptyContentTemplate?: string;
+          }) => {
+            if (!/^\w+$/.test(parameter.key)) {
+              throw new Error(
+                `Invalid preset parameter key "${parameter.key}" in preset "${manifest.id}"`,
+              );
+            }
+            return {
+              key: parameter.key,
+              label: parameter.label,
+              description: parameter.description,
+              placeholder: parameter.placeholder,
+              required: Boolean(parameter.required),
+              type: parameter.type === 'directory' ? 'directory' : 'text',
+              contentTemplate:
+                typeof parameter.contentTemplate === 'string'
+                  ? parameter.contentTemplate
+                  : undefined,
+              emptyContentTemplate:
+                typeof parameter.emptyContentTemplate === 'string'
+                  ? parameter.emptyContentTemplate
+                  : undefined,
+            };
+          },
+        )
+      : [];
     const files: PresetFileDef[] = manifest.files.map(
       (f: {
         type: string;
@@ -90,6 +138,7 @@ function loadPresets(): Record<string, PresetDef> {
       name: manifest.name,
       description: manifest.description,
       files,
+      parameters,
       defaultSkills: Array.isArray(manifest.defaultSkills) ? manifest.defaultSkills : [],
     };
   }
@@ -132,6 +181,13 @@ const CLI_DEFS: { id: string; name: string; command: string; downloadUrl: string
   },
 ];
 
+const MODEL_ID_BY_ALIAS = new Map<string, string>(
+  CLI_DEFS.flatMap((def) => [
+    [def.id, def.id],
+    [def.name.toLowerCase(), def.id],
+  ]),
+);
+
 function isCommandAvailable(command: string): boolean {
   try {
     execSync(`which ${command}`, { stdio: 'ignore' });
@@ -153,6 +209,9 @@ export function listPresets() {
     id: p.id,
     name: p.name,
     description: p.description,
+    parameters: p.parameters.map(({ contentTemplate, emptyContentTemplate, ...parameter }) => ({
+      ...parameter,
+    })),
   }));
 }
 
@@ -385,6 +444,12 @@ function normalizePresetModelKey(model: string): string {
   return model.trim().toLowerCase();
 }
 
+function normalizeModelValue(model: string): string {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return '';
+  return MODEL_ID_BY_ALIAS.get(normalized) ?? normalized;
+}
+
 function getPresetApplicableFiles(preset: PresetDef, model: string): PresetFileDef[] {
   const normalizedModel = normalizePresetModelKey(model);
   return preset.files.filter(
@@ -449,6 +514,7 @@ function syncPresetModelScopedFiles(
 function asAgent(rec: Record<string, unknown>): AgentRecord {
   return {
     ...rec,
+    model: typeof rec.model === 'string' ? normalizeModelValue(rec.model) : '',
     modelId: typeof rec.modelId === 'string' ? rec.modelId : null,
     thinkingLevel: ['low', 'medium', 'high'].includes(rec.thinkingLevel as string)
       ? (rec.thinkingLevel as AgentRecord['thinkingLevel'])
@@ -480,6 +546,7 @@ export interface CreateAgentParams {
   modelId?: string | null;
   thinkingLevel?: 'low' | 'medium' | 'high' | null;
   preset: string;
+  presetParameters?: Record<string, string>;
   apiKeyId: string;
   apiKeyName: string;
   apiKeyPrefix: string;
@@ -519,6 +586,61 @@ function arraysEqualAsSets(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
   const rightSet = new Set(right);
   return left.every((permission) => rightSet.has(permission));
+}
+
+function resolvePresetParameters(
+  preset: PresetDef,
+  input: Record<string, string> | undefined,
+): Record<string, string> {
+  const parameterDefs = new Map(preset.parameters.map((parameter) => [parameter.key, parameter]));
+  const provided = input ?? {};
+
+  for (const key of Object.keys(provided)) {
+    if (!parameterDefs.has(key)) {
+      throw new Error(`Unknown preset parameter "${key}" for preset "${preset.name}"`);
+    }
+  }
+
+  const resolved: Record<string, string> = {};
+  for (const parameter of preset.parameters) {
+    const value = provided[parameter.key]?.trim() ?? '';
+    if (value) {
+      resolved[parameter.key] = value;
+      continue;
+    }
+    if (parameter.required) {
+      throw new Error(`Preset parameter "${parameter.label}" is required`);
+    }
+  }
+
+  return resolved;
+}
+
+function buildPresetTemplateVars(
+  preset: PresetDef,
+  input: {
+    agentName: string;
+    description: string;
+    presetParameters: Record<string, string>;
+  },
+): Record<string, string> {
+  const vars: Record<string, string> = {
+    agentName: input.agentName,
+    description: input.description || 'Agent workspace.',
+  };
+
+  for (const parameter of preset.parameters) {
+    const value = input.presetParameters[parameter.key] ?? '';
+    vars[parameter.key] = value;
+    const parameterTemplate = value
+      ? parameter.contentTemplate
+      : parameter.emptyContentTemplate;
+    vars[`${parameter.key}Instructions`] = parameterTemplate
+      ? renderTemplate(parameterTemplate, { ...vars, value })
+      : '';
+  }
+
+  return vars;
 }
 
 function scopeWorkspaceApiPermissions(requestedPermissions: unknown): string[] {
@@ -592,6 +714,7 @@ function normalizeAgentServiceUser(
 export async function createAgent(params: CreateAgentParams): Promise<AgentRecord> {
   const preset = AGENT_PRESETS[params.preset];
   if (!preset) throw new Error(`Unknown preset: ${params.preset}`);
+  const presetParameters = resolvePresetParameters(preset, params.presetParameters);
   const workspaceApiPermissions = deriveWorkspaceApiPermissions(
     params.capabilities,
     `API key "${params.apiKeyName}"`,
@@ -600,6 +723,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
   const agentId = randomUUID();
   let serviceUserId: string | null = null;
   let wsKeyId: string | null = null;
+  const normalizedModel = normalizeModelValue(params.model);
 
   try {
     // Step 1: Create service user
@@ -620,7 +744,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
       id: agentId,
       name: params.name,
       description: params.description,
-      model: params.model,
+      model: normalizedModel,
       modelId: params.modelId ?? null,
       thinkingLevel: params.thinkingLevel ?? null,
       preset: params.preset,
@@ -645,15 +769,17 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
     const dir = agentDir(record.id as string);
     fs.mkdirSync(dir, { recursive: true });
 
-    const applicableFiles = getPresetApplicableFiles(preset, params.model);
+    const applicableFiles = getPresetApplicableFiles(preset, normalizedModel);
+    const templateVars = buildPresetTemplateVars(preset, {
+      agentName: params.name,
+      description: params.description,
+      presetParameters,
+    });
 
     for (const fileDef of applicableFiles) {
       const filePath = path.join(dir, fileDef.name);
       if (fileDef.type === 'file') {
-        const content = renderTemplate(fileDef.template, {
-          agentName: params.name,
-          description: params.description || 'Agent workspace.',
-        });
+        const content = renderTemplate(fileDef.template, templateVars);
         fs.writeFileSync(filePath, content, 'utf-8');
         continue;
       }
@@ -735,7 +861,7 @@ export async function updateAgent(
   const patch: Record<string, unknown> = {};
   if (data.name !== undefined) patch.name = data.name;
   if (data.description !== undefined) patch.description = data.description;
-  if (data.model !== undefined) patch.model = data.model;
+  if (data.model !== undefined) patch.model = normalizeModelValue(data.model);
   if (data.modelId !== undefined) patch.modelId = data.modelId;
   if (data.thinkingLevel !== undefined) patch.thinkingLevel = data.thinkingLevel;
   if (data.status !== undefined) patch.status = data.status;
@@ -761,7 +887,12 @@ export async function updateAgent(
   if (!updated) return null;
 
   if (data.model !== undefined) {
-    syncPresetModelScopedFiles(id, currentAgent.preset, currentAgent.model, data.model);
+    syncPresetModelScopedFiles(
+      id,
+      currentAgent.preset,
+      currentAgent.model,
+      patch.model as string,
+    );
   }
 
   if (data.name !== undefined) {
@@ -1061,6 +1192,22 @@ export function readAgentFileContent(agentId: string, filePath: string): string 
   const diskPath = getAgentFilePath(agentId, filePath);
   if (!diskPath) return null;
   return fs.readFileSync(diskPath, 'utf-8');
+}
+
+export function writeAgentFileContent(agentId: string, filePath: string, content: string): void {
+  const normalized = validateAgentPath(agentId, filePath);
+  const diskPath = resolveAgentDiskPath(agentId, normalized);
+  const diskDir = path.dirname(diskPath);
+
+  if (!fs.existsSync(diskDir)) {
+    fs.mkdirSync(diskDir, { recursive: true });
+  }
+
+  if (fs.existsSync(diskPath) && fs.statSync(diskPath).isDirectory()) {
+    throw new Error('Path is a directory');
+  }
+
+  fs.writeFileSync(diskPath, content, 'utf-8');
 }
 
 export async function uploadAgentFile(

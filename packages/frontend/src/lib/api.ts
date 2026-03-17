@@ -2,9 +2,16 @@ const API_BASE = '/api';
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
+let refreshRequest: Promise<RefreshResult> | null = null;
 
 const TOKEN_KEY = 'ws_access_token';
 const REFRESH_KEY = 'ws_refresh_token';
+const AUTH_EVENT_KEY = 'ws_auth_event';
+
+type AuthSessionEvent = 'updated' | 'cleared';
+type AuthSessionListener = (event: AuthSessionEvent) => void;
+
+const authSessionListeners = new Set<AuthSessionListener>();
 
 function isStoredToken(value: string | null): value is string {
   return Boolean(value && value !== 'undefined' && value !== 'null');
@@ -34,6 +41,8 @@ export function setTokens(access: string, refresh: string) {
   refreshToken = refresh;
   localStorage.setItem(TOKEN_KEY, access);
   localStorage.setItem(REFRESH_KEY, refresh);
+  localStorage.setItem(AUTH_EVENT_KEY, JSON.stringify({ type: 'updated', at: Date.now() }));
+  notifyAuthSessionListeners('updated');
 }
 
 export function clearTokens() {
@@ -41,34 +50,85 @@ export function clearTokens() {
   refreshToken = null;
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(REFRESH_KEY);
+  localStorage.setItem(AUTH_EVENT_KEY, JSON.stringify({ type: 'cleared', at: Date.now() }));
+  notifyAuthSessionListeners('cleared');
 }
 
 export function getAccessToken() {
   return accessToken;
 }
 
-async function refreshAccessToken(): Promise<boolean> {
-  if (!refreshToken) return false;
+export function subscribeToAuthSession(listener: AuthSessionListener): () => void {
+  authSessionListeners.add(listener);
 
+  const onStorage = (event: StorageEvent) => {
+    if (event.key !== AUTH_EVENT_KEY || !event.newValue) {
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(event.newValue) as { type?: AuthSessionEvent };
+      if (payload.type !== 'updated' && payload.type !== 'cleared') {
+        return;
+      }
+
+      loadTokens();
+      listener(payload.type);
+    } catch {
+      // ignore malformed auth sync payloads
+    }
+  };
+
+  window.addEventListener('storage', onStorage);
+
+  return () => {
+    authSessionListeners.delete(listener);
+    window.removeEventListener('storage', onStorage);
+  };
+}
+
+function notifyAuthSessionListeners(event: AuthSessionEvent) {
+  for (const listener of authSessionListeners) {
+    listener(event);
+  }
+}
+
+type RefreshResult = 'success' | 'invalid' | 'unavailable';
+
+async function performTokenRefresh(currentRefreshToken: string): Promise<RefreshResult> {
   try {
     const res = await fetch(`${API_BASE}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
+      body: JSON.stringify({ refreshToken: currentRefreshToken }),
     });
 
     if (!res.ok) {
-      clearTokens();
-      return false;
+      if (res.status === 401 || res.status === 403) {
+        clearTokens();
+        return 'invalid';
+      }
+      return 'unavailable';
     }
 
     const data = await res.json();
     setTokens(data.accessToken, data.refreshToken);
-    return true;
+    return 'success';
   } catch {
-    clearTokens();
-    return false;
+    return 'unavailable';
   }
+}
+
+async function refreshAccessToken(): Promise<RefreshResult> {
+  if (!refreshToken) return 'invalid';
+
+  if (!refreshRequest) {
+    refreshRequest = performTokenRefresh(refreshToken).finally(() => {
+      refreshRequest = null;
+    });
+  }
+
+  return refreshRequest;
 }
 
 export class ApiError extends Error {
@@ -108,9 +168,11 @@ export async function api<T = unknown>(
   // If 401 and we have a refresh token, try refreshing
   if (res.status === 401 && refreshToken) {
     const refreshed = await refreshAccessToken();
-    if (refreshed) {
+    if (refreshed === 'success') {
       headers['Authorization'] = `Bearer ${accessToken}`;
       res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    } else if (refreshed === 'unavailable') {
+      throw new ApiError(0, 'Unable to refresh the current session. Please try again.');
     }
   }
 
@@ -162,13 +224,15 @@ export async function apiUpload<T = unknown>(
 
   if (res.status === 401 && refreshToken) {
     const refreshed = await refreshAccessToken();
-    if (refreshed) {
+    if (refreshed === 'success') {
       headers['Authorization'] = `Bearer ${accessToken}`;
       res = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
         headers,
         body: formData,
       });
+    } else if (refreshed === 'unavailable') {
+      throw new ApiError(0, 'Unable to refresh the current session. Please try again.');
     }
   }
 

@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { store } from '../db/index.js';
 import { env } from '../config/env.js';
 
 const SKILLS_DIR = path.resolve(env.DATA_DIR, 'skills');
 const AGENTS_DIR = path.resolve(env.DATA_DIR, 'agents');
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const BUILTIN_SKILLS_DIR = path.resolve(__dirname, '../presets/skills');
 
 // ---------------------------------------------------------------------------
 // Skill record
@@ -17,6 +21,14 @@ export interface SkillRecord {
   description: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AgentSkillRecord {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  missing: boolean;
 }
 
 function asSkill(rec: Record<string, unknown>): SkillRecord {
@@ -68,6 +80,14 @@ function agentSkillDestPath(agentId: string, skillName: string): string {
   return path.join(agentDir(agentId), 'skills', slugify(skillName));
 }
 
+function humanizeSlug(value: string): string {
+  return value
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 // ---------------------------------------------------------------------------
 // CRUD
 // ---------------------------------------------------------------------------
@@ -96,6 +116,13 @@ export function createSkill(params: { name: string; description: string }): Skil
   const dir = skillDir(record.id as string);
   fs.mkdirSync(dir, { recursive: true });
 
+  // Create default index.md entry point
+  fs.writeFileSync(
+    path.join(dir, 'index.md'),
+    `# ${params.name.trim()}\n\n${params.description.trim()}\n`,
+    'utf-8',
+  );
+
   return asSkill(record);
 }
 
@@ -106,59 +133,17 @@ export function updateSkill(
   const existing = store.getById('skills', id);
   if (!existing) return null;
 
-  const previousName = existing.name as string;
-
   const patch: Record<string, unknown> = {};
   if (data.name !== undefined) patch.name = data.name.trim();
   if (data.description !== undefined) patch.description = data.description.trim();
 
   const updated = store.update('skills', id, patch);
-  if (!updated) return null;
-
-  const skill = asSkill(updated);
-
-  const nameChanged = data.name !== undefined && slugify(data.name) !== slugify(previousName);
-
-  // Re-sync in all agents that have this skill
-  const agents = store.find(
-    'agents',
-    (r: Record<string, unknown>) =>
-      Array.isArray(r.skillIds) && (r.skillIds as string[]).includes(id),
-  );
-
-  for (const agent of agents) {
-    const agentId = agent.id as string;
-
-    if (nameChanged) {
-      // Rename copied folder
-      const oldDest = agentSkillDestPath(agentId, previousName);
-      const newDest = agentSkillDestPath(agentId, skill.name);
-
-      if (fs.existsSync(oldDest)) {
-        fs.renameSync(oldDest, newDest);
-      }
-    }
-
-    syncAgentSkillsSection(agentId);
-  }
-
-  return skill;
+  return updated ? asSkill(updated) : null;
 }
 
 export function deleteSkill(id: string): boolean {
   const existing = store.getById('skills', id);
   if (!existing) return false;
-
-  // Detach from all agents first
-  const agents = store.find(
-    'agents',
-    (r: Record<string, unknown>) =>
-      Array.isArray(r.skillIds) && (r.skillIds as string[]).includes(id),
-  );
-
-  for (const agent of agents) {
-    detachSkillFromAgent(agent.id as string, id);
-  }
 
   store.delete('skills', id);
 
@@ -175,121 +160,20 @@ export function deleteSkill(id: string): boolean {
 // Attach / detach skills to agents
 // ---------------------------------------------------------------------------
 
-export function getAgentSkillIds(agentId: string): string[] {
-  const agent = store.getById('agents', agentId);
-  if (!agent) return [];
-  return Array.isArray(agent.skillIds) ? (agent.skillIds as string[]) : [];
+interface AgentSkillReference {
+  id: string;
+  path: string;
+  description: string;
 }
 
-export function getAgentSkills(agentId: string): SkillRecord[] {
-  const ids = getAgentSkillIds(agentId);
-  return ids
-    .map((id) => getSkill(id))
-    .filter((s): s is SkillRecord => s !== null);
-}
-
-export function attachSkillToAgent(agentId: string, skillId: string): void {
-  const agent = store.getById('agents', agentId);
-  if (!agent) throw new Error('Agent not found');
-
-  const skill = getSkill(skillId);
-  if (!skill) throw new Error('Skill not found');
-
-  const currentIds = getAgentSkillIds(agentId);
-  if (currentIds.includes(skillId)) return; // already attached
-
-  // 1. Copy skill folder into agent workspace
-  const src = skillDir(skillId);
-  const dest = agentSkillDestPath(agentId, skill.name);
-  if (!fs.existsSync(dest)) {
-    copyDirSync(src, dest);
-  }
-
-  // 2. Update agent record
-  store.update('agents', agentId, { skillIds: [...currentIds, skillId] });
-
-  // 3. Update CLAUDE.MD
-  syncAgentSkillsSection(agentId);
-}
-
-export function detachSkillFromAgent(agentId: string, skillId: string): void {
-  const agent = store.getById('agents', agentId);
-  if (!agent) throw new Error('Agent not found');
-
-  const currentIds = getAgentSkillIds(agentId);
-  if (!currentIds.includes(skillId)) return; // not attached
-
-  // 1. Remove copied skill folder
-  const skill = getSkill(skillId);
-  if (skill) {
-    const dest = agentSkillDestPath(agentId, skill.name);
-    if (fs.existsSync(dest)) {
-      fs.rmSync(dest, { recursive: true, force: true });
-    }
-  }
-
-  // Clean up empty skills/ folder
-  const skillsFolder = path.join(agentDir(agentId), 'skills');
-  if (fs.existsSync(skillsFolder)) {
-    const remaining = fs.readdirSync(skillsFolder);
-    if (remaining.length === 0) {
-      fs.rmdirSync(skillsFolder);
-    }
-  }
-
-  // 2. Update agent record
-  store.update('agents', agentId, {
-    skillIds: currentIds.filter((id) => id !== skillId),
-  });
-
-  // 3. Update CLAUDE.MD
-  syncAgentSkillsSection(agentId);
-}
-
-/**
- * Re-copy the skill source folder into an agent workspace.
- * Useful when skill content has been edited and agents need the latest copy.
- */
-export function resyncSkillToAgent(agentId: string, skillId: string): void {
-  const skill = getSkill(skillId);
-  if (!skill) return;
-
-  const src = skillDir(skillId);
-  const dest = agentSkillDestPath(agentId, skill.name);
-
-  // Remove old copy, replace with fresh one
-  if (fs.existsSync(dest)) {
-    fs.rmSync(dest, { recursive: true, force: true });
-  }
-  copyDirSync(src, dest);
-}
-
-/**
- * Re-copy a skill to all agents that have it attached.
- */
-export function resyncSkillToAllAgents(skillId: string): void {
-  const agents = store.find(
-    'agents',
-    (r: Record<string, unknown>) =>
-      Array.isArray(r.skillIds) && (r.skillIds as string[]).includes(skillId),
-  );
-
-  for (const agent of agents) {
-    resyncSkillToAgent(agent.id as string, skillId);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// CLAUDE.MD skills section injection
-// ---------------------------------------------------------------------------
-
-const SKILLS_START = '<!-- skills:start -->';
-const SKILLS_END = '<!-- skills:end -->';
-
-function buildSkillsSection(skills: SkillRecord[]): string {
+function buildSkillsSection(skills: AgentSkillReference[]): string {
   if (skills.length === 0) return '';
 
-  const lines = skills.map((s) => `- \`skills/${slugify(s.name)}/\` — ${s.description}`);
+  const lines = skills.map((skill) =>
+    skill.description
+      ? `- \`${skill.path}\` — ${skill.description}`
+      : `- \`${skill.path}\``,
+  );
 
   return [SKILLS_START, '## Skills', ...lines, SKILLS_END].join('\n');
 }
@@ -303,20 +187,115 @@ function findInstructionFile(agentId: string): string | null {
   return null;
 }
 
-export function syncAgentSkillsSection(agentId: string): void {
+function normalizeAgentRelativePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function encodeAgentSkillId(relativePath: string): string {
+  return Buffer.from(relativePath, 'utf-8').toString('base64url');
+}
+
+function decodeAgentSkillId(encodedId: string): string | null {
+  try {
+    return normalizeAgentRelativePath(Buffer.from(encodedId, 'base64url').toString('utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function resolveAgentRelativePath(agentId: string, relativePath: string): string {
+  const normalized = normalizeAgentRelativePath(relativePath);
+  const root = agentDir(agentId);
+  const resolved = path.resolve(root, normalized);
+  const rootPrefix = root.endsWith(path.sep) ? root : root + path.sep;
+
+  if (resolved !== root && !resolved.startsWith(rootPrefix)) {
+    throw new Error('Path traversal detected');
+  }
+
+  return resolved;
+}
+
+function parseAgentSkillReferences(content: string): AgentSkillReference[] | null {
+  const startIdx = content.indexOf(SKILLS_START);
+  const endIdx = content.indexOf(SKILLS_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+    return null;
+  }
+
+  const section = content.slice(startIdx + SKILLS_START.length, endIdx);
+  const seen = new Set<string>();
+  const refs: AgentSkillReference[] = [];
+
+  for (const rawLine of section.split('\n')) {
+    const pathMatch = rawLine.match(/`([^`]+)`/);
+    if (!pathMatch) continue;
+
+    const skillPath = path.posix.normalize(normalizeAgentRelativePath(pathMatch[1]));
+    if (!skillPath.startsWith('skills/') || !skillPath.endsWith('/index.md')) continue;
+
+    const id = normalizeAgentRelativePath(path.posix.dirname(skillPath));
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const trailing = rawLine.slice(pathMatch.index! + pathMatch[0].length).trim();
+    const description = trailing.replace(/^[-–—:]+\s*/, '').trim();
+
+    refs.push({ id, path: skillPath, description });
+  }
+
+  return refs;
+}
+
+function readAgentSkillDisplay(filePath: string): { name: string; description: string } {
+  const fallbackName = humanizeSlug(path.basename(path.dirname(filePath)));
+  if (!fs.existsSync(filePath)) {
+    return { name: fallbackName, description: '' };
+  }
+
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const lines = content.split(/\r?\n/);
+
+  let name = fallbackName;
+  let description = '';
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('# ')) {
+      name = trimmed.slice(2).trim() || fallbackName;
+      continue;
+    }
+    if (!trimmed.startsWith('#')) {
+      description = trimmed;
+      break;
+    }
+  }
+
+  return { name, description };
+}
+
+function readAgentSkillReferences(agentId: string): AgentSkillReference[] {
   const filePath = findInstructionFile(agentId);
-  if (!filePath) return;
+  if (!filePath) return [];
 
-  const skills = getAgentSkills(agentId);
+  const content = fs.readFileSync(filePath, 'utf-8');
+  return parseAgentSkillReferences(content) ?? [];
+}
+
+function writeAgentSkillsSection(agentId: string, skills: AgentSkillReference[]): void {
+  const filePath = findInstructionFile(agentId);
+  if (!filePath) {
+    throw new Error('Agent instruction file not found');
+  }
+
   const newSection = buildSkillsSection(skills);
-
   let content = fs.readFileSync(filePath, 'utf-8');
 
   const startIdx = content.indexOf(SKILLS_START);
   const endIdx = content.indexOf(SKILLS_END);
 
   if (startIdx !== -1 && endIdx !== -1) {
-    // Replace existing section
     const before = content.slice(0, startIdx).replace(/\n+$/, '');
     const after = content.slice(endIdx + SKILLS_END.length).replace(/^\n+/, '');
 
@@ -326,12 +305,100 @@ export function syncAgentSkillsSection(agentId: string): void {
       content = before + (after ? '\n\n' + after : '\n');
     }
   } else if (newSection) {
-    // Append new section
     content = content.replace(/\n*$/, '') + '\n\n' + newSection + '\n';
   }
 
   fs.writeFileSync(filePath, content, 'utf-8');
 }
+
+function removeEmptyAgentSkillsFolder(agentId: string): void {
+  const skillsFolder = path.join(agentDir(agentId), 'skills');
+  if (!fs.existsSync(skillsFolder)) return;
+
+  const remaining = fs.readdirSync(skillsFolder);
+  if (remaining.length === 0) {
+    fs.rmdirSync(skillsFolder);
+  }
+}
+
+export function getAgentSkills(agentId: string): AgentSkillRecord[] {
+  const agent = store.getById('agents', agentId);
+  if (!agent) return [];
+
+  return readAgentSkillReferences(agentId).map((ref) => {
+    const diskPath = resolveAgentRelativePath(agentId, ref.path);
+    const missing = !fs.existsSync(diskPath);
+    const display = readAgentSkillDisplay(diskPath);
+
+    return {
+      id: encodeAgentSkillId(ref.id),
+      name: display.name,
+      description: ref.description || display.description,
+      path: ref.path,
+      missing,
+    };
+  });
+}
+
+export function attachSkillToAgent(agentId: string, skillId: string): void {
+  const agent = store.getById('agents', agentId);
+  if (!agent) throw new Error('Agent not found');
+
+  const skill = getSkill(skillId);
+  if (!skill) throw new Error('Skill not found');
+  if (!findInstructionFile(agentId)) throw new Error('Agent instruction file not found');
+
+  const currentSkills = readAgentSkillReferences(agentId);
+  const src = skillDir(skillId);
+  const dest = agentSkillDestPath(agentId, skill.name);
+  const destId = normalizeAgentRelativePath(path.relative(agentDir(agentId), dest));
+  const skillPath = normalizeAgentRelativePath(path.relative(agentDir(agentId), path.join(dest, 'index.md')));
+  const existing = currentSkills.find((entry) => entry.id === destId);
+
+  if (existing) return;
+  if (fs.existsSync(dest)) {
+    throw new Error(`Local skill path already exists: ${destId}`);
+  }
+
+  copyDirSync(src, dest);
+
+  writeAgentSkillsSection(agentId, [
+    ...currentSkills,
+    {
+      id: destId,
+      path: skillPath,
+      description: skill.description,
+    },
+  ]);
+}
+
+export function detachSkillFromAgent(agentId: string, skillId: string): void {
+  const agent = store.getById('agents', agentId);
+  if (!agent) throw new Error('Agent not found');
+
+  const currentSkills = readAgentSkillReferences(agentId);
+  const targetId = decodeAgentSkillId(skillId) ?? normalizeAgentRelativePath(skillId);
+  const match = currentSkills.find((entry) => entry.id === targetId);
+  if (!match) return;
+
+  const dest = resolveAgentRelativePath(agentId, match.id);
+  if (fs.existsSync(dest)) {
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+
+  writeAgentSkillsSection(
+    agentId,
+    currentSkills.filter((entry) => entry.id !== match.id),
+  );
+  removeEmptyAgentSkillsFolder(agentId);
+}
+
+// ---------------------------------------------------------------------------
+// Agent instruction skills section parsing
+// ---------------------------------------------------------------------------
+
+const SKILLS_START = '<!-- skills:start -->';
+const SKILLS_END = '<!-- skills:end -->';
 
 // ---------------------------------------------------------------------------
 // Skill file operations (scoped to data/skills/{skillId}/)
@@ -506,4 +573,115 @@ export function getSkillEntryPath(skillId: string, entryPath: string): string | 
   const diskPath = resolveSkillDiskPath(skillId, normalized);
   if (!fs.existsSync(diskPath)) return null;
   return diskPath;
+}
+
+// ---------------------------------------------------------------------------
+// Built-in skill seeding
+// ---------------------------------------------------------------------------
+
+interface BuiltinSkillManifest {
+  name: string;
+  description: string;
+}
+
+interface BuiltinSkillDef {
+  name: string;
+  description: string;
+  /** Absolute path to the built-in skill folder (contains index.md + any other files). */
+  srcDir: string;
+}
+
+function loadBuiltinSkills(): BuiltinSkillDef[] {
+  if (!fs.existsSync(BUILTIN_SKILLS_DIR)) return [];
+
+  const entries = fs.readdirSync(BUILTIN_SKILLS_DIR, { withFileTypes: true });
+  const defs: BuiltinSkillDef[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const srcDir = path.join(BUILTIN_SKILLS_DIR, entry.name);
+    const manifestPath = path.join(srcDir, 'skill.json');
+    if (!fs.existsSync(manifestPath)) continue;
+
+    const manifest: BuiltinSkillManifest = JSON.parse(
+      fs.readFileSync(manifestPath, 'utf-8'),
+    );
+
+    defs.push({
+      name: manifest.name,
+      description: manifest.description,
+      srcDir,
+    });
+  }
+
+  return defs;
+}
+
+/**
+ * Ensure built-in skills from `src/presets/skills/` exist in the data store.
+ * Creates missing skills and syncs the full folder contents for existing ones.
+ */
+export function seedBuiltinSkills(): void {
+  ensureSkillsDir();
+
+  const builtins = loadBuiltinSkills();
+  const existing = store.getAll('skills');
+
+  for (const def of builtins) {
+    const match = existing.find(
+      (s) => (s.name as string).toLowerCase() === def.name.toLowerCase(),
+    );
+
+    if (match) {
+      // Sync description from manifest
+      if ((match.description as string) !== def.description) {
+        store.update('skills', match.id as string, { description: def.description });
+      }
+
+      // Sync folder contents from source into the data skill dir
+      syncBuiltinSkillFolder(def.srcDir, skillDir(match.id as string));
+      continue;
+    }
+
+    // Create the skill record and copy the whole folder
+    const record = store.insert('skills', {
+      id: randomUUID(),
+      name: def.name,
+      description: def.description,
+    });
+
+    const dest = skillDir(record.id as string);
+    copyDirSync(def.srcDir, dest);
+
+    // Remove the manifest — it's a build-time artifact, not a runtime skill file
+    const copiedManifest = path.join(dest, 'skill.json');
+    if (fs.existsSync(copiedManifest)) fs.unlinkSync(copiedManifest);
+  }
+}
+
+/**
+ * Copy every file from the built-in source folder into the data skill folder,
+ * overwriting only files whose content has changed. Skips skill.json.
+ */
+function syncBuiltinSkillFolder(srcDir: string, destDir: string): void {
+  fs.mkdirSync(destDir, { recursive: true });
+
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.name === 'skill.json') continue;
+
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+
+    if (entry.isDirectory()) {
+      syncBuiltinSkillFolder(srcPath, destPath);
+    } else {
+      const srcContent = fs.readFileSync(srcPath);
+      if (fs.existsSync(destPath)) {
+        const destContent = fs.readFileSync(destPath);
+        if (srcContent.equals(destContent)) continue;
+      }
+      fs.writeFileSync(destPath, srcContent);
+    }
+  }
 }

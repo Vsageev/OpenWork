@@ -281,7 +281,7 @@
 }
 
 .activeRunRow {
-  grid-template-columns: minmax(140px, 1fr) 80px 90px 100px 120px 60px 32px;
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px 32px;
 }
 
 .runRow:last-child {
@@ -466,6 +466,10 @@
 /* History rows have an extra expand column */
 .runEntry .runRow {
   grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px;
+}
+
+.runEntry .activeRunRow {
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px 32px;
 }
 
 .runEntry {
@@ -1384,7 +1388,11 @@
   }
 
   .activeRunRow {
-    grid-template-columns: 1fr auto auto auto;
+    grid-template-columns: 20px 1fr auto auto auto;
+  }
+
+  .runEntry .activeRunRow {
+    grid-template-columns: 20px 1fr auto auto auto;
   }
 
   /* Hide time, duration, trigger-link on active runs */
@@ -1455,7 +1463,11 @@
   }
 
   .activeRunRow {
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 20px 1fr auto auto;
+  }
+
+  .runEntry .activeRunRow {
+    grid-template-columns: 20px 1fr auto auto;
   }
 
   /* Hide trigger badge on very small screens */

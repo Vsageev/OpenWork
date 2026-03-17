@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Check, Search, FileText, FolderOpen, ChevronDown, CheckCircle2, AlertCircle, Image } from 'lucide-react';
+import { AnchoredOverlay } from './AnchoredOverlay';
 import { Button } from './Button';
 import { Input } from './Input';
 import { Modal } from './Modal';
@@ -73,6 +74,7 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const assigneeRef = useRef<HTMLDivElement>(null);
+  const assigneeDropdownRef = useRef<HTMLDivElement>(null);
 
   // Tags
   const [allTags, setAllTags] = useState<Tag[]>([]);
@@ -83,6 +85,7 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
   const [showCollectionDropdown, setShowCollectionDropdown] = useState(false);
   const collectionRef = useRef<HTMLDivElement>(null);
+  const collectionDropdownRef = useRef<HTMLDivElement>(null);
 
   // Related cards
   const [linkSearch, setLinkSearch] = useState('');
@@ -128,7 +131,12 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
   useEffect(() => {
     if (!showAssigneeDropdown) return;
     function handleClick(e: MouseEvent) {
-      if (assigneeRef.current && !assigneeRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        assigneeRef.current &&
+        !assigneeRef.current.contains(target) &&
+        !assigneeDropdownRef.current?.contains(target)
+      ) {
         setShowAssigneeDropdown(false);
       }
     }
@@ -140,7 +148,12 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
   useEffect(() => {
     if (!showCollectionDropdown) return;
     function handleClick(e: MouseEvent) {
-      if (collectionRef.current && !collectionRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        collectionRef.current &&
+        !collectionRef.current.contains(target) &&
+        !collectionDropdownRef.current?.contains(target)
+      ) {
         setShowCollectionDropdown(false);
       }
     }
@@ -336,7 +349,12 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
                   <ChevronDown size={14} style={{ marginLeft: 'auto', color: 'var(--color-text-tertiary)' }} />
                 </button>
                 {showCollectionDropdown && (
-                  <div className={styles.assigneeDropdown}>
+                  <AnchoredOverlay
+                    ref={collectionDropdownRef}
+                    anchorRef={collectionRef}
+                    className={styles.assigneeDropdown}
+                    matchAnchorWidth
+                  >
                     {collections.map((col) => (
                       <button
                         key={col.id}
@@ -351,7 +369,7 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
                     {collections.length === 0 && (
                       <div className={styles.searchEmpty}>No collections found</div>
                     )}
-                  </div>
+                  </AnchoredOverlay>
                 )}
               </div>
             </div>
@@ -481,7 +499,12 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
                 )}
               </button>
               {showAssigneeDropdown && (
-                <div className={styles.assigneeDropdown}>
+                <AnchoredOverlay
+                  ref={assigneeDropdownRef}
+                  anchorRef={assigneeRef}
+                  className={styles.assigneeDropdown}
+                  matchAnchorWidth
+                >
                   {assigneeId && (
                     <button
                       className={styles.assigneeOption}
@@ -536,7 +559,7 @@ export function CreateCardModal({ onClose, onSubmit, showCollectionPicker, allow
                       ))}
                     </>
                   )}
-                </div>
+                </AnchoredOverlay>
               )}
             </div>
           </div>

@@ -6,18 +6,10 @@ dist/
 *.log
 logs/
 .DS_Store
-coverage/
 .turbo/
 backups/
 certs/
 **/data/
 .claude-api-key
-.claude-test-credentials
-
-# Test artifacts (browser testing agent)
-test-results/
-playwright-report/
-tests/e2e/tmp-*
-tests/e2e/screenshots/
 .claude/tmp-*
-.claude/screenshot-*
+.playwright-browsers/

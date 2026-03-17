@@ -49,11 +49,13 @@ import { initAllBoardCronJobs } from './services/board-cron.js';
 import { reconcileRunsOnStartup, cleanupOldRunLogs } from './services/agent-runs.js';
 import {
   initializeAgentChatQueue,
+  recoverCompletedChatRunsOnStartup,
   reattachRunningProcess,
   RUNS_DIR,
 } from './services/agent-chat.js';
 import { initializeAgentBatchQueue } from './services/agent-batch-queue.js';
 import { restoreManagedTelegramWebhooks } from './services/telegram.js';
+import { seedBuiltinSkills } from './services/skills.js';
 
 function buildHttpsOptions(): SecureContextOptions | undefined {
   if (!env.TLS_CERT_PATH || !env.TLS_KEY_PATH) return undefined;
@@ -89,6 +91,9 @@ export async function buildApp() {
 
   // Initialize JSON store before anything else
   await store.init();
+
+  // Run one-time data migrations, then seed built-in skills
+  seedBuiltinSkills();
 
   await app.register(sensible);
   await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
@@ -174,6 +179,7 @@ export async function buildApp() {
   // Clean old run logs, then reconcile running records (re-attach or mark dead)
   cleanupOldRunLogs();
   reconcileRunsOnStartup((run) => reattachRunningProcess(run));
+  recoverCompletedChatRunsOnStartup();
   initializeAgentChatQueue({ preserveActiveProcessing: true });
   initializeAgentBatchQueue({ preserveActiveProcessing: true });
 

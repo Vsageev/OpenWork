@@ -13,9 +13,14 @@ interface FsEntry {
 interface FileSystemBrowserModalProps {
   onSelect: (targetPath: string) => void;
   onClose: () => void;
+  selectionMode?: 'any' | 'folder';
 }
 
-export function FileSystemBrowserModal({ onSelect, onClose }: FileSystemBrowserModalProps) {
+export function FileSystemBrowserModal({
+  onSelect,
+  onClose,
+  selectionMode = 'any',
+}: FileSystemBrowserModalProps) {
   const [currentPath, setCurrentPath] = useState('/');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,13 +74,26 @@ export function FileSystemBrowserModal({ onSelect, onClose }: FileSystemBrowserM
   function handleEntryClick(entry: FsEntry) {
     if (entry.type === 'folder') {
       setCurrentPath(entry.path);
-    } else {
+    } else if (selectionMode === 'any') {
       setSelected(entry.path === selected ? null : entry.path);
     }
   }
 
-  function handleSelectCurrent() {
+  async function handleSelectCurrent() {
     const value = pathInput.trim();
+    if (selectionMode === 'folder') {
+      const targetPath = value || currentPath;
+      try {
+        await api<{ path: string; entries: FsEntry[] }>(
+          `/storage/browse-fs?path=${encodeURIComponent(targetPath)}`,
+        );
+        onSelect(targetPath);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Folder not found');
+      }
+      return;
+    }
+
     if (value) {
       onSelect(value);
     } else {
@@ -97,19 +115,27 @@ export function FileSystemBrowserModal({ onSelect, onClose }: FileSystemBrowserM
       setCurrentPath(value);
       setSelected(null);
       setError('');
-    } catch {
+    } catch (err) {
+      if (selectionMode === 'folder') {
+        setError(err instanceof ApiError ? err.message : 'Folder not found');
+        return;
+      }
       // Not a directory or doesn't exist — treat as a direct path selection
       onSelect(value);
     }
   }
+
+  const visibleEntries = selectionMode === 'folder'
+    ? entries.filter((entry) => entry.type === 'folder')
+    : entries;
 
   return (
     <div className={styles.overlay} onClick={onClose}>
       <div className={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
           <span className={styles.title}>
-            Select file or folder
-            <Tooltip label="Browsers can't access local paths from a native picker. You can browse here, or paste a path — in Finder hold Option and right-click → Copy as Pathname (or ⌥⌘C), in Explorer Shift + right-click → Copy as path.">
+            {selectionMode === 'folder' ? 'Select folder' : 'Select file or folder'}
+            <Tooltip label="Browsers can't access local paths from a native picker. You can browse here, or paste a path — in Finder hold Option and right-click -> Copy as Pathname (or Option+Command+C), in Explorer Shift + right-click -> Copy as path.">
               <Info size={14} className={styles.infoIcon} />
             </Tooltip>
           </span>
@@ -162,10 +188,10 @@ export function FileSystemBrowserModal({ onSelect, onClose }: FileSystemBrowserM
                   <span className={styles.entryName}>..</span>
                 </button>
               )}
-              {entries.length === 0 && !parentPath && (
+              {visibleEntries.length === 0 && !parentPath && (
                 <div className={styles.empty}>No accessible entries</div>
               )}
-              {entries.map((entry) => (
+              {visibleEntries.map((entry) => (
                 <button
                   key={entry.path}
                   className={`${styles.row} ${selected === entry.path ? styles.rowSelected : ''}`}
@@ -198,7 +224,7 @@ export function FileSystemBrowserModal({ onSelect, onClose }: FileSystemBrowserM
                 handlePathInputSubmit();
               }
             }}
-            placeholder="Type or paste a path..."
+            placeholder={selectionMode === 'folder' ? 'Type or paste a folder path...' : 'Type or paste a path...'}
             spellCheck={false}
           />
           <div className={styles.footerActions}>

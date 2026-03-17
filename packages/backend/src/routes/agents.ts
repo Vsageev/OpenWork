@@ -28,6 +28,7 @@ import {
   getAgentFilePath,
   getAgentEntryPath,
   readAgentFileContent,
+  writeAgentFileContent,
   uploadAgentFile,
   createAgentFolder,
   createAgentReference,
@@ -272,6 +273,9 @@ export async function agentRoutes(app: FastifyInstance) {
           modelId: z.string().max(200).nullable().optional(),
           thinkingLevel: z.enum(['low', 'medium', 'high']).nullable().optional(),
           preset: z.string().min(1).max(100),
+          presetParameters: z
+            .record(z.string().min(1).max(100), z.string().max(2000))
+            .optional(),
           apiKeyId: z.string().min(1).optional(),
           workspaceId: z.uuid().optional(),
           skipPermissions: z.boolean().optional(),
@@ -290,6 +294,7 @@ export async function agentRoutes(app: FastifyInstance) {
         modelId,
         thinkingLevel,
         preset,
+        presetParameters,
         apiKeyId,
         skipPermissions,
         groupId,
@@ -323,6 +328,7 @@ export async function agentRoutes(app: FastifyInstance) {
           modelId,
           thinkingLevel,
           preset,
+          presetParameters,
           apiKeyId: resolvedApiKeyId,
           apiKeyName: apiKey.name as string,
           apiKeyPrefix: apiKey.keyPrefix as string,
@@ -576,6 +582,33 @@ export async function agentRoutes(app: FastifyInstance) {
         const content = readAgentFileContent(request.params.id, request.query.path);
         if (content === null) return reply.notFound('File not found');
         return reply.send({ path: request.query.path, content });
+      } catch (err) {
+        return reply.badRequest((err as Error).message);
+      }
+    },
+  );
+
+  // Write text file content
+  typedApp.put(
+    '/api/agents/:id/files/content',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agents'],
+        summary: 'Write text file content to agent workspace',
+        params: z.object({ id: z.string() }),
+        body: z.object({
+          path: z.string().min(1),
+          content: z.string(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const agent = getAgent(request.params.id);
+      if (!agent) return reply.notFound('Agent not found');
+      try {
+        writeAgentFileContent(request.params.id, request.body.path, request.body.content);
+        return reply.status(204).send();
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }

@@ -6,7 +6,7 @@ export function AuthLayout() {
     <div className={styles.layout}>
       <div className={styles.brandPanel}>
         <div className={styles.brandTop}>
-          <span className={styles.brandName}>Workspace</span>
+          <span className={styles.brandName}>OpenWork</span>
         </div>
 
         <div className={styles.heroSection}>
@@ -16,7 +16,7 @@ export function AuthLayout() {
             <div className={styles.square} />
             <div className={styles.square} />
           </div>
-          <h1 className={styles.heroTitle}>Your workspace.</h1>
+          <h1 className={styles.heroTitle}>Your work, open.</h1>
         </div>
 
         <div className={styles.brandFooter} />
@@ -24,7 +24,7 @@ export function AuthLayout() {
 
       <div className={styles.formPanel}>
         <div className={styles.formContainer}>
-          <div className={styles.formLogo}>Workspace</div>
+          <div className={styles.formLogo}>OpenWork</div>
           <Outlet />
         </div>
       </div>

@@ -6,7 +6,7 @@
 .main {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   margin-left: var(--sidebar-width);
   padding: var(--space-6);
   min-height: 100vh;

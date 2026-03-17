@@ -1,0 +1,4 @@
+{
+  "name": "session-start",
+  "description": "Read likely relevant local instructions, docs, and memory files before acting"
+}

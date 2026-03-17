@@ -21,6 +21,12 @@ const MIME_BY_EXT: Record<string, string> = {
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
+const IGNORED_UPLOAD_FILE_NAMES = new Set([
+  '.DS_Store',
+  'Thumbs.db',
+  'desktop.ini',
+]);
+
 export interface StorageEntry {
   name: string;
   path: string;
@@ -30,6 +36,17 @@ export interface StorageEntry {
   createdAt: string;
   isReference?: boolean;
   target?: string;
+}
+
+export function shouldIgnoreStorageUpload(dirPath: string, fileName: string): boolean {
+  if (fileName.startsWith('._')) return true;
+  if (IGNORED_UPLOAD_FILE_NAMES.has(fileName)) return true;
+
+  const normalizedDir = normalizePath(dirPath);
+  return normalizedDir
+    .split('/')
+    .filter(Boolean)
+    .some((segment) => segment === '__MACOSX');
 }
 
 function ensureStorageDir() {
@@ -267,6 +284,22 @@ export function getFilePath(filePath: string): string | null {
   if (!stats.isFile()) return null;
 
   return diskPath;
+}
+
+export function writeStorageFileContent(filePath: string, content: string): void {
+  const normalized = validatePath(filePath);
+  const diskPath = resolveDiskPath(normalized);
+  const diskDir = path.dirname(diskPath);
+
+  if (!fs.existsSync(diskDir)) {
+    fs.mkdirSync(diskDir, { recursive: true });
+  }
+
+  if (fs.existsSync(diskPath) && fs.statSync(diskPath).isDirectory()) {
+    throw new Error('Path is a directory');
+  }
+
+  fs.writeFileSync(diskPath, content, 'utf-8');
 }
 
 export function getDiskPath(storagePath: string): string | null {

@@ -1,0 +1,4 @@
+{
+  "name": "session-end-memory",
+  "description": "Before finishing, re-check relevant files and optionally persist durable memories"
+}

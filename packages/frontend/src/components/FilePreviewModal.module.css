@@ -59,6 +59,24 @@
   flex-shrink: 0;
 }
 
+.editActions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 640px) {
+  .previewHeader {
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+
+  .previewActions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
 .iconBtn {
   display: flex;
   align-items: center;
@@ -123,4 +141,31 @@
   height: 65vh;
   border: none;
   background: var(--color-card);
+}
+
+.editorWrap {
+  padding: var(--space-4);
+  height: 100%;
+  min-height: 24rem;
+}
+
+.editor {
+  width: 100%;
+  min-height: 24rem;
+  height: min(70vh, 40rem);
+  resize: vertical;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background);
+  color: var(--color-text);
+  padding: var(--space-4);
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  tab-size: 4;
+}
+
+.editor:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
 }

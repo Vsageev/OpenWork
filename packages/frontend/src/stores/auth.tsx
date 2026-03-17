@@ -5,13 +5,24 @@ import {
   type ReactNode,
 } from 'react';
 import type { AuthUser } from 'shared';
-import { api, setTokens, clearTokens, loadTokens, getAccessToken } from '../lib/api';
+import {
+  api,
+  setTokens,
+  clearTokens,
+  loadTokens,
+  getAccessToken,
+  subscribeToAuthSession,
+} from '../lib/api';
 import { AuthContext } from './AuthContext';
 
 interface AuthResponse {
   user: AuthUser;
   accessToken: string;
   refreshToken: string;
+}
+
+function shouldClearSession(error: unknown): boolean {
+  return Boolean(error instanceof Error && 'status' in error && (error as { status?: number }).status === 401);
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -68,9 +79,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         setState({ user: data.user, loading: false });
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (cancelled) return;
-        clearTokens();
+        if (shouldClearSession(error)) {
+          clearTokens();
+        }
         setState({ user: null, loading: false });
       });
 
@@ -78,6 +91,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [state.loading]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const unsubscribe = subscribeToAuthSession((event) => {
+      if (cancelled) return;
+
+      if (event === 'cleared') {
+        setState({ user: null, loading: false });
+        return;
+      }
+
+      if (!getAccessToken()) {
+        setState({ user: null, loading: false });
+        return;
+      }
+
+      api<{ user: AuthUser }>('/auth/me')
+        .then((data) => {
+          if (cancelled) return;
+          setState({ user: data.user, loading: false });
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          if (shouldClearSession(error)) {
+            clearTokens();
+            setState({ user: null, loading: false });
+            return;
+          }
+          setState((current) => ({ ...current, loading: false }));
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   const login = useCallback(async (email: string, password: string) => {
     const normalizedEmail = email.trim().toLowerCase();
@@ -124,9 +175,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await api<{ user: AuthUser }>('/auth/me');
       setState({ user: data.user, loading: false });
-    } catch {
-      clearTokens();
-      setState({ user: null, loading: false });
+    } catch (error) {
+      if (shouldClearSession(error)) {
+        clearTokens();
+        setState({ user: null, loading: false });
+        return;
+      }
+      setState((current) => ({ ...current, loading: false }));
     }
   }, []);
 

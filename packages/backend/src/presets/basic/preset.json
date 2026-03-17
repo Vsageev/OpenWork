@@ -2,6 +2,18 @@
   "id": "basic",
   "name": "Basic Agent",
   "description": "A simple agent with instructions",
+  "parameters": [
+    {
+      "key": "workingDirectory",
+      "label": "Working directory",
+      "description": "Optional directory this agent should treat as its default workspace.",
+      "placeholder": "/Users/name/project",
+      "type": "directory",
+      "required": false,
+      "contentTemplate": "Default workspace behavior: - Work in `{{value}}` by default for commands and file operations.\n- Use other paths only if the task requires it; ask first when avoidable.",
+      "emptyContentTemplate": "Default workspace behavior: - Work in the current folder by default for commands and file operations.\n- Use other paths only if the task requires it; ask first when avoidable."
+    }
+  ],
   "files": [
     { "type": "file", "name": "CLAUDE.MD", "template": "CLAUDE.MD.hbs", "models": ["Claude"] },
     {
@@ -11,5 +23,11 @@
       "models": ["Codex", "Qwen"]
     }
   ],
-  "defaultSkills": ["verification", "workspace"]
+  "defaultSkills": [
+    "session-start",
+    "openwork-api",
+    "request-clarification",
+    "session-end-memory",
+    "verification"
+  ]
 }

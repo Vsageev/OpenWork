@@ -29,10 +29,57 @@ import {
   reorderQueueItems,
   getGlobalRunningAgentCount,
   getMaxConcurrentAgentLimit,
+  getActiveMessagePath,
+  editMessageAndBranch,
+  switchBranch,
 } from '../services/agent-chat.js';
+import { listAgentRuns } from '../services/agent-runs.js';
 
 // Rate limiter for agent prompt execution — shared across all requests in this process
 export const promptRateLimiter = createAgentRateLimiter();
+
+type ChatUploadAttachment = {
+  type: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storagePath: string;
+};
+
+async function persistUploadedChatFiles(
+  fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }>,
+  options: { imagesOnly?: boolean } = {},
+): Promise<ChatUploadAttachment[]> {
+  const attachments: ChatUploadAttachment[] = [];
+  const imagesOnly = options.imagesOnly ?? false;
+
+  for (const filePart of fileParts) {
+    const fileCheck = validateUploadedFile(filePart.mimetype, filePart.filename, {
+      mode: imagesOnly ? 'strict' : 'nonExecutable',
+    });
+    if (!fileCheck.valid) throw new Error(fileCheck.error!);
+
+    if (imagesOnly && !filePart.mimetype.startsWith('image/')) {
+      throw new Error('Only image files are supported');
+    }
+
+    const ext = path.extname(filePart.filename) || '.jpg';
+    const uniqueName = `${crypto.randomUUID()}${ext}`;
+    const storagePath = '/chat-uploads';
+
+    const entry = await uploadFile(storagePath, uniqueName, filePart.mimetype, filePart.buffer);
+
+    attachments.push({
+      type: filePart.mimetype.startsWith('image/') ? 'image' : 'file',
+      fileName: filePart.filename,
+      mimeType: filePart.mimetype,
+      fileSize: filePart.buffer.length,
+      storagePath: entry.path,
+    });
+  }
+
+  return attachments;
+}
 
 export async function agentChatRoutes(app: FastifyInstance) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
@@ -199,20 +246,21 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const conv = validateConversationOwnership(request.query.conversationId, request.params.id);
       if (!conv) return reply.notFound('Conversation not found');
 
-      const all = store
-        .find(
-          'messages',
-          (r: Record<string, unknown>) => r.conversationId === request.query.conversationId,
-        )
-        .sort(
-          (a: Record<string, unknown>, b: Record<string, unknown>) =>
-            new Date(a.createdAt as string).getTime() -
-            new Date(b.createdAt as string).getTime(),
-        );
+      // Return tree-aware active path with sibling info
+      const activePath = getActiveMessagePath(request.query.conversationId);
+      const entries = activePath.map((msg) => ({
+        ...msg,
+        siblingIndex: msg._siblingIndex,
+        siblingCount: msg._siblingCount,
+        siblingIds: msg._siblingIds,
+        _siblingIndex: undefined,
+        _siblingCount: undefined,
+        _siblingIds: undefined,
+      }));
 
       const { limit, offset } = request.query;
-      const entries = all.slice(offset, offset + limit);
-      return reply.send({ total: all.length, limit, offset, entries });
+      const paged = entries.slice(offset, offset + limit);
+      return reply.send({ total: entries.length, limit, offset, entries: paged });
     },
   );
 
@@ -244,10 +292,19 @@ export async function agentChatRoutes(app: FastifyInstance) {
         direction: 'inbound',
         content: request.body.content,
         type: request.body.isFinal ? 'text' : 'system',
-        metadata: {
-          agentChatUpdate: true,
-          isFinal: Boolean(request.body.isFinal),
-        },
+        metadata: (() => {
+          const activeRun = listAgentRuns({
+            status: 'running',
+            agentId: request.params.id,
+            conversationId: request.body.conversationId,
+            limit: 1,
+          }).entries[0];
+          return {
+            agentChatUpdate: true,
+            isFinal: Boolean(request.body.isFinal),
+            runId: activeRun?.id ?? null,
+          };
+        })(),
       });
 
       return reply.status(201).send(message);
@@ -505,14 +562,221 @@ export async function agentChatRoutes(app: FastifyInstance) {
     },
   );
 
-  // Upload images to agent chat (up to 10)
+  // Edit a user message and create a new branch
+  typedApp.post(
+    '/api/agents/:id/chat/conversations/:cid/edit-message',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Edit a user message and create a new conversation branch',
+        params: z.object({ id: z.string(), cid: z.string() }),
+        body: z.object({
+          messageId: z.string(),
+          content: z.string().max(50000),
+          keepStoragePaths: z.array(z.string()).max(10).optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const agent = getAgent(request.params.id);
+      if (!agent) return reply.notFound('Agent not found');
+
+      const conv = validateConversationOwnership(request.params.cid, request.params.id);
+      if (!conv) return reply.notFound('Conversation not found');
+
+      // Rate limit per user per agent
+      const userId = (request.user as { sub: string }).sub;
+      const rateLimitKey = `${userId}:${request.params.id}`;
+      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
+        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
+      }
+
+      try {
+        const newMessage = editMessageAndBranch(
+          request.params.cid,
+          request.body.messageId,
+          request.body.content,
+          { keepStoragePaths: request.body.keepStoragePaths },
+        );
+
+        // Queue the edited prompt for processing
+        const wasQueuedOrBusy =
+          isAgentBusy(request.params.id, request.params.cid) ||
+          getAgentQueuedPromptCount(request.params.id, request.params.cid) > 0;
+        const queued = enqueueAgentPrompt(
+          request.params.id,
+          request.params.cid,
+          request.body.content,
+          {
+            mode: 'respond_to_message',
+            targetMessageId: newMessage.id as string,
+          },
+        );
+        const statusCode = wasQueuedOrBusy ? 202 : 201;
+        return reply.status(statusCode).send({
+          message: newMessage,
+          queueItem: queued.queueItem,
+          queuedCount: queued.queuedCount,
+          concurrency: {
+            running: getGlobalRunningAgentCount(),
+            limit: getMaxConcurrentAgentLimit(),
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to edit message';
+        return reply.badRequest(message);
+      }
+    },
+  );
+
+  typedApp.post(
+    '/api/agents/:id/chat/conversations/:cid/edit-message-upload',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Edit a user message, attach images, and create a new conversation branch',
+        params: z.object({ id: z.string(), cid: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      const agent = getAgent(request.params.id);
+      if (!agent) return reply.notFound('Agent not found');
+
+      const conv = validateConversationOwnership(request.params.cid, request.params.id);
+      if (!conv) return reply.notFound('Conversation not found');
+
+      const userId = (request.user as { sub: string }).sub;
+      const rateLimitKey = `${userId}:${request.params.id}`;
+      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
+        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
+      }
+
+      const MAX_ATTACHMENTS = 10;
+      const parts = request.parts();
+      let messageId: string | undefined;
+      let content = '';
+      const keepStoragePaths: string[] = [];
+      const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
+
+      for await (const part of parts) {
+        if (part.type === 'field') {
+          if (part.fieldname === 'messageId') messageId = part.value as string;
+          else if (part.fieldname === 'content') content = (part.value as string) || '';
+          else if (part.fieldname === 'keepStoragePaths' && typeof part.value === 'string') {
+            keepStoragePaths.push(part.value);
+          }
+        } else if (part.type === 'file') {
+          if (fileParts.length >= MAX_ATTACHMENTS) continue;
+          const chunks: Buffer[] = [];
+          for await (const chunk of part.file) {
+            chunks.push(chunk);
+          }
+          fileParts.push({
+            mimetype: part.mimetype || 'application/octet-stream',
+            filename: part.filename || 'image.jpg',
+            buffer: Buffer.concat(chunks),
+          });
+        }
+      }
+
+      if (!messageId) return reply.badRequest('messageId is required');
+      if (!content.trim() && fileParts.length === 0 && keepStoragePaths.length === 0) {
+        return reply.badRequest('Content or files are required');
+      }
+
+      try {
+        const attachments = await persistUploadedChatFiles(fileParts, { imagesOnly: true });
+        const newMessage = editMessageAndBranch(
+          request.params.cid,
+          messageId,
+          content.trim(),
+          {
+            attachments,
+            keepStoragePaths,
+          },
+        );
+
+        const wasQueuedOrBusy =
+          isAgentBusy(request.params.id, request.params.cid) ||
+          getAgentQueuedPromptCount(request.params.id, request.params.cid) > 0;
+        const queued = enqueueAgentPrompt(
+          request.params.id,
+          request.params.cid,
+          content,
+          {
+            mode: 'respond_to_message',
+            targetMessageId: newMessage.id as string,
+          },
+        );
+        const statusCode = wasQueuedOrBusy ? 202 : 201;
+        return reply.status(statusCode).send({
+          message: newMessage,
+          queueItem: queued.queueItem,
+          queuedCount: queued.queuedCount,
+          concurrency: {
+            running: getGlobalRunningAgentCount(),
+            limit: getMaxConcurrentAgentLimit(),
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to edit message';
+        return reply.badRequest(message);
+      }
+    },
+  );
+
+  // Switch active branch at a message
+  typedApp.post(
+    '/api/agents/:id/chat/conversations/:cid/switch-branch',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Switch the active branch to a different sibling message',
+        params: z.object({ id: z.string(), cid: z.string() }),
+        body: z.object({
+          messageId: z.string(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const agent = getAgent(request.params.id);
+      if (!agent) return reply.notFound('Agent not found');
+
+      const conv = validateConversationOwnership(request.params.cid, request.params.id);
+      if (!conv) return reply.notFound('Conversation not found');
+
+      try {
+        switchBranch(request.params.cid, request.body.messageId);
+        // Return the updated active path
+        const activePath = getActiveMessagePath(request.params.cid);
+        const entries = activePath.map((msg) => ({
+          ...msg,
+          siblingIndex: msg._siblingIndex,
+          siblingCount: msg._siblingCount,
+          siblingIds: msg._siblingIds,
+          _siblingIndex: undefined,
+          _siblingCount: undefined,
+          _siblingIds: undefined,
+        }));
+        return reply.send({ entries });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to switch branch';
+        return reply.badRequest(message);
+      }
+    },
+  );
+
+  // Upload files to agent chat (up to 10)
   typedApp.post(
     '/api/agents/:id/chat/upload',
     {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Agent Chat'],
-        summary: 'Upload up to 10 images to agent chat and create a message with the attachments',
+        summary: 'Upload up to 10 files to agent chat and create a message with the attachments',
         params: z.object({ id: z.string() }),
       },
     },
@@ -520,7 +784,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const agent = getAgent(request.params.id);
       if (!agent) return reply.notFound('Agent not found');
 
-      const MAX_IMAGES = 10;
+      const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
       let conversationId: string | undefined;
       let caption: string | null = null;
@@ -531,7 +795,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
           if (part.fieldname === 'conversationId') conversationId = part.value as string;
           else if (part.fieldname === 'caption') caption = (part.value as string) || null;
         } else if (part.type === 'file') {
-          if (fileParts.length >= MAX_IMAGES) continue;
+          if (fileParts.length >= MAX_ATTACHMENTS) continue;
           const chunks: Buffer[] = [];
           for await (const chunk of part.file) {
             chunks.push(chunk);
@@ -550,42 +814,23 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const conv = validateConversationOwnership(conversationId, request.params.id);
       if (!conv) return reply.notFound('Conversation not found');
 
-      const attachments: Array<{
-        type: string;
-        fileName: string;
-        mimeType: string;
-        fileSize: number;
-        storagePath: string;
-      }> = [];
-
-      for (const filePart of fileParts) {
-        const fileCheck = validateUploadedFile(filePart.mimetype, filePart.filename);
-        if (!fileCheck.valid) return reply.badRequest(fileCheck.error!);
-
-        if (!filePart.mimetype.startsWith('image/')) {
-          return reply.badRequest('Only image files are supported');
-        }
-
-        const ext = path.extname(filePart.filename) || '.jpg';
-        const uniqueName = `${crypto.randomUUID()}${ext}`;
-        const storagePath = '/chat-uploads';
-
-        const entry = await uploadFile(storagePath, uniqueName, filePart.mimetype, filePart.buffer);
-
-        attachments.push({
-          type: 'image',
-          fileName: filePart.filename,
-          mimeType: filePart.mimetype,
-          fileSize: filePart.buffer.length,
-          storagePath: entry.path,
-        });
+      let attachments: ChatUploadAttachment[];
+      try {
+        attachments = await persistUploadedChatFiles(fileParts);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to upload files';
+        return reply.badRequest(message);
       }
+
+      const messageType = attachments.every((attachment) => attachment.type === 'image')
+        ? 'image'
+        : 'file';
 
       const message = saveAgentConversationMessage({
         conversationId,
         direction: 'outbound',
         content: caption || '',
-        type: 'image',
+        type: messageType,
         attachments,
       });
 

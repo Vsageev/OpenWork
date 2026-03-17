@@ -63,6 +63,8 @@ export const TEXT_EXTS = new Set([
   '.sql', '.graphql', '.toml', '.hbs',
 ]);
 
+export const MARKDOWN_EXTS = new Set(['.md', '.markdown']);
+
 export const IMAGE_EXTS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
 ]);
@@ -73,6 +75,10 @@ export function isTextPreviewable(name: string): boolean {
 
 export function isImagePreviewable(name: string): boolean {
   return IMAGE_EXTS.has(getFileExt(name));
+}
+
+export function isMarkdownFile(name: string): boolean {
+  return MARKDOWN_EXTS.has(getFileExt(name));
 }
 
 export function isPreviewable(name: string): boolean {

@@ -1,15 +1,20 @@
 import {
+  type ChangeEvent,
   type ClipboardEvent as ReactClipboardEvent,
+  type Dispatch,
   type DragEvent as ReactDragEvent,
   type FormEvent,
   type KeyboardEvent,
+  memo,
+  type SetStateAction,
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus,
   Trash2,
@@ -28,6 +33,8 @@ import {
   FolderOpen,
   Folder,
   Image,
+  Paperclip,
+  ChevronDown,
   ChevronRight,
   HardDrive,
   Copy,
@@ -41,15 +48,14 @@ import {
   Eraser,
   Clock,
   Loader,
-  ListOrdered,
   Blocks,
-  RefreshCw,
-  GripVertical,
-  Save,
   Square,
   ChevronsDownUp,
   ChevronsUpDown,
   MoreHorizontal,
+  ArrowLeft,
+  ArrowRight,
+  FileText,
 } from 'lucide-react';
 import {
   Button,
@@ -71,6 +77,7 @@ import {
   prepareImageForUpload,
 } from '../lib/image-upload';
 import { scrollToFirstError } from '../lib/scroll-to-error';
+import { useConfirm } from '../hooks/useConfirm';
 import { FileBrowser } from '../components/FileBrowser';
 import { FileSystemBrowserModal } from '../components/FileSystemBrowserModal';
 import {
@@ -165,6 +172,16 @@ interface Preset {
   id: string;
   name: string;
   description: string;
+  parameters?: PresetParameter[];
+}
+
+interface PresetParameter {
+  key: string;
+  label: string;
+  description?: string;
+  placeholder?: string;
+  required: boolean;
+  type: 'text' | 'directory';
 }
 
 type AvatarPreset = SavedAvatarPreset;
@@ -195,7 +212,12 @@ interface ChatMessage {
   content: string;
   createdAt: string;
   type?: string;
+  metadata?: string | null;
   attachments?: ChatAttachment[] | null;
+  parentId?: string | null;
+  siblingIndex?: number;
+  siblingCount?: number;
+  siblingIds?: string[];
 }
 
 interface QueuePromptResponse {
@@ -207,10 +229,651 @@ interface QueueItem {
   id: string;
   agentId: string;
   conversationId: string;
+  mode?: 'append_prompt' | 'respond_to_message';
   prompt: string;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   attempts: number;
   createdAt: string;
+  targetMessageId?: string | null;
+}
+
+interface AgentRunSummary {
+  id: string;
+  agentId: string;
+  conversationId: string | null;
+  responseParentId?: string | null;
+  status: 'running' | 'completed' | 'error';
+  startedAt: string;
+  finishedAt: string | null;
+  errorMessage: string | null;
+}
+
+interface AgentMessageMetadata {
+  runId?: string | null;
+  agentChatUpdate?: boolean;
+  isFinal?: boolean;
+}
+
+interface StagedImage {
+  file: File;
+  previewUrl: string;
+}
+
+interface DraftAttachment {
+  file: File;
+  kind: 'image' | 'file';
+  previewUrl: string | null;
+}
+
+interface ManagedExistingImage {
+  storagePath: string;
+  fileName: string;
+}
+
+interface ReplyComposerProps {
+  streaming: boolean;
+  editingMessage?: {
+    id: string;
+    initialValue: string;
+    value: string;
+    existingImages: ManagedExistingImage[];
+    onChange: (value: string) => void;
+    onCancel: () => void;
+    onSubmit: (files: File[], keepStoragePaths: string[]) => Promise<void>;
+  } | null;
+  onSendAttachments: (caption: string, files: File[]) => Promise<void>;
+  onSendText: (prompt: string) => Promise<void>;
+}
+
+const MAX_STAGED_ATTACHMENTS = 10;
+const AGENT_CHAT_DRAFT_STORAGE_KEY = 'openwork_agent_chat_global_draft';
+
+function getChatMessageImages(message: Pick<ChatMessage, 'attachments'>): ManagedExistingImage[] {
+  return (
+    message.attachments
+      ?.filter((attachment) => attachment.type === 'image')
+      .map((attachment) => ({
+        storagePath: attachment.storagePath,
+        fileName: attachment.fileName,
+      })) ?? []
+  );
+}
+
+function isEditableChatMessage(message: ChatMessage): boolean {
+  if (message.direction !== 'outbound') return false;
+  const type = message.type ?? 'text';
+  return type === 'text' || type === 'image';
+}
+
+function readAgentChatDraft(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = window.localStorage.getItem(AGENT_CHAT_DRAFT_STORAGE_KEY);
+    return typeof raw === 'string' ? raw : '';
+  } catch {
+    return '';
+  }
+}
+
+function persistAgentChatDraft(content: string) {
+  if (typeof window === 'undefined') return;
+  const nextContent = content.trim();
+  try {
+    if (nextContent.length === 0) {
+      window.localStorage.removeItem(AGENT_CHAT_DRAFT_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(AGENT_CHAT_DRAFT_STORAGE_KEY, content);
+    }
+  } catch {
+    // Ignore storage write failures and keep the in-memory draft usable.
+  }
+}
+
+function parseAgentMessageMetadata(raw: string | null | undefined): AgentMessageMetadata | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AgentMessageMetadata;
+  } catch {
+    return null;
+  }
+}
+
+function buildMonitorRunUrl(runId: string): string {
+  return `/monitor?${new URLSearchParams({ runId }).toString()}`;
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+const ReplyComposer = memo(function ReplyComposer({
+  streaming,
+  editingMessage = null,
+  onSendAttachments,
+  onSendText,
+}: ReplyComposerProps) {
+  const [input, setInput] = useState(() => readAgentChatDraft());
+  const [uploading, setUploading] = useState(false);
+  const [draftStagedAttachments, setDraftStagedAttachments] = useState<DraftAttachment[]>([]);
+  const [editStagedImages, setEditStagedImages] = useState<StagedImage[]>([]);
+  const [retainedEditImages, setRetainedEditImages] = useState<ManagedExistingImage[]>([]);
+  const [draggingOver, setDraggingOver] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const isEditing = editingMessage !== null;
+  const composerValue = isEditing ? editingMessage.value : input;
+  const draftStagedImages = draftStagedAttachments.filter(
+    (
+      attachment,
+    ): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
+      attachment.kind === 'image' && Boolean(attachment.previewUrl),
+  );
+  const stagedImages = isEditing
+    ? editStagedImages
+    : draftStagedImages;
+  const existingImages = isEditing ? retainedEditImages : [];
+  const totalAttachmentCount = isEditing
+    ? stagedImages.length + existingImages.length
+    : draftStagedAttachments.length;
+  const trimmedComposerValue = isEditing ? editingMessage.value.trim() : input.trim();
+  const existingImagesChanged = isEditing
+    ? editingMessage.existingImages.length !== retainedEditImages.length ||
+      editingMessage.existingImages.some(
+        (image, index) => retainedEditImages[index]?.storagePath !== image.storagePath,
+      )
+    : false;
+  const canSubmitEdit = isEditing
+    ? (trimmedComposerValue !== editingMessage.initialValue.trim() ||
+        stagedImages.length > 0 ||
+        existingImagesChanged) &&
+      (trimmedComposerValue.length > 0 || totalAttachmentCount > 0)
+    : false;
+
+  const clearImageSet = useCallback((setImages: Dispatch<SetStateAction<StagedImage[]>>) => {
+    setImages((prev) => {
+      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
+      return [];
+    });
+  }, []);
+
+  const clearDraftStagedAttachments = useCallback(() => {
+    setDraftStagedAttachments((prev) => {
+      for (const attachment of prev) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      return [];
+    });
+    if (imageInputRef.current) imageInputRef.current.value = '';
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  const clearEditStagedImages = useCallback(() => {
+    clearImageSet(setEditStagedImages);
+    if (imageInputRef.current) imageInputRef.current.value = '';
+  }, [clearImageSet]);
+
+  useEffect(
+    () => () => {
+      clearDraftStagedAttachments();
+      clearEditStagedImages();
+    },
+    [clearDraftStagedAttachments, clearEditStagedImages],
+  );
+
+  useEffect(() => {
+    setRetainedEditImages(editingMessage?.existingImages ?? []);
+    clearEditStagedImages();
+  }, [clearEditStagedImages, editingMessage?.existingImages, editingMessage?.id]);
+
+  useEffect(() => {
+    if (isEditing) return;
+    persistAgentChatDraft(input);
+  }, [input, isEditing]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, [isEditing]);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    if (!composerValue) {
+      el.style.height = '';
+      return;
+    }
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 400)}px`;
+  }, [composerValue]);
+
+  const stageImages = useCallback(
+    (files: File[]) => {
+      const images = files.filter(isImageFile);
+      if (images.length === 0) return;
+      if (isEditing) {
+        setEditStagedImages((prev) => {
+          const remaining = MAX_STAGED_ATTACHMENTS - prev.length - retainedEditImages.length;
+          if (remaining <= 0) return prev;
+          const toAdd = images.slice(0, remaining).map((file) => ({
+            file,
+            previewUrl: URL.createObjectURL(file),
+          }));
+          return [...prev, ...toAdd];
+        });
+        return;
+      }
+      setDraftStagedAttachments((prev) => {
+        const remaining = MAX_STAGED_ATTACHMENTS - prev.length;
+        if (remaining <= 0) return prev;
+        const toAdd = images.slice(0, remaining).map((file) => ({
+          file,
+          kind: 'image' as const,
+          previewUrl: URL.createObjectURL(file),
+        }));
+        return [...prev, ...toAdd];
+      });
+    },
+    [isEditing, retainedEditImages.length],
+  );
+
+  const stageFiles = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    setDraftStagedAttachments((prev) => {
+      const remaining = MAX_STAGED_ATTACHMENTS - prev.length;
+      if (remaining <= 0) return prev;
+      const toAdd = files.slice(0, remaining).map((file) => ({
+        file,
+        kind: isImageFile(file) ? ('image' as const) : ('file' as const),
+        previewUrl: isImageFile(file) ? URL.createObjectURL(file) : null,
+      }));
+      return [...prev, ...toAdd];
+    });
+  }, []);
+
+  const removeDraftAttachment = useCallback((index: number) => {
+    setDraftStagedAttachments((prev) => {
+      const next = [...prev];
+      const [removed] = next.splice(index, 1);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return next;
+    });
+  }, []);
+
+  const removeStagedImage = useCallback(
+    (index: number) => {
+      if (!isEditing) {
+        removeDraftAttachment(index);
+        return;
+      }
+      setEditStagedImages((prev) => {
+        const next = [...prev];
+        const [removed] = next.splice(index, 1);
+        if (removed) URL.revokeObjectURL(removed.previewUrl);
+        return next;
+      });
+    },
+    [isEditing, removeDraftAttachment],
+  );
+
+  const removeExistingImage = useCallback((storagePath: string) => {
+    setRetainedEditImages((prev) => prev.filter((image) => image.storagePath !== storagePath));
+  }, []);
+
+  const handleSend = useCallback(async () => {
+    if (uploading) return;
+
+    if (isEditing) {
+      const nextValue = editingMessage.value.trim();
+      const hasImages = editStagedImages.length > 0;
+      const keptStoragePaths = retainedEditImages.map((image) => image.storagePath);
+      if (!nextValue && !hasImages && keptStoragePaths.length === 0) return;
+      await editingMessage.onSubmit(
+        editStagedImages.map((img) => img.file),
+        keptStoragePaths,
+      );
+      clearEditStagedImages();
+      inputRef.current?.focus();
+      return;
+    }
+
+    const prompt = input.trim();
+    const hasAttachments = draftStagedAttachments.length > 0;
+    if (!prompt && !hasAttachments) return;
+
+    if (hasAttachments) {
+      if (streaming) return;
+      setUploading(true);
+      try {
+        await onSendAttachments(
+          prompt,
+          draftStagedAttachments.map((attachment) => attachment.file),
+        );
+        clearDraftStagedAttachments();
+        setInput('');
+        persistAgentChatDraft('');
+      } finally {
+        setUploading(false);
+        inputRef.current?.focus();
+      }
+      return;
+    }
+
+    await onSendText(prompt);
+    setInput('');
+    persistAgentChatDraft('');
+    inputRef.current?.focus();
+  }, [
+    clearDraftStagedAttachments,
+    clearEditStagedImages,
+    draftStagedAttachments,
+    editStagedImages,
+    editingMessage,
+    input,
+    isEditing,
+    onSendAttachments,
+    onSendText,
+    streaming,
+    uploading,
+  ]);
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        void handleSend();
+      }
+    },
+    [handleSend],
+  );
+
+  const handlePaste = useCallback(
+    (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+      const files = getImagesFromClipboardData(e.clipboardData);
+      if (files.length === 0) return;
+      e.preventDefault();
+      stageImages(files);
+    },
+    [stageImages],
+  );
+
+  const handleDragOver = useCallback((e: ReactDragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes('Files')) {
+      setDraggingOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: ReactDragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingOver(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: ReactDragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDraggingOver(false);
+      const files = Array.from(e.dataTransfer.files ?? []);
+      if (files.length === 0) return;
+      if (isEditing) {
+        stageImages(files);
+      } else {
+        stageFiles(files);
+      }
+    },
+    [isEditing, stageFiles, stageImages],
+  );
+
+  const handleImageSelect = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const files = getImagesFromFileList(e.target.files);
+      if (files.length > 0) stageImages(files);
+      e.target.value = '';
+    },
+    [stageImages],
+  );
+
+  const handleFileSelect = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? []);
+      if (files.length > 0) stageFiles(files);
+      e.target.value = '';
+    },
+    [stageFiles],
+  );
+
+  const handleEditCancel = useCallback(() => {
+    clearEditStagedImages();
+    editingMessage?.onCancel();
+  }, [clearEditStagedImages, editingMessage]);
+
+  return (
+    <div
+      className={`${styles.replyBox} ${draggingOver ? styles.replyBoxDragOver : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {uploading && <div className={styles.uploadingIndicator}>Uploading attachments…</div>}
+      {isEditing && (
+        <div className={styles.composerEditBar}>
+          <div className={styles.composerEditMeta}>
+            <Pencil size={13} />
+            Editing message
+          </div>
+          <button className={styles.composerEditCancel} onClick={handleEditCancel}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {(existingImages.length > 0 || (!isEditing && draftStagedAttachments.length > 0) || (isEditing && stagedImages.length > 0)) && (
+        <div className={styles.stagedImagesRow}>
+          {existingImages.map((img) => (
+            <div key={img.storagePath} className={styles.stagedImagePreview}>
+              <StorageImageThumb
+                storagePath={img.storagePath}
+                alt={img.fileName}
+                className={styles.stagedImageThumb}
+                placeholderClassName={styles.stagedImageThumbPlaceholder}
+              />
+              <button
+                className={styles.stagedImageRemove}
+                onClick={() => removeExistingImage(img.storagePath)}
+                aria-label="Remove image"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          {isEditing
+            ? stagedImages.map((img, i) => (
+                <div key={img.previewUrl} className={styles.stagedImagePreview}>
+                  <img src={img.previewUrl} alt="Preview" className={styles.stagedImageThumb} />
+                  <button
+                    className={styles.stagedImageRemove}
+                    onClick={() => removeStagedImage(i)}
+                    aria-label="Remove image"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))
+            : draftStagedAttachments.map((attachment, i) =>
+                attachment.kind === 'image' && attachment.previewUrl ? (
+                  <div key={attachment.previewUrl} className={styles.stagedImagePreview}>
+                    <img
+                      src={attachment.previewUrl}
+                      alt={attachment.file.name}
+                      className={styles.stagedImageThumb}
+                    />
+                    <button
+                      className={styles.stagedImageRemove}
+                      onClick={() => removeDraftAttachment(i)}
+                      aria-label="Remove attachment"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <div key={`${attachment.file.name}-${i}`} className={styles.stagedFileChip}>
+                    <FileText size={14} className={styles.stagedFileIcon} />
+                    <div className={styles.stagedFileMeta}>
+                      <span className={styles.stagedFileName}>{attachment.file.name}</span>
+                      <span className={styles.stagedFileSize}>
+                        {formatBytes(attachment.file.size)}
+                      </span>
+                    </div>
+                    <button
+                      className={styles.stagedFileRemove}
+                      onClick={() => removeDraftAttachment(i)}
+                      aria-label="Remove attachment"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ),
+              )}
+        </div>
+      )}
+      <div className={styles.replyRow}>
+        <>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className={styles.hiddenFileInput}
+            onChange={handleImageSelect}
+          />
+          {!isEditing && (
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className={styles.hiddenFileInput}
+              onChange={handleFileSelect}
+            />
+          )}
+          <div className={styles.attachmentButtons}>
+            <button
+              className={styles.attachBtn}
+              onClick={() => imageInputRef.current?.click()}
+              disabled={
+                uploading ||
+                (!isEditing && streaming) ||
+                totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+              }
+              aria-label="Attach images"
+              title={
+                totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+                  ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
+                  : 'Attach images'
+              }
+            >
+              <Image size={16} />
+            </button>
+            {!isEditing && (
+              <button
+                className={styles.attachBtn}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || streaming || totalAttachmentCount >= MAX_STAGED_ATTACHMENTS}
+                aria-label="Attach files"
+                title={
+                  totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+                    ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
+                    : 'Attach files'
+                }
+              >
+                <Paperclip size={16} />
+              </button>
+            )}
+          </div>
+        </>
+        <textarea
+          ref={inputRef}
+          className={styles.replyInput}
+          placeholder={
+            isEditing
+              ? 'Edit your message…'
+              : totalAttachmentCount > 0
+                ? 'Add a note… (optional)'
+                : streaming
+                  ? 'Type to queue a message…'
+                  : 'Type a message…'
+          }
+          value={composerValue}
+          onChange={(e) =>
+            isEditing ? editingMessage.onChange(e.target.value) : setInput(e.target.value)
+          }
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          rows={1}
+          disabled={uploading}
+        />
+        <button
+          className={styles.sendBtn}
+          onClick={() => void handleSend()}
+          disabled={
+            uploading ||
+            (isEditing ? !canSubmitEdit : !composerValue.trim() && draftStagedAttachments.length === 0)
+          }
+          aria-label={isEditing ? 'Save edited message' : 'Send message'}
+          title={isEditing ? 'Save edited message' : 'Send message'}
+        >
+          <Send size={18} />
+        </button>
+      </div>
+    </div>
+  );
+});
+
+function StorageImageThumb({
+  storagePath,
+  alt,
+  className,
+  placeholderClassName,
+}: {
+  storagePath: string;
+  alt: string;
+  className: string;
+  placeholderClassName: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    const token = localStorage.getItem('ws_access_token');
+    fetch(`/api/storage/download?path=${encodeURIComponent(storagePath)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to load image');
+        return res.blob();
+      })
+      .then((blob) => {
+        revoke = URL.createObjectURL(blob);
+        setSrc(revoke);
+      })
+      .catch(() => setSrc(null));
+
+    return () => {
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [storagePath]);
+
+  if (!src) return <div className={placeholderClassName}>Loading…</div>;
+  return <img className={className} src={src} alt={alt} />;
 }
 
 /* ── ChatImage component ── */
@@ -243,6 +906,58 @@ function ChatImage({ storagePath, alt }: { storagePath: string; alt: string }) {
   return <img className={styles.chatImage} src={src} alt={alt} />;
 }
 
+async function downloadStorageFile(storagePath: string, fileName: string) {
+  const token = localStorage.getItem('ws_access_token');
+  const res = await fetch(`/api/storage/download?path=${encodeURIComponent(storagePath)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error('Failed to download file');
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function ChatFileAttachment({
+  attachment,
+}: {
+  attachment: ChatAttachment;
+}) {
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownload = useCallback(async () => {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      await downloadStorageFile(attachment.storagePath, attachment.fileName);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to download file');
+    } finally {
+      setDownloading(false);
+    }
+  }, [attachment.fileName, attachment.storagePath, downloading]);
+
+  return (
+    <button className={styles.chatFileLink} onClick={() => void handleDownload()} type="button">
+      <FileText size={16} className={styles.chatFileIcon} />
+      <div className={styles.chatFileMeta}>
+        <span className={styles.chatFileName}>{attachment.fileName}</span>
+        <span className={styles.chatFileSize}>
+          {attachment.fileSize != null ? formatBytes(attachment.fileSize) : attachment.mimeType}
+        </span>
+      </div>
+      <Download size={14} className={styles.chatFileDownload} />
+      {downloading && <span className={styles.chatFileLoading}>Loading…</span>}
+    </button>
+  );
+}
+
 /* ── Constants ── */
 
 const STATUS_COLOR: Record<Agent['status'], 'success' | 'default' | 'error'> = {
@@ -263,11 +978,7 @@ const MODELS = [
     name: 'Claude',
     vendor: 'Anthropic',
     description: 'Strong reasoning, safety-focused. Best for complex workflows.',
-    modelIds: [
-      'claude-sonnet-4-6',
-      'claude-opus-4-6',
-      'claude-haiku-4-5-20251001',
-    ],
+    modelIds: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   },
   {
     id: 'codex',
@@ -308,6 +1019,7 @@ interface CreateAgentForm {
   modelId: string;
   thinkingLevel: ThinkingLevel | '';
   preset: string;
+  presetParameters: Record<string, string>;
   apiKeyId: string;
   skipPermissions: boolean;
   groupId: string;
@@ -325,6 +1037,7 @@ function makeEmptyForm(): CreateAgentForm {
     modelId: '',
     thinkingLevel: '',
     preset: 'basic',
+    presetParameters: {},
     apiKeyId: '',
     skipPermissions: false,
     groupId: '',
@@ -332,6 +1045,25 @@ function makeEmptyForm(): CreateAgentForm {
     newKeyPermissions: [],
     avatar: { icon: randomIcon(), bgColor, logoColor },
   };
+}
+
+function filterPresetParameterValues(
+  preset: Preset | undefined,
+  values: Record<string, string>,
+): Record<string, string> {
+  const allowedKeys = new Set((preset?.parameters ?? []).map((parameter) => parameter.key));
+  return Object.fromEntries(Object.entries(values).filter(([key]) => allowedKeys.has(key)));
+}
+
+function serializePresetParameters(
+  preset: Preset | undefined,
+  values: Record<string, string>,
+): Record<string, string> | undefined {
+  const entries = (preset?.parameters ?? [])
+    .map((parameter) => [parameter.key, values[parameter.key]?.trim() ?? ''] as const)
+    .filter(([, value]) => value.length > 0);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 /* ── Helpers ── */
@@ -392,6 +1124,225 @@ function queueItemsLabel(count: number): string {
   return `${count} message${count === 1 ? '' : 's'} queued`;
 }
 
+interface AgentSidebarItemProps {
+  agent: Agent;
+  conversations: ChatConversation[];
+  collapsed: boolean;
+  isActive: boolean;
+  activeConversationId: string | null;
+  groupsEnabled: boolean;
+  pendingConversationKeys: Set<string>;
+  onToggleCollapse: (agentId: string) => void;
+  onOpenContextMenu: (agentId: string, x: number, y: number) => void;
+  onOpenSettings: (agent: Agent) => void;
+  onCleanConversations: (agentId: string) => void;
+  onCreateConversation: (agentId: string) => void;
+  onSelectConversation: (agentId: string, conversationId: string) => void;
+  onDeleteConversation: (agentId: string, conversationId: string) => void;
+}
+
+const AgentSidebarItem = memo(function AgentSidebarItem({
+  agent,
+  conversations,
+  collapsed,
+  isActive,
+  activeConversationId,
+  groupsEnabled,
+  pendingConversationKeys,
+  onToggleCollapse,
+  onOpenContextMenu,
+  onOpenSettings,
+  onCleanConversations,
+  onCreateConversation,
+  onSelectConversation,
+  onDeleteConversation,
+}: AgentSidebarItemProps) {
+  const hasUnreadAny = conversations.some((conversation) => conversation.isUnread);
+  const hasStreamingAny = conversations.some(
+    (conversation) =>
+      Boolean(conversation.isBusy) ||
+      pendingConversationKeys.has(agentConversationKey(agent.id, conversation.id)),
+  );
+  const queuedTotal = conversations.reduce(
+    (sum, conversation) => sum + toQueueCount(conversation.queuedCount),
+    0,
+  );
+
+  return (
+    <div className={styles.agentGroup}>
+      <div
+        className={`${styles.agentGroupHeader} ${isActive ? styles.agentGroupHeaderActive : ''}`}
+        onClick={() => {
+          if (conversations.length > 0) {
+            onSelectConversation(agent.id, conversations[0].id);
+          } else {
+            onCreateConversation(agent.id);
+          }
+        }}
+        onContextMenu={(e) => {
+          if (!groupsEnabled) return;
+          e.preventDefault();
+          onOpenContextMenu(agent.id, e.clientX, e.clientY);
+        }}
+      >
+        <ChevronRight
+          size={14}
+          className={`${styles.agentGroupChevron} ${!collapsed ? styles.agentGroupChevronOpen : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleCollapse(agent.id);
+          }}
+        />
+        <div className={styles.agentAvatarWrapper}>
+          <AgentAvatar
+            icon={agent.avatarIcon || 'spark'}
+            bgColor={agent.avatarBgColor || '#1a1a2e'}
+            logoColor={agent.avatarLogoColor || '#e94560'}
+            size={28}
+          />
+          {hasUnreadAny ? (
+            <span
+              className={styles.agentStatusDot}
+              style={{ background: 'var(--color-primary)' }}
+              title="Has unread messages"
+            />
+          ) : hasStreamingAny ? (
+            <span
+              className={styles.agentStreamingDot}
+              title={
+                queuedTotal > 0
+                  ? `Queued in backend: ${queueItemsLabel(queuedTotal)}`
+                  : 'Agent is responding...'
+              }
+            />
+          ) : null}
+        </div>
+        <div className={styles.agentGroupInfo}>
+          <div className={styles.agentGroupName}>{agent.name}</div>
+        </div>
+        <div className={styles.agentGroupActions}>
+          <Tooltip label="Settings">
+            <button
+              className={styles.agentGroupIconBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenSettings(agent);
+              }}
+              aria-label="Agent settings"
+            >
+              <Settings size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip label="Clean chats">
+            <button
+              className={styles.agentGroupIconBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onCleanConversations(agent.id);
+              }}
+              aria-label="Clean chats"
+            >
+              <Eraser size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip label="New chat">
+            <button
+              className={styles.agentGroupIconBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                onCreateConversation(agent.id);
+              }}
+              aria-label="New chat"
+            >
+              <Plus size={14} />
+            </button>
+          </Tooltip>
+        </div>
+      </div>
+
+      {!collapsed && conversations.length > 0 && (
+        <div className={styles.convList}>
+          {conversations.map((conversation) => {
+            const isStreaming =
+              Boolean(conversation.isBusy) ||
+              pendingConversationKeys.has(agentConversationKey(agent.id, conversation.id));
+            const isUnread = conversation.isUnread;
+            const queuedCount = toQueueCount(conversation.queuedCount);
+            const streamingTitle =
+              queuedCount > 0
+                ? `Queued in backend: ${queueItemsLabel(queuedCount)}`
+                : 'Agent is responding...';
+            return (
+              <div
+                key={conversation.id}
+                className={`${styles.convItem} ${
+                  isActive && activeConversationId === conversation.id ? styles.convItemActive : ''
+                }`}
+                onClick={() => onSelectConversation(agent.id, conversation.id)}
+              >
+                {isStreaming && <span className={styles.convStreamingDot} title={streamingTitle} />}
+                {!isStreaming && isUnread && (
+                  <span className={styles.convUnreadDot} title="New response" />
+                )}
+                <div className={styles.convItemInfo}>
+                  <div className={styles.convItemTitle}>
+                    {conversation.subject || 'New conversation'}
+                  </div>
+                </div>
+                {queuedCount > 0 && (
+                  <span className={styles.convQueueBadge} title={queueItemsLabel(queuedCount)}>
+                    <Clock size={9} />
+                    {queuedCount}
+                  </span>
+                )}
+                <span className={styles.convItemTime}>
+                  {relativeTime(conversation.lastMessageAt || conversation.createdAt)}
+                </span>
+                <button
+                  className={styles.convItemDelete}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteConversation(agent.id, conversation.id);
+                  }}
+                  aria-label="Delete conversation"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })}
+          <button className={styles.newConvBtn} onClick={() => onCreateConversation(agent.id)}>
+            <Plus size={13} />
+            New chat
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}, areAgentSidebarItemPropsEqual);
+
+function areAgentSidebarItemPropsEqual(
+  prev: AgentSidebarItemProps,
+  next: AgentSidebarItemProps,
+): boolean {
+  if (prev.agent !== next.agent) return false;
+  if (prev.conversations !== next.conversations) return false;
+  if (prev.collapsed !== next.collapsed) return false;
+  if (prev.isActive !== next.isActive) return false;
+  if (prev.activeConversationId !== next.activeConversationId) return false;
+  if (prev.groupsEnabled !== next.groupsEnabled) return false;
+  if (prev.pendingConversationKeys === next.pendingConversationKeys) return true;
+
+  for (const conversation of prev.conversations) {
+    const key = agentConversationKey(prev.agent.id, conversation.id);
+    if (prev.pendingConversationKeys.has(key) !== next.pendingConversationKeys.has(key)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function areChatConversationListsEqual(a: ChatConversation[], b: ChatConversation[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
@@ -429,9 +1380,25 @@ function agentFileEndpoints(agentId: string) {
     createFolder: `/agents/${agentId}/files/folders`,
     upload: `/agents/${agentId}/files/upload`,
     download: (filePath: string) => `/agents/${agentId}/files/download?path=${enc(filePath)}`,
+    readTextContent: (filePath: string) => `/agents/${agentId}/files/content?path=${enc(filePath)}`,
+    writeTextContent: `/agents/${agentId}/files/content`,
     delete: (entryPath: string) => `/agents/${agentId}/files?path=${enc(entryPath)}`,
     reveal: `/agents/${agentId}/files/reveal`,
     rename: `/agents/${agentId}/files/rename`,
+  };
+}
+
+function skillFileEndpoints(skillId: string) {
+  const enc = encodeURIComponent;
+  return {
+    list: (dirPath: string) => `/skills/${skillId}/files?path=${enc(dirPath)}`,
+    createFolder: `/skills/${skillId}/files/folders`,
+    upload: `/skills/${skillId}/files/upload`,
+    download: (filePath: string) => `/skills/${skillId}/files/download?path=${enc(filePath)}`,
+    readTextContent: (filePath: string) => `/skills/${skillId}/files/content?path=${enc(filePath)}`,
+    writeTextContent: `/skills/${skillId}/files/content`,
+    delete: (entryPath: string) => `/skills/${skillId}/files?path=${enc(entryPath)}`,
+    reveal: `/skills/${skillId}/files/reveal`,
   };
 }
 
@@ -439,68 +1406,78 @@ function AgentFiles({ agentId }: { agentId: string }) {
   const [showFsBrowser, setShowFsBrowser] = useState(false);
   const [refKey, setRefKey] = useState(0);
 
-  // Skills attach/detach
   const [skillsPickerOpen, setSkillsPickerOpen] = useState(false);
-  const [allSkills, setAllSkills] = useState<{ id: string; name: string; description: string }[]>([]);
-  const [agentSkillIds, setAgentSkillIds] = useState<string[]>([]);
+  const [allSkills, setAllSkills] = useState<{ id: string; name: string; description: string }[]>(
+    [],
+  );
+  const [agentSkills, setAgentSkills] = useState<AgentLocalSkill[]>([]);
   const [skillsLoaded, setSkillsLoaded] = useState(false);
 
   const endpoints = useMemo(() => agentFileEndpoints(agentId), [agentId]);
 
-  // Load skills eagerly on mount
+  const loadSkills = useCallback(async () => {
+    const [allData, agentData] = await Promise.all([
+      api<{ entries: { id: string; name: string; description: string }[] }>('/skills'),
+      api<{ entries: AgentLocalSkill[] }>(`/agents/${agentId}/skills`),
+    ]);
+    setAllSkills(allData.entries);
+    setAgentSkills(agentData.entries);
+    setSkillsLoaded(true);
+  }, [agentId]);
+
   useEffect(() => {
     if (skillsLoaded) return;
     (async () => {
       try {
-        const [allData, agentData] = await Promise.all([
-          api<{ entries: { id: string; name: string; description: string }[] }>('/skills'),
-          api<{ entries: { id: string }[] }>(`/agents/${agentId}/skills`),
-        ]);
-        setAllSkills(allData.entries);
-        setAgentSkillIds(agentData.entries.map((s) => s.id));
-        setSkillsLoaded(true);
-      } catch { /* ignore */ }
+        await loadSkills();
+      } catch {
+        /* ignore */
+      }
     })();
-  }, [agentId, skillsLoaded]);
+  }, [loadSkills, skillsLoaded]);
 
   useEffect(() => {
     setSkillsLoaded(false);
   }, [agentId]);
 
-  const attachedSkills = allSkills.filter((s) => agentSkillIds.includes(s.id));
-  const unattachedSkills = allSkills.filter((s) => !agentSkillIds.includes(s.id));
+  const installedSkillSlugs = new Set(agentSkills.map((skill) => localSkillSlug(skill.path)));
+  const unattachedSkills = allSkills.filter(
+    (skill) => !installedSkillSlugs.has(slugifySkillName(skill.name)),
+  );
 
   async function openSkillsPicker() {
     setSkillsPickerOpen(true);
     try {
-      const [allData, agentData] = await Promise.all([
-        api<{ entries: { id: string; name: string; description: string }[] }>('/skills'),
-        api<{ entries: { id: string }[] }>(`/agents/${agentId}/skills`),
-      ]);
-      setAllSkills(allData.entries);
-      setAgentSkillIds(agentData.entries.map((s) => s.id));
-    } catch { /* ignore */ }
+      await loadSkills();
+    } catch {
+      /* ignore */
+    }
   }
 
   async function handleAttachSkill(skillId: string) {
     try {
-      const data = await api<{ entries: { id: string }[] }>(`/agents/${agentId}/skills`, {
-        method: 'POST', body: JSON.stringify({ skillId }),
+      const data = await api<{ entries: AgentLocalSkill[] }>(`/agents/${agentId}/skills`, {
+        method: 'POST',
+        body: JSON.stringify({ skillId }),
       });
-      setAgentSkillIds(data.entries.map((s) => s.id));
+      setAgentSkills(data.entries);
       setSkillsPickerOpen(false);
-      toast.success('Skill attached');
+      toast.success('Skill added');
       setRefKey((k) => k + 1);
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to attach skill'); }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to add skill');
+    }
   }
 
   async function handleDetachSkill(skillId: string) {
     try {
       await api(`/agents/${agentId}/skills/${skillId}`, { method: 'DELETE' });
-      setAgentSkillIds((prev) => prev.filter((id) => id !== skillId));
-      toast.success('Skill detached');
+      setAgentSkills((prev) => prev.filter((skill) => skill.id !== skillId));
+      toast.success('Skill removed');
       setRefKey((k) => k + 1);
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to detach skill'); }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to remove skill');
+    }
   }
 
   async function handleCreateReference(targetPath: string) {
@@ -529,7 +1506,7 @@ function AgentFiles({ agentId }: { agentId: string }) {
             Skills
           </div>
           <div className={styles.filesSkillsChips}>
-            {attachedSkills.map((skill) => (
+            {agentSkills.map((skill) => (
               <div key={skill.id} className={styles.filesSkillChip}>
                 <span className={styles.filesSkillChipName}>{skill.name}</span>
                 <button
@@ -541,10 +1518,7 @@ function AgentFiles({ agentId }: { agentId: string }) {
                 </button>
               </div>
             ))}
-            <button
-              className={styles.filesSkillAddBtn}
-              onClick={() => void openSkillsPicker()}
-            >
+            <button className={styles.filesSkillAddBtn} onClick={() => void openSkillsPicker()}>
               <Plus size={13} />
               Add
             </button>
@@ -578,8 +1552,11 @@ function AgentFiles({ agentId }: { agentId: string }) {
         <div className={styles.skillsPickerOverlay} onClick={() => setSkillsPickerOpen(false)}>
           <div className={styles.skillsPickerModal} onClick={(e) => e.stopPropagation()}>
             <div className={styles.skillsPickerHeader}>
-              <span className={styles.skillsPickerTitle}>Add Skill</span>
-              <button className={styles.skillsPickerClose} onClick={() => setSkillsPickerOpen(false)}>
+              <span className={styles.skillsPickerTitle}>Add From Library</span>
+              <button
+                className={styles.skillsPickerClose}
+                onClick={() => setSkillsPickerOpen(false)}
+              >
                 <X size={16} />
               </button>
             </div>
@@ -633,12 +1610,27 @@ interface SkillFull {
   updatedAt: string;
 }
 
-interface SkillFileEntry {
+interface AgentLocalSkill {
+  id: string;
   name: string;
+  description: string;
   path: string;
-  type: 'file' | 'folder';
-  size: number;
-  createdAt: string;
+  missing: boolean;
+}
+
+function slugifySkillName(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'skill'
+  );
+}
+
+function localSkillSlug(skillId: string): string {
+  const normalized = skillId.replace(/\\/g, '/').replace(/\/+$/, '');
+  return normalized.split('/').filter(Boolean).pop() ?? normalized;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -648,6 +1640,8 @@ interface SkillFileEntry {
 export function AgentsPage() {
   useDocumentTitle('Agents');
   const { activeWorkspaceId } = useWorkspace();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const requestedAgentId =
     searchParams.get('agentId') ?? searchParams.get('id') ?? searchParams.get('settingsAgentId');
@@ -689,7 +1683,6 @@ export function AgentsPage() {
 
   // ── Chat state ──
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [showChatLoading, setShowChatLoading] = useState(false);
@@ -708,14 +1701,18 @@ export function AgentsPage() {
     };
   }, [chatLoading]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [stagedImages, setStagedImages] = useState<{ file: File; previewUrl: string }[]>([]);
-  const [draggingOver, setDraggingOver] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingMessageInitialContent, setEditingMessageInitialContent] = useState('');
+  const [editingMessageContent, setEditingMessageContent] = useState('');
+  const [editingMessageImages, setEditingMessageImages] = useState<ManagedExistingImage[]>([]);
   const [pendingConversationKeys, setPendingConversationKeys] = useState<Set<string>>(new Set());
   const [runHandoffKeys, setRunHandoffKeys] = useState<Set<string>>(new Set());
   const [stoppingRun, setStoppingRun] = useState(false);
+  const [activeConversationRun, setActiveConversationRun] = useState<AgentRunSummary | null>(null);
+  const [optimisticResponseParentIds, setOptimisticResponseParentIds] = useState<
+    Record<string, string>
+  >({});
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const isFirstMessageRef = useRef(false);
   const activeAgentIdRef = useRef<string | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
@@ -726,31 +1723,21 @@ export function AgentsPage() {
 
   // ── Conversation indicators ──
   const messagesRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  // Auto-resize textarea when input changes (including after send clears it)
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    if (!input) {
-      el.style.height = '';
-      return;
-    }
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 400)}px`;
-  }, [input]);
 
   // ── Create modal ──
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<CreateAgentForm>(makeEmptyForm);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
+  const [createAvatarOpen, setCreateAvatarOpen] = useState(false);
+  const [pickingPresetDirectoryKey, setPickingPresetDirectoryKey] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [avatarPresets, setAvatarPresets] = useState<AvatarPreset[]>([]);
   const [colorPresets, setColorPresets] = useState<ColorPreset[]>([]);
   const [cliStatus, setCliStatus] = useState<CliInfo[]>([]);
+  const createAvatarPickerRef = useRef<HTMLDivElement>(null);
 
   // ── Chat / Files tab ──
   const [chatTab, setChatTab] = useState<'chat' | 'files'>('chat');
@@ -769,28 +1756,14 @@ export function AgentsPage() {
   const [mgrEditingId, setMgrEditingId] = useState<string | null>(null);
   const [mgrFormName, setMgrFormName] = useState('');
   const [mgrFormDesc, setMgrFormDesc] = useState('');
+  const [mgrFormError, setMgrFormError] = useState('');
   const [mgrSaving, setMgrSaving] = useState(false);
-  // File browsing inside manager
   const [mgrActiveSkillId, setMgrActiveSkillId] = useState<string | null>(null);
-  const [mgrFiles, setMgrFiles] = useState<SkillFileEntry[]>([]);
-  const [mgrFilePath, setMgrFilePath] = useState('/');
-  const [mgrFilesLoading, setMgrFilesLoading] = useState(false);
-  // File editing inside manager
-  const [mgrEditingFile, setMgrEditingFile] = useState<{ path: string; content: string } | null>(null);
-  const [mgrEditContent, setMgrEditContent] = useState('');
-  const [mgrFileSaving, setMgrFileSaving] = useState(false);
-  // New file inside manager
-  const [mgrCreatingFile, setMgrCreatingFile] = useState(false);
-  const [mgrNewFileName, setMgrNewFileName] = useState('');
-  const [mgrNewFileContent, setMgrNewFileContent] = useState('');
   const mgrNameRef = useRef<HTMLInputElement>(null);
-  // Upload & folder inside manager
-  const mgrFileInputRef = useRef<HTMLInputElement>(null);
-  const [mgrUploading, setMgrUploading] = useState(false);
-  const [mgrDragOver, setMgrDragOver] = useState(false);
-  const mgrDragCounter = useRef(0);
-  const [mgrShowNewFolder, setMgrShowNewFolder] = useState(false);
-  const [mgrNewFolderName, setMgrNewFolderName] = useState('');
+  const mgrFileBrowserEndpoints = useMemo(
+    () => skillFileEndpoints(mgrActiveSkillId ?? ''),
+    [mgrActiveSkillId],
+  );
 
   // ── Header menu ──
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -873,6 +1846,21 @@ export function AgentsPage() {
   const avatarPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!createAvatarOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (createAvatarPickerRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest('[role="dialog"][aria-modal="true"]')) return;
+      setCreateAvatarOpen(false);
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [createAvatarOpen]);
+
+  useEffect(() => {
     if (!editingAvatar) return;
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -912,6 +1900,10 @@ export function AgentsPage() {
       setQueuePanelOpen(false);
       setEditingQueueItemId(null);
       setEditingQueuePrompt('');
+      setEditingMessageId(null);
+      setEditingMessageInitialContent('');
+      setEditingMessageContent('');
+      setEditingMessageImages([]);
       // Expand the active agent so the selected conversation is visible in the sidebar
       if (agentId) {
         setCollapsedAgents((prev) => {
@@ -960,6 +1952,24 @@ export function AgentsPage() {
     [],
   );
 
+  const setOptimisticResponseParent = useCallback(
+    (agentId: string, conversationId: string, messageId: string | null) => {
+      const key = agentConversationKey(agentId, conversationId);
+      setOptimisticResponseParentIds((prev) => {
+        const current = prev[key];
+        if (messageId === null) {
+          if (current === undefined) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        }
+        if (current === messageId) return prev;
+        return { ...prev, [key]: messageId };
+      });
+    },
+    [],
+  );
+
   const clearRunHandoff = useCallback((agentId: string, conversationId: string) => {
     const key = agentConversationKey(agentId, conversationId);
     const timer = runHandoffTimersRef.current.get(key);
@@ -976,34 +1986,31 @@ export function AgentsPage() {
     });
   }, []);
 
-  const beginRunHandoff = useCallback(
-    (agentId: string, conversationId: string) => {
-      const key = agentConversationKey(agentId, conversationId);
-      const existing = runHandoffTimersRef.current.get(key);
-      if (existing) {
-        clearTimeout(existing);
-      }
-      runHandoffStartedAtRef.current.set(key, Date.now());
-      const timer = window.setTimeout(() => {
-        runHandoffTimersRef.current.delete(key);
-        runHandoffStartedAtRef.current.delete(key);
-        setRunHandoffKeys((prev) => {
-          if (!prev.has(key)) return prev;
-          const next = new Set(prev);
-          next.delete(key);
-          return next;
-        });
-      }, RUN_HANDOFF_MS);
-      runHandoffTimersRef.current.set(key, timer);
+  const beginRunHandoff = useCallback((agentId: string, conversationId: string) => {
+    const key = agentConversationKey(agentId, conversationId);
+    const existing = runHandoffTimersRef.current.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    runHandoffStartedAtRef.current.set(key, Date.now());
+    const timer = window.setTimeout(() => {
+      runHandoffTimersRef.current.delete(key);
+      runHandoffStartedAtRef.current.delete(key);
       setRunHandoffKeys((prev) => {
-        if (prev.has(key)) return prev;
+        if (!prev.has(key)) return prev;
         const next = new Set(prev);
-        next.add(key);
+        next.delete(key);
         return next;
       });
-    },
-    [],
-  );
+    }, RUN_HANDOFF_MS);
+    runHandoffTimersRef.current.set(key, timer);
+    setRunHandoffKeys((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
 
   const activeConversation = useMemo(() => {
     if (!activeAgentId || !activeConvId) return null;
@@ -1024,6 +2031,40 @@ export function AgentsPage() {
     activeConversationBusy ||
     activeConversationHandoff ||
     activeConversationQueueCount > 0;
+  const activeConversationKey =
+    activeAgentId && activeConvId ? agentConversationKey(activeAgentId, activeConvId) : null;
+  const activeLeafMessageId = messages.length > 0 ? messages[messages.length - 1].id : null;
+  const queuedQueueItems = useMemo(
+    () => queueItems.filter((item) => item.status === 'queued'),
+    [queueItems],
+  );
+  const activeProcessingTargetMessageId = useMemo(() => {
+    if (activeConversationRun?.status === 'running' && activeConversationRun.responseParentId) {
+      return activeConversationRun.responseParentId;
+    }
+
+    const processingQueueItem = queueItems.find(
+      (item) =>
+        item.status === 'processing' && item.mode === 'respond_to_message' && item.targetMessageId,
+    );
+    if (processingQueueItem?.targetMessageId) {
+      return processingQueueItem.targetMessageId;
+    }
+
+    const queuedBranchItem = queueItems.find(
+      (item) =>
+        item.status === 'queued' && item.mode === 'respond_to_message' && item.targetMessageId,
+    );
+    if (queuedBranchItem?.targetMessageId) {
+      return queuedBranchItem.targetMessageId;
+    }
+
+    if (!activeConversationKey) return null;
+    return optimisticResponseParentIds[activeConversationKey] ?? null;
+  }, [activeConversationKey, activeConversationRun, optimisticResponseParentIds, queueItems]);
+  const showStreamingBubble =
+    streaming &&
+    (!activeProcessingTargetMessageId || activeProcessingTargetMessageId === activeLeafMessageId);
 
   const isActiveConversation = useCallback(
     (agentId: string, conversationId: string) =>
@@ -1086,22 +2127,25 @@ export function AgentsPage() {
   }, []);
 
   /* ── Fetch conversations for an agent ── */
-  const fetchConversations = useCallback(async (agentId: string) => {
-    try {
-      const data = await api<{ entries: ChatConversation[]; total: number }>(
-        `/agents/${agentId}/chat/conversations`,
-      );
-      for (const conversation of data.entries) {
-        if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
-          clearRunHandoff(agentId, conversation.id);
+  const fetchConversations = useCallback(
+    async (agentId: string) => {
+      try {
+        const data = await api<{ entries: ChatConversation[]; total: number }>(
+          `/agents/${agentId}/chat/conversations`,
+        );
+        for (const conversation of data.entries) {
+          if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
+            clearRunHandoff(agentId, conversation.id);
+          }
         }
+        setConvsByAgent((prev) => ({ ...prev, [agentId]: data.entries }));
+        return data.entries;
+      } catch {
+        return [];
       }
-      setConvsByAgent((prev) => ({ ...prev, [agentId]: data.entries }));
-      return data.entries;
-    } catch {
-      return [];
-    }
-  }, [clearRunHandoff]);
+    },
+    [clearRunHandoff],
+  );
 
   const refreshAllConversations = useCallback(async () => {
     const agentIds = agents.map((agent) => agent.id);
@@ -1173,7 +2217,19 @@ export function AgentsPage() {
         const prev = messagesRef2.current;
         if (
           prev.length === data.entries.length &&
-          prev.every((m, i) => m.id === data.entries[i].id && m.content === data.entries[i].content)
+          prev.every((m, i) => {
+            const next = data.entries[i];
+            return (
+              m.id === next.id &&
+              m.content === next.content &&
+              m.type === next.type &&
+              m.parentId === next.parentId &&
+              (m.siblingIndex ?? 0) === (next.siblingIndex ?? 0) &&
+              (m.siblingCount ?? 1) === (next.siblingCount ?? 1) &&
+              JSON.stringify(m.siblingIds ?? []) === JSON.stringify(next.siblingIds ?? []) &&
+              JSON.stringify(m.attachments ?? null) === JSON.stringify(next.attachments ?? null)
+            );
+          })
         ) {
           return;
         }
@@ -1220,9 +2276,33 @@ export function AgentsPage() {
           `/agents/${agentId}/chat/conversations/${conversationId}/queue`,
         );
         if (!isActiveConversation(agentId, conversationId)) return;
-        setQueueItems(data.entries.filter((item) => item.status === 'queued'));
+        setQueueItems(data.entries);
       } catch {
         // silently fail
+      }
+    },
+    [isActiveConversation],
+  );
+
+  const fetchConversationRun = useCallback(
+    async (agentId: string, conversationId: string) => {
+      try {
+        const params = new URLSearchParams({
+          agentId,
+          conversationId,
+          status: 'running',
+          limit: '1',
+        });
+        const data = await api<{ entries: AgentRunSummary[] }>(`/agent-runs?${params.toString()}`);
+        if (!isActiveConversation(agentId, conversationId)) return;
+
+        const latestRun = data.entries[0] ?? null;
+        setActiveConversationRun(latestRun);
+      } catch {
+        if (!isActiveConversation(agentId, conversationId)) return;
+        setActiveConversationRun(null);
+      } finally {
+        // no-op
       }
     },
     [isActiveConversation],
@@ -1234,9 +2314,10 @@ export function AgentsPage() {
         fetchMessages(agentId, conversationId, options),
         fetchQueueItems(agentId, conversationId),
         fetchConversations(agentId),
+        fetchConversationRun(agentId, conversationId),
       ]);
     },
-    [fetchConversations, fetchMessages, fetchQueueItems],
+    [fetchConversationRun, fetchConversations, fetchMessages, fetchQueueItems],
   );
 
   async function handleSaveQueueItem(itemId: string) {
@@ -1387,6 +2468,21 @@ export function AgentsPage() {
     };
   }, [agents, refreshAllConversations]);
 
+  useEffect(() => {
+    setActiveConversationRun(null);
+
+    if (!activeAgentId || !activeConvId) {
+      return;
+    }
+
+    void fetchConversationRun(activeAgentId, activeConvId);
+  }, [activeAgentId, activeConvId, fetchConversationRun]);
+
+  useEffect(() => {
+    if (!activeAgentId || !activeConvId || streaming) return;
+    setOptimisticResponseParent(activeAgentId, activeConvId, null);
+  }, [activeAgentId, activeConvId, setOptimisticResponseParent, streaming]);
+
   // While a run is active or queued, keep the active chat state in sync so the
   // reply, queue badge, and processing indicator settle together.
   useEffect(() => {
@@ -1405,12 +2501,7 @@ export function AgentsPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [
-    activeAgentId,
-    activeConvId,
-    streaming,
-    syncActiveConversation,
-  ]);
+  }, [activeAgentId, activeConvId, streaming, syncActiveConversation]);
 
   const wasStreamingRef = useRef(false);
   useEffect(() => {
@@ -1460,7 +2551,6 @@ export function AgentsPage() {
     }
   }, [settingsAgent?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-
   /* ── Cron job handlers ── */
 
   async function saveCronJobs(agentId: string, jobs: CronJob[]) {
@@ -1508,149 +2598,192 @@ export function AgentsPage() {
   }
 
   /* ── Select conversation ── */
-  async function selectConversation(agentId: string, convId: string) {
-    if (agentId === activeAgentId && convId === activeConvId) {
-      void markConversationRead(agentId, convId);
-      return;
-    }
-    if (autoCollapse) {
-      setCollapsedAgents(() => {
-        const next = new Set(agents.map((a) => a.id));
-        next.delete(agentId);
-        return next;
-      });
-    }
-    setActiveConversation(agentId, convId);
-    setMessages([]);
-    setChatError(null);
-    clearStagedImages();
-    void markConversationRead(agentId, convId);
-    await fetchMessages(agentId, convId);
-    inputRef.current?.focus();
-  }
-
-  /* ── Create conversation ── */
-  async function createConversation(agentId: string) {
-    try {
-      const conv = await api<ChatConversation>(`/agents/${agentId}/chat/conversations`, {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
-      setConvsByAgent((prev) => ({
-        ...prev,
-        [agentId]: [conv, ...(prev[agentId] || [])],
-      }));
-      // Expand the agent so the new conversation is visible
-      setCollapsedAgents((prev) => {
-        if (prev === 'all') {
-          const next = new Set(agents.map((a) => a.id));
+  const selectConversation = useCallback(
+    async (agentId: string, convId: string) => {
+      if (agentId === activeAgentId && convId === activeConvId) {
+        void markConversationRead(agentId, convId);
+        return;
+      }
+      if (autoCollapse) {
+        setCollapsedAgents(() => {
+          const next = new Set(agentsRef.current.map((agent) => agent.id));
           next.delete(agentId);
           return next;
-        }
-        if (!prev.has(agentId)) return prev;
-        const next = new Set(prev);
-        next.delete(agentId);
-        return next;
-      });
-      setActiveConversation(agentId, conv.id);
+        });
+      }
+      setActiveConversation(agentId, convId);
       setMessages([]);
-      isFirstMessageRef.current = true;
       setChatError(null);
-      inputRef.current?.focus();
-    } catch {
-      setChatError('Failed to create conversation');
-    }
-  }
+      void markConversationRead(agentId, convId);
+      await fetchMessages(agentId, convId);
+    },
+    [
+      activeAgentId,
+      activeConvId,
+      autoCollapse,
+      fetchMessages,
+      markConversationRead,
+      setActiveConversation,
+    ],
+  );
+
+  /* ── Create conversation ── */
+  const createConversation = useCallback(
+    async (agentId: string) => {
+      try {
+        const conv = await api<ChatConversation>(`/agents/${agentId}/chat/conversations`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        setConvsByAgent((prev) => ({
+          ...prev,
+          [agentId]: [conv, ...(prev[agentId] || [])],
+        }));
+        // Expand the agent so the new conversation is visible
+        setCollapsedAgents((prev) => {
+          if (prev === 'all') {
+            const next = new Set(agentsRef.current.map((agent) => agent.id));
+            next.delete(agentId);
+            return next;
+          }
+          if (!prev.has(agentId)) return prev;
+          const next = new Set(prev);
+          next.delete(agentId);
+          return next;
+        });
+        setActiveConversation(agentId, conv.id);
+        setMessages([]);
+        isFirstMessageRef.current = true;
+        setChatError(null);
+      } catch {
+        setChatError('Failed to create conversation');
+      }
+    },
+    [setActiveConversation],
+  );
 
   /* ── Delete conversation ── */
-  async function deleteConversation(agentId: string, convId: string) {
-    try {
-      await api(`/agents/${agentId}/chat/conversations/${convId}`, { method: 'DELETE' });
-      const deletingActiveConversation = activeAgentId === agentId && activeConvId === convId;
-      const remainingConversations = (convsByAgent[agentId] || []).filter((c) => c.id !== convId);
+  const deleteConversation = useCallback(
+    async (agentId: string, convId: string) => {
+      try {
+        await api(`/agents/${agentId}/chat/conversations/${convId}`, { method: 'DELETE' });
+        const deletingActiveConversation = activeAgentId === agentId && activeConvId === convId;
+        const remainingConversations = (convsByAgent[agentId] || []).filter((c) => c.id !== convId);
 
-      // Compute next selection from current state before mutating it.
-      let nextFocusedConversationId: string | null = null;
-      if (deletingActiveConversation) {
-        const current = convsByAgent[agentId] || [];
-        const deletedIndex = current.findIndex((c) => c.id === convId);
-        if (deletedIndex !== -1) {
-          const next = current.filter((c) => c.id !== convId);
-          // Prefer the chat below; fall back to the chat above if none below.
-          nextFocusedConversationId = next[deletedIndex]?.id ?? next[deletedIndex - 1]?.id ?? null;
+        // Compute next selection from current state before mutating it.
+        let nextFocusedConversationId: string | null = null;
+        if (deletingActiveConversation) {
+          const current = convsByAgent[agentId] || [];
+          const deletedIndex = current.findIndex((c) => c.id === convId);
+          if (deletedIndex !== -1) {
+            const next = current.filter((c) => c.id !== convId);
+            // Prefer the chat below; fall back to the chat above if none below.
+            nextFocusedConversationId =
+              next[deletedIndex]?.id ?? next[deletedIndex - 1]?.id ?? null;
+          }
         }
-      }
 
+        setConvsByAgent((prev) => ({
+          ...prev,
+          [agentId]: (prev[agentId] || []).filter((c) => c.id !== convId),
+        }));
+        pendingConversationCountRef.current.delete(agentConversationKey(agentId, convId));
+        clearRunHandoff(agentId, convId);
+        setOptimisticResponseParent(agentId, convId, null);
+        setPendingConversationKeys((prev) => {
+          const key = agentConversationKey(agentId, convId);
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        if (remainingConversations.length === 0) {
+          collapseAgent(agentId);
+        }
+
+        if (!deletingActiveConversation) return;
+
+        if (nextFocusedConversationId) {
+          setActiveConversation(agentId, nextFocusedConversationId);
+          setMessages([]);
+          setChatError(null);
+          void fetchMessages(agentId, nextFocusedConversationId);
+        } else {
+          setActiveConversation(agentId, null);
+          setMessages([]);
+        }
+      } catch {
+        setChatError('Failed to delete conversation');
+      }
+    },
+    [
+      activeAgentId,
+      activeConvId,
+      clearRunHandoff,
+      collapseAgent,
+      convsByAgent,
+      fetchMessages,
+      pendingConversationKeys,
+      setOptimisticResponseParent,
+      setActiveConversation,
+    ],
+  );
+
+  /* ── Clean conversations (delete all except active and unread) ── */
+  const cleanConversations = useCallback(
+    async (agentId: string) => {
+      const convs = convsByAgent[agentId] || [];
+      const toDelete = convs.filter((c) => {
+        const isActive = activeAgentId === agentId && activeConvId === c.id;
+        const isStreaming =
+          Boolean(c.isBusy) || pendingConversationKeys.has(agentConversationKey(agentId, c.id));
+        return !isActive && !c.isUnread && !isStreaming;
+      });
+      await Promise.allSettled(
+        toDelete.map((c) =>
+          api(`/agents/${agentId}/chat/conversations/${c.id}`, { method: 'DELETE' }),
+        ),
+      );
+      const deletedIds = new Set(toDelete.map((c) => c.id));
+      const remainingConversations = convs.filter((c) => !deletedIds.has(c.id));
       setConvsByAgent((prev) => ({
         ...prev,
-        [agentId]: (prev[agentId] || []).filter((c) => c.id !== convId),
+        [agentId]: (prev[agentId] || []).filter((c) => !deletedIds.has(c.id)),
       }));
-      pendingConversationCountRef.current.delete(agentConversationKey(agentId, convId));
-      clearRunHandoff(agentId, convId);
+      for (const c of toDelete) {
+        pendingConversationCountRef.current.delete(agentConversationKey(agentId, c.id));
+        clearRunHandoff(agentId, c.id);
+        setOptimisticResponseParent(agentId, c.id, null);
+      }
       setPendingConversationKeys((prev) => {
-        const key = agentConversationKey(agentId, convId);
-        if (!prev.has(key)) return prev;
+        let changed = false;
         const next = new Set(prev);
-        next.delete(key);
-        return next;
+        for (const c of toDelete) {
+          changed = next.delete(agentConversationKey(agentId, c.id)) || changed;
+        }
+        return changed ? next : prev;
       });
       if (remainingConversations.length === 0) {
         collapseAgent(agentId);
       }
-
-      if (!deletingActiveConversation) return;
-
-      if (nextFocusedConversationId) {
-        setActiveConversation(agentId, nextFocusedConversationId);
-        setMessages([]);
-        setChatError(null);
-        void fetchMessages(agentId, nextFocusedConversationId);
-      } else {
-        setActiveConversation(agentId, null);
-        setMessages([]);
-      }
-    } catch {
-      setChatError('Failed to delete conversation');
-    }
-  }
-
-  /* ── Clean conversations (delete all except active and unread) ── */
-  async function cleanConversations(agentId: string) {
-    const convs = convsByAgent[agentId] || [];
-    const toDelete = convs.filter((c) => {
-      const isActive = activeAgentId === agentId && activeConvId === c.id;
-      const isStreaming =
-        Boolean(c.isBusy) || pendingConversationKeys.has(agentConversationKey(agentId, c.id));
-      return !isActive && !c.isUnread && !isStreaming;
-    });
-    await Promise.allSettled(
-      toDelete.map((c) =>
-        api(`/agents/${agentId}/chat/conversations/${c.id}`, { method: 'DELETE' }),
-      ),
-    );
-    const deletedIds = new Set(toDelete.map((c) => c.id));
-    const remainingConversations = convs.filter((c) => !deletedIds.has(c.id));
-    setConvsByAgent((prev) => ({
-      ...prev,
-      [agentId]: (prev[agentId] || []).filter((c) => !deletedIds.has(c.id)),
-    }));
-    setPendingConversationKeys((prev) => {
-      let changed = false;
-      const next = new Set(prev);
-      for (const c of toDelete) {
-        pendingConversationCountRef.current.delete(agentConversationKey(agentId, c.id));
-        clearRunHandoff(agentId, c.id);
-        changed = next.delete(agentConversationKey(agentId, c.id)) || changed;
-      }
-      return changed ? next : prev;
-    });
-    if (remainingConversations.length === 0) {
-      collapseAgent(agentId);
-    }
-  }
+    },
+    [
+      activeAgentId,
+      activeConvId,
+      clearRunHandoff,
+      collapseAgent,
+      convsByAgent,
+      pendingConversationKeys,
+      setOptimisticResponseParent,
+    ],
+  );
 
   async function cleanAllConversations() {
     await Promise.allSettled(agents.map((a) => cleanConversations(a.id)));
+  }
+
+  function openMonitorRun(runId: string) {
+    navigate(buildMonitorRunUrl(runId));
   }
 
   /* ── Send message ── */
@@ -1658,9 +2791,9 @@ export function AgentsPage() {
     if (!activeAgentId || !activeConvId || stoppingRun) return;
     setStoppingRun(true);
     try {
-      const data = await api<{ entries: { id: string; agentId: string; conversationId: string | null }[] }>(
-        '/agent-runs/active',
-      );
+      const data = await api<{
+        entries: { id: string; agentId: string; conversationId: string | null }[];
+      }>('/agent-runs/active');
       const run = data.entries.find(
         (r) => r.agentId === activeAgentId && r.conversationId === activeConvId,
       );
@@ -1682,232 +2815,267 @@ export function AgentsPage() {
     }
   }
 
-  async function sendMessage() {
-    const prompt = input.trim();
-    const hasImages = stagedImages.length > 0;
-    if ((!prompt && !hasImages) || !activeAgentId || !activeConvId) return;
+  const sendAttachmentMessage = useCallback(
+    async (caption: string, files: File[]) => {
+      if (!activeAgentId || !activeConvId || files.length === 0) return;
+      const sentAgentId = activeAgentId;
+      const sentConvId = activeConvId;
+      setChatError(null);
 
-    // Keep image-upload flow single-flight; text prompts are queued by the backend.
-    if (hasImages && streaming) return;
+      const wasFirst = isFirstMessageRef.current;
+      isFirstMessageRef.current = false;
 
-    const sentAgentId = activeAgentId;
-    const sentConvId = activeConvId;
-
-    setInput('');
-    setChatError(null);
-
-    const wasFirst = isFirstMessageRef.current;
-    isFirstMessageRef.current = false;
-
-    // If there are staged images, upload them then trigger the agent to respond
-    if (hasImages) {
-      setUploading(true);
       try {
-        const imgMsg = await uploadStagedImages(prompt);
-        if (imgMsg && isActiveConversation(sentAgentId, sentConvId)) {
+        const fd = new FormData();
+        fd.append('conversationId', sentConvId);
+        if (caption) fd.append('caption', caption);
+        for (const file of files) {
+          const prepared = isImageFile(file) ? await prepareImageForUpload(file) : file;
+          fd.append('files', prepared, prepared.name);
+        }
+        const imgMsg = await apiUpload<ChatMessage>(`/agents/${sentAgentId}/chat/upload`, fd);
+        if (isActiveConversation(sentAgentId, sentConvId)) {
           setMessages((prev) => [...prev, imgMsg]);
         }
+        setOptimisticResponseParent(sentAgentId, sentConvId, imgMsg.id);
       } catch (err) {
-        setChatError(err instanceof Error ? err.message : 'Failed to upload images');
-        setUploading(false);
-        return;
+        setChatError(err instanceof Error ? err.message : 'Failed to upload attachments');
+        throw err;
       }
-      setUploading(false);
 
-      // Refetch conversations for auto-title
-      if (wasFirst && sentAgentId) {
+      if (wasFirst) {
         void fetchConversations(sentAgentId);
       }
 
-      // Trigger the agent to respond to the uploaded images
       beginRunHandoff(sentAgentId, sentConvId);
       setConversationPending(sentAgentId, sentConvId, true);
-      try {
-        await api(`/agents/${sentAgentId}/chat/respond`, {
-          method: 'POST',
-          body: JSON.stringify({ conversationId: sentConvId }),
-        });
-        await Promise.all([
-          fetchMessages(sentAgentId, sentConvId),
-          fetchConversations(sentAgentId),
-        ]);
-      } catch (err) {
-        clearRunHandoff(sentAgentId, sentConvId);
-        setChatError(err instanceof Error ? err.message : 'Failed to get agent response');
-      } finally {
-        setConversationPending(sentAgentId, sentConvId, false);
-        inputRef.current?.focus();
-      }
-      return;
-    }
+      void (async () => {
+        try {
+          await api(`/agents/${sentAgentId}/chat/respond`, {
+            method: 'POST',
+            body: JSON.stringify({ conversationId: sentConvId }),
+          });
+          await Promise.all([
+            fetchMessages(sentAgentId, sentConvId),
+            fetchConversations(sentAgentId),
+          ]);
+        } catch (err) {
+          clearRunHandoff(sentAgentId, sentConvId);
+          setChatError(err instanceof Error ? err.message : 'Failed to get agent response');
+        } finally {
+          setConversationPending(sentAgentId, sentConvId, false);
+        }
+      })();
+    },
+    [
+      activeAgentId,
+      activeConvId,
+      beginRunHandoff,
+      clearRunHandoff,
+      fetchConversations,
+      fetchMessages,
+      isActiveConversation,
+      setOptimisticResponseParent,
+      setConversationPending,
+    ],
+  );
 
-    // Text-only message — add optimistic queue item instead of showing in chat
-    const optimisticQueueItem: QueueItem = {
-      id: `temp-${Date.now()}`,
-      agentId: sentAgentId,
-      conversationId: sentConvId,
-      prompt,
-      status: 'queued',
-      attempts: 0,
-      createdAt: new Date().toISOString(),
-    };
-    setQueueItems((prev) => [...prev, optimisticQueueItem]);
+  const sendTextMessage = useCallback(
+    async (prompt: string) => {
+      if (!prompt || !activeAgentId || !activeConvId) return;
 
-    // If the conversation is already busy/streaming, we're just adding to the
-    // queue — no need to toggle pending state or force-refetch (the 1.5s poll
-    // loop takes care of it).
-    const alreadyBusy = streaming;
+      const sentAgentId = activeAgentId;
+      const sentConvId = activeConvId;
+      setChatError(null);
 
-    const directMessageId = `direct-${Date.now()}-${generateId()}`;
-    if (!alreadyBusy) {
-      beginRunHandoff(sentAgentId, sentConvId);
-      setConversationPending(sentAgentId, sentConvId, true);
-    }
-    try {
-      const queueResponse = await api<QueuePromptResponse>(`/agents/${sentAgentId}/chat/message`, {
-        method: 'POST',
-        headers: {
-          'Idempotency-Key': `agent-chat-direct:${directMessageId}`,
-        },
-        body: JSON.stringify({
-          prompt,
-          conversationId: sentConvId,
-        }),
-      });
-      const immediateQueuedCount = toQueueCount(queueResponse.queuedCount);
-      setConvsByAgent((prev) => {
-        const convs = prev[sentAgentId];
-        if (!convs || convs.length === 0) return prev;
-        let changed = false;
-        const nextConvs = convs.map((conv) => {
-          if (conv.id !== sentConvId) return conv;
-          if (conv.isBusy && toQueueCount(conv.queuedCount) === immediateQueuedCount) return conv;
-          changed = true;
-          return { ...conv, isBusy: true, queuedCount: immediateQueuedCount };
-        });
-        if (!changed) return prev;
-        return { ...prev, [sentAgentId]: nextConvs };
-      });
-      // Refetch queue items to replace optimistic entry with real data
-      await fetchQueueItems(sentAgentId, sentConvId);
+      const optimisticQueueItem: QueueItem = {
+        id: `temp-${Date.now()}`,
+        agentId: sentAgentId,
+        conversationId: sentConvId,
+        prompt,
+        status: 'queued',
+        attempts: 0,
+        createdAt: new Date().toISOString(),
+      };
+      setQueueItems((prev) => [...prev, optimisticQueueItem]);
+
+      // If the conversation is already busy/streaming, we're just adding to the
+      // queue — no need to toggle pending state or force-refetch (the 1.5s poll
+      // loop takes care of it).
+      const alreadyBusy = streaming;
+
+      const directMessageId = `direct-${Date.now()}-${generateId()}`;
       if (!alreadyBusy) {
-        const conversations = await fetchConversations(sentAgentId);
-        const updatedConversation = conversations.find((conv) => conv.id === sentConvId);
-        if (!updatedConversation?.isBusy) {
-          await fetchMessages(sentAgentId, sentConvId);
+        beginRunHandoff(sentAgentId, sentConvId);
+        setConversationPending(sentAgentId, sentConvId, true);
+      }
+      try {
+        const queueResponse = await api<QueuePromptResponse>(
+          `/agents/${sentAgentId}/chat/message`,
+          {
+            method: 'POST',
+            headers: {
+              'Idempotency-Key': `agent-chat-direct:${directMessageId}`,
+            },
+            body: JSON.stringify({
+              prompt,
+              conversationId: sentConvId,
+            }),
+          },
+        );
+        const immediateQueuedCount = toQueueCount(queueResponse.queuedCount);
+        setConvsByAgent((prev) => {
+          const convs = prev[sentAgentId];
+          if (!convs || convs.length === 0) return prev;
+          let changed = false;
+          const nextConvs = convs.map((conv) => {
+            if (conv.id !== sentConvId) return conv;
+            if (conv.isBusy && toQueueCount(conv.queuedCount) === immediateQueuedCount) return conv;
+            changed = true;
+            return { ...conv, isBusy: true, queuedCount: immediateQueuedCount };
+          });
+          if (!changed) return prev;
+          return { ...prev, [sentAgentId]: nextConvs };
+        });
+        // Refetch queue items to replace optimistic entry with real data
+        await fetchQueueItems(sentAgentId, sentConvId);
+        if (!alreadyBusy) {
+          const conversations = await fetchConversations(sentAgentId);
+          const updatedConversation = conversations.find((conv) => conv.id === sentConvId);
+          if (!updatedConversation?.isBusy) {
+            await fetchMessages(sentAgentId, sentConvId);
+          }
+        }
+      } catch (err) {
+        // Remove optimistic queue item on failure
+        clearRunHandoff(sentAgentId, sentConvId);
+        setQueueItems((prev) => prev.filter((item) => item.id !== optimisticQueueItem.id));
+        setChatError(err instanceof Error ? err.message : 'Failed to send message');
+        throw err;
+      } finally {
+        if (!alreadyBusy) {
+          setConversationPending(sentAgentId, sentConvId, false);
         }
       }
-    } catch (err) {
-      // Remove optimistic queue item on failure
-      clearRunHandoff(sentAgentId, sentConvId);
-      setQueueItems((prev) => prev.filter((item) => item.id !== optimisticQueueItem.id));
-      setChatError(err instanceof Error ? err.message : 'Failed to send message');
-    } finally {
-      if (!alreadyBusy) {
-        setConversationPending(sentAgentId, sentConvId, false);
-      }
-      inputRef.current?.focus();
+    },
+    [
+      activeAgentId,
+      activeConvId,
+      beginRunHandoff,
+      clearRunHandoff,
+      fetchConversations,
+      fetchMessages,
+      fetchQueueItems,
+      setConversationPending,
+      streaming,
+    ],
+  );
+
+  async function handleSwitchBranch(messageId: string) {
+    if (!activeAgentId || !activeConvId) return;
+    try {
+      const data = await api<{ entries: ChatMessage[] }>(
+        `/agents/${activeAgentId}/chat/conversations/${activeConvId}/switch-branch`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ messageId }),
+        },
+      );
+      cancelEditingMessage();
+      setMessages(data.entries);
+    } catch {
+      toast.error('Failed to switch branch');
     }
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
+  function startEditingMessage(msg: ChatMessage) {
+    if (!isEditableChatMessage(msg)) return;
+    setEditingMessageId(msg.id);
+    setEditingMessageInitialContent(msg.content);
+    setEditingMessageContent(msg.content);
+    setEditingMessageImages(getChatMessageImages(msg));
+  }
+
+  function cancelEditingMessage() {
+    setEditingMessageId(null);
+    setEditingMessageInitialContent('');
+    setEditingMessageContent('');
+    setEditingMessageImages([]);
+  }
+
+  async function submitEditedMessage(files: File[], keepStoragePaths: string[]) {
+    if (!editingMessageId || !activeAgentId || !activeConvId) return;
+
+    const trimmedContent = editingMessageContent.trim();
+    if (!trimmedContent && files.length === 0 && keepStoragePaths.length === 0) return;
+
+    const sentAgentId = activeAgentId;
+    const sentConvId = activeConvId;
+    const content = trimmedContent;
+
+    setEditingMessageId(null);
+    setEditingMessageInitialContent('');
+    setEditingMessageContent('');
+    setEditingMessageImages([]);
+    setChatError(null);
+
+    beginRunHandoff(sentAgentId, sentConvId);
+    setConversationPending(sentAgentId, sentConvId, true);
+    try {
+      let editedMessage: ChatMessage | null = null;
+      if (files.length > 0) {
+        const fd = new FormData();
+        fd.append('messageId', editingMessageId);
+        if (content) fd.append('content', content);
+        for (const storagePath of keepStoragePaths) {
+          fd.append('keepStoragePaths', storagePath);
+        }
+        for (const file of files) {
+          const prepared = await prepareImageForUpload(file);
+          fd.append('files', prepared, prepared.name);
+        }
+        const response = await apiUpload<{ message: ChatMessage }>(
+          `/agents/${sentAgentId}/chat/conversations/${sentConvId}/edit-message-upload`,
+          fd,
+        );
+        editedMessage = response.message;
+      } else {
+        const response = await api<{ message: ChatMessage }>(
+          `/agents/${sentAgentId}/chat/conversations/${sentConvId}/edit-message`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ messageId: editingMessageId, content, keepStoragePaths }),
+          },
+        );
+        editedMessage = response.message;
+      }
+      if (editedMessage) {
+        setOptimisticResponseParent(sentAgentId, sentConvId, editedMessage.id);
+      }
+      await Promise.all([fetchMessages(sentAgentId, sentConvId), fetchConversations(sentAgentId)]);
+    } catch (err) {
+      clearRunHandoff(sentAgentId, sentConvId);
+      setChatError(err instanceof Error ? err.message : 'Failed to edit message');
+    } finally {
+      setConversationPending(sentAgentId, sentConvId, false);
     }
+  }
+
+  async function handleSwitchBranchByOffset(msg: ChatMessage, offset: number) {
+    const idx = msg.siblingIndex ?? 0;
+    const ids = msg.siblingIds ?? [];
+    const targetIdx = idx + offset;
+    if (targetIdx < 0 || targetIdx >= ids.length) return;
+    const targetId = ids[targetIdx];
+    if (targetId) void handleSwitchBranch(targetId);
   }
 
   /* ── Image paste/upload ── */
 
-  const MAX_STAGED_IMAGES = 10;
-
-  function stageImages(files: File[]) {
-    const images = files.filter(isImageFile);
-    if (images.length === 0) return;
-    setStagedImages((prev) => {
-      const remaining = MAX_STAGED_IMAGES - prev.length;
-      if (remaining <= 0) return prev;
-      const toAdd = images.slice(0, remaining).map((file) => ({
-        file,
-        previewUrl: URL.createObjectURL(file),
-      }));
-      return [...prev, ...toAdd];
-    });
-  }
-
-  function removeStagedImage(index: number) {
-    setStagedImages((prev) => {
-      const next = [...prev];
-      const [removed] = next.splice(index, 1);
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
-      return next;
-    });
-  }
-
-  function clearStagedImages() {
-    setStagedImages((prev) => {
-      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
-      return [];
-    });
-  }
-
-  async function uploadStagedImages(caption: string): Promise<ChatMessage | null> {
-    if (stagedImages.length === 0 || !activeAgentId || !activeConvId) return null;
-
-    const fd = new FormData();
-    fd.append('conversationId', activeConvId);
-    if (caption) fd.append('caption', caption);
-    for (const staged of stagedImages) {
-      const prepared = await prepareImageForUpload(staged.file);
-      fd.append('files', prepared, prepared.name);
-    }
-
-    const msg = await apiUpload<ChatMessage>(`/agents/${activeAgentId}/chat/upload`, fd);
-    clearStagedImages();
-    return msg;
-  }
-
-  /* ── Queue management ── */
-
-  function handlePaste(e: ReactClipboardEvent<HTMLTextAreaElement>) {
-    const files = getImagesFromClipboardData(e.clipboardData);
-    if (files.length === 0) return;
-    e.preventDefault();
-    stageImages(files);
-  }
-
-  function handleDragOver(e: ReactDragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.dataTransfer.types.includes('Files')) {
-      setDraggingOver(true);
-    }
-  }
-
-  function handleDragLeave(e: ReactDragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingOver(false);
-  }
-
-  function handleDrop(e: ReactDragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingOver(false);
-    const files = getImagesFromFileList(e.dataTransfer.files);
-    if (files.length > 0) stageImages(files);
-  }
-
-  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = getImagesFromFileList(e.target.files);
-    if (files.length > 0) stageImages(files);
-    // Reset so the same file can be selected again
-    e.target.value = '';
-  }
-
   /* ── Agent CRUD ── */
   const selectedModel = MODELS.find((m) => m.id === form.model);
   const selectedCli = cliStatus.find((c) => c.id === form.model);
+  const selectedPreset = presets.find((preset) => preset.id === form.preset);
   const cliMissing = selectedCli ? !selectedCli.installed : false;
   const selectedKey = apiKeys.find((k) => k.id === form.apiKeyId);
 
@@ -1916,6 +3084,7 @@ export function AgentsPage() {
     if (presetGroupId) f.groupId = presetGroupId;
     setForm(f);
     setFormErrors({});
+    setCreateAvatarOpen(false);
     setCreateOpen(true);
     // Fetch supporting data
     (async () => {
@@ -1965,8 +3134,47 @@ export function AgentsPage() {
 
   function closeCreate() {
     setCreateOpen(false);
+    setCreateAvatarOpen(false);
+    setPickingPresetDirectoryKey(null);
     setForm(makeEmptyForm());
     setFormErrors({});
+  }
+
+  function updatePresetParameterValue(key: string, value: string) {
+    setForm((f) => ({
+      ...f,
+      presetParameters: {
+        ...f.presetParameters,
+        [key]: value,
+      },
+    }));
+    setFormErrors((prev) => {
+      const errorKey = `presetParameters.${key}`;
+      if (!prev[errorKey]) return prev;
+      const next = { ...prev };
+      delete next[errorKey];
+      return next;
+    });
+  }
+
+  async function handlePickPresetDirectory(key: string) {
+    setPickingPresetDirectoryKey(key);
+    try {
+      const currentValue = form.presetParameters[key]?.trim();
+      const result = await api<{ path: string | null }>('/storage/pick-folder', {
+        method: 'POST',
+        body: JSON.stringify({
+          startPath: currentValue || undefined,
+        }),
+      });
+      if (result.path) {
+        updatePresetParameterValue(key, result.path);
+      }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to open folder picker');
+    } finally {
+      setPickingPresetDirectoryKey((current) => (current === key ? null : current));
+    }
   }
 
   /* ── Group management ── */
@@ -2042,9 +3250,7 @@ export function AgentsPage() {
       if (settingsAgent?.id === agentId) setSettingsAgent(updated);
     } catch (error) {
       const message =
-        error instanceof ApiError && error.message
-          ? error.message
-          : 'Failed to update avatar';
+        error instanceof ApiError && error.message ? error.message : 'Failed to update avatar';
       toast.error(message);
       throw error;
     }
@@ -2101,7 +3307,11 @@ export function AgentsPage() {
     }
   }
 
-  async function handleCreateColorPreset(input: { name: string; bgColor: string; logoColor: string }) {
+  async function handleCreateColorPreset(input: {
+    name: string;
+    bgColor: string;
+    logoColor: string;
+  }) {
     try {
       const created = await api<ColorPreset>('/agent-color-presets', {
         method: 'POST',
@@ -2110,9 +3320,7 @@ export function AgentsPage() {
       setColorPresets((prev) => [created, ...prev]);
     } catch (error) {
       const message =
-        error instanceof ApiError && error.message
-          ? error.message
-          : 'Failed to save color preset';
+        error instanceof ApiError && error.message ? error.message : 'Failed to save color preset';
       toast.error(message);
       throw error;
     }
@@ -2192,11 +3400,11 @@ export function AgentsPage() {
     });
   }
 
-  function toggleAgentCollapse(id: string) {
+  const toggleAgentCollapse = useCallback((id: string) => {
     setCollapsedAgents((prev) => {
       if (prev === 'all') {
         // Expand this one agent, collapse the rest
-        const next = new Set(agents.map((a) => a.id));
+        const next = new Set(agentsRef.current.map((agent) => agent.id));
         next.delete(id);
         return next;
       }
@@ -2205,12 +3413,18 @@ export function AgentsPage() {
       else next.add(id);
       return next;
     });
-  }
+  }, []);
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
     const errors: Record<string, string> = {};
     if (!form.name.trim()) errors.name = 'Name is required';
+    for (const parameter of selectedPreset?.parameters ?? []) {
+      const value = form.presetParameters[parameter.key]?.trim() ?? '';
+      if (parameter.required && !value) {
+        errors[`presetParameters.${parameter.key}`] = `${parameter.label} is required`;
+      }
+    }
     if (form.newKey) {
       if (form.newKeyPermissions.length === 0)
         errors.permissions = 'Select at least one permission';
@@ -2260,6 +3474,7 @@ export function AgentsPage() {
           modelId: form.modelId.trim() || null,
           thinkingLevel: form.thinkingLevel || null,
           preset: form.preset,
+          presetParameters: serializePresetParameters(selectedPreset, form.presetParameters),
           apiKeyId: keyId,
           workspaceId: activeWorkspaceId || undefined,
           skipPermissions: form.skipPermissions,
@@ -2344,9 +3559,12 @@ export function AgentsPage() {
 
   /* ── Derived data ── */
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
-  const filteredAgents = search.trim()
-    ? agents.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()))
-    : agents;
+  const deferredSearch = useDeferredValue(search);
+  const filteredAgents = useMemo(() => {
+    const normalizedSearch = deferredSearch.trim().toLowerCase();
+    if (!normalizedSearch) return agents;
+    return agents.filter((agent) => agent.name.toLowerCase().includes(normalizedSearch));
+  }, [agents, deferredSearch]);
 
   // Group agents by groupId
   const groupedAgents = useMemo(() => {
@@ -2358,171 +3576,12 @@ export function AgentsPage() {
     }
     return byGroup;
   }, [filteredAgents]);
-
-  /* ── Render a single agent item in sidebar ── */
-  function renderAgentItem(agent: Agent) {
-    const convs = convsByAgent[agent.id] || [];
-    const collapsed = isAgentCollapsed(agent.id);
-    const hasUnreadAny = convs.some((c) => c.isUnread);
-    const hasStreamingAny = convs.some(
-      (c) => Boolean(c.isBusy) || pendingConversationKeys.has(agentConversationKey(agent.id, c.id)),
-    );
-    const queuedTotal = convs.reduce((sum, conv) => sum + toQueueCount(conv.queuedCount), 0);
-    return (
-      <div key={agent.id} className={styles.agentGroup}>
-        <div
-          className={`${styles.agentGroupHeader} ${activeAgentId === agent.id ? styles.agentGroupHeaderActive : ''}`}
-          onClick={() => {
-            const convs = convsByAgent[agent.id] || [];
-            if (convs.length > 0) {
-              selectConversation(agent.id, convs[0].id);
-            } else {
-              createConversation(agent.id);
-            }
-          }}
-          onContextMenu={(e) => {
-            if (groups.length === 0) return;
-            e.preventDefault();
-            setContextMenu({ agentId: agent.id, x: e.clientX, y: e.clientY });
-          }}
-        >
-          <ChevronRight
-            size={14}
-            className={`${styles.agentGroupChevron} ${!collapsed ? styles.agentGroupChevronOpen : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleAgentCollapse(agent.id);
-            }}
-          />
-          <div className={styles.agentAvatarWrapper}>
-            <AgentAvatar
-              icon={agent.avatarIcon || 'spark'}
-              bgColor={agent.avatarBgColor || '#1a1a2e'}
-              logoColor={agent.avatarLogoColor || '#e94560'}
-              size={28}
-            />
-            {hasUnreadAny ? (
-              <span
-                className={styles.agentStatusDot}
-                style={{ background: 'var(--color-primary)' }}
-                title="Has unread messages"
-              />
-            ) : hasStreamingAny ? (
-              <span
-                className={styles.agentStreamingDot}
-                title={
-                  queuedTotal > 0
-                    ? `Queued in backend: ${queueItemsLabel(queuedTotal)}`
-                    : 'Agent is responding...'
-                }
-              />
-            ) : null}
-          </div>
-          <div className={styles.agentGroupInfo}>
-            <div className={styles.agentGroupName}>{agent.name}</div>
-          </div>
-          <div className={styles.agentGroupActions}>
-            <Tooltip label="Settings">
-              <button
-                className={styles.agentGroupIconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSettingsAgent(agent);
-                }}
-                aria-label="Agent settings"
-              >
-                <Settings size={14} />
-              </button>
-            </Tooltip>
-            <Tooltip label="Clean chats">
-              <button
-                className={styles.agentGroupIconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void cleanConversations(agent.id);
-                }}
-                aria-label="Clean chats"
-              >
-                <Eraser size={14} />
-              </button>
-            </Tooltip>
-            <Tooltip label="New chat">
-              <button
-                className={styles.agentGroupIconBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  createConversation(agent.id);
-                }}
-                aria-label="New chat"
-              >
-                <Plus size={14} />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-
-        {!collapsed && convs.length > 0 && (
-          <div className={styles.convList}>
-            {convs.map((conv) => {
-              const isStreaming =
-                Boolean(conv.isBusy) ||
-                pendingConversationKeys.has(agentConversationKey(agent.id, conv.id));
-              const isUnread = conv.isUnread;
-              const queuedCount = toQueueCount(conv.queuedCount);
-              const streamingTitle =
-                queuedCount > 0
-                  ? `Queued in backend: ${queueItemsLabel(queuedCount)}`
-                  : 'Agent is responding...';
-              return (
-                <div
-                  key={conv.id}
-                  className={`${styles.convItem} ${
-                    activeAgentId === agent.id && activeConvId === conv.id
-                      ? styles.convItemActive
-                      : ''
-                  }`}
-                  onClick={() => selectConversation(agent.id, conv.id)}
-                >
-                  {isStreaming && (
-                    <span className={styles.convStreamingDot} title={streamingTitle} />
-                  )}
-                  {!isStreaming && isUnread && (
-                    <span className={styles.convUnreadDot} title="New response" />
-                  )}
-                  <div className={styles.convItemInfo}>
-                    <div className={styles.convItemTitle}>{conv.subject || 'New conversation'}</div>
-                  </div>
-                  {queuedCount > 0 && (
-                    <span className={styles.convQueueBadge} title={queueItemsLabel(queuedCount)}>
-                      <Clock size={9} />
-                      {queuedCount}
-                    </span>
-                  )}
-                  <span className={styles.convItemTime}>
-                    {relativeTime(conv.lastMessageAt || conv.createdAt)}
-                  </span>
-                  <button
-                    className={styles.convItemDelete}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteConversation(agent.id, conv.id);
-                    }}
-                    aria-label="Delete conversation"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              );
-            })}
-            <button className={styles.newConvBtn} onClick={() => createConversation(agent.id)}>
-              <Plus size={13} />
-              New chat
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
+  const handleOpenAgentContextMenu = useCallback((agentId: string, x: number, y: number) => {
+    setContextMenu({ agentId, x, y });
+  }, []);
+  const handleOpenAgentSettings = useCallback((agent: Agent) => {
+    setSettingsAgent(agent);
+  }, []);
 
   /* ── Skills manager helpers ── */
 
@@ -2531,191 +3590,209 @@ export function AgentsPage() {
     try {
       const data = await api<{ entries: SkillFull[] }>('/skills');
       setMgrSkills(data.entries);
-    } catch { /* ignore */ }
-    finally { setMgrLoading(false); }
+    } catch {
+      /* ignore */
+    } finally {
+      setMgrLoading(false);
+    }
   }
+
+  function mgrResetSkillForm() {
+    setMgrCreating(false);
+    setMgrEditingId(null);
+    setMgrFormName('');
+    setMgrFormDesc('');
+    setMgrFormError('');
+  }
+
+  function mgrOpenCreate() {
+    setMgrCreating(true);
+    setMgrEditingId(null);
+    setMgrFormName('');
+    setMgrFormDesc('');
+    setMgrFormError('');
+  }
+
+  function mgrOpenEdit(skill: SkillFull) {
+    setMgrCreating(false);
+    setMgrEditingId(skill.id);
+    setMgrFormName(skill.name);
+    setMgrFormDesc(skill.description);
+    setMgrFormError('');
+    setMgrActiveSkillId(skill.id);
+  }
+
+  useEffect(() => {
+    if (!skillsManagerOpen || (!mgrCreating && !mgrEditingId)) return;
+    mgrNameRef.current?.focus();
+    if (mgrEditingId) mgrNameRef.current?.select();
+  }, [skillsManagerOpen, mgrCreating, mgrEditingId]);
+
+  useEffect(() => {
+    if (!skillsManagerOpen) return;
+    const originalBodyOverflow = document.body.style.overflow;
+    const originalHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalBodyOverflow;
+      document.documentElement.style.overflow = originalHtmlOverflow;
+    };
+  }, [skillsManagerOpen]);
 
   function openSkillsManager() {
     setSkillsManagerOpen(true);
     setMgrActiveSkillId(null);
-    setMgrEditingFile(null);
-    setMgrCreatingFile(false);
-    setMgrCreating(false);
-    setMgrEditingId(null);
+    mgrResetSkillForm();
     void mgrFetchSkills();
   }
 
-  async function mgrFetchFiles(skillId: string, dirPath: string) {
-    setMgrFilesLoading(true);
-    try {
-      const data = await api<{ entries: SkillFileEntry[] }>(
-        `/skills/${skillId}/files?path=${encodeURIComponent(dirPath)}`,
-      );
-      setMgrFiles(data.entries);
-    } catch { /* ignore */ }
-    finally { setMgrFilesLoading(false); }
+  function mgrIsFormDirty() {
+    if (mgrCreating) {
+      return Boolean(mgrFormName.trim() || mgrFormDesc.trim());
+    }
+
+    if (!mgrEditingId) return false;
+
+    const editingSkill = mgrSkills.find((skill) => skill.id === mgrEditingId);
+    if (!editingSkill) return false;
+
+    return mgrFormName !== editingSkill.name || mgrFormDesc !== editingSkill.description;
+  }
+
+  async function mgrAbandonFormIfConfirmed() {
+    if (!mgrCreating && !mgrEditingId) return true;
+    if (!mgrIsFormDirty()) {
+      mgrResetSkillForm();
+      return true;
+    }
+
+    const confirmed = await confirm({
+      title: 'Discard changes',
+      message: 'You have unsaved skill changes. Discard them and continue?',
+      confirmLabel: 'Discard',
+      variant: 'danger',
+    });
+
+    if (!confirmed) return false;
+
+    mgrResetSkillForm();
+    return true;
+  }
+
+  async function closeSkillsManager() {
+    if (!(await mgrAbandonFormIfConfirmed())) return;
+    setSkillsManagerOpen(false);
+  }
+
+  async function mgrHandleCreateRequest() {
+    if (!(await mgrAbandonFormIfConfirmed())) return;
+    mgrOpenCreate();
+  }
+
+  async function mgrHandleSelectSkill(skillId: string) {
+    if (mgrEditingId === skillId && !mgrCreating) return;
+    if (mgrActiveSkillId === skillId && !mgrCreating && !mgrEditingId) return;
+    if (!(await mgrAbandonFormIfConfirmed())) return;
+    setMgrActiveSkillId(skillId);
+  }
+
+  async function mgrHandleEditRequest(skill: SkillFull) {
+    if (mgrEditingId === skill.id && !mgrCreating) return;
+    if (!(await mgrAbandonFormIfConfirmed())) return;
+    mgrOpenEdit(skill);
   }
 
   async function mgrCreateSkill() {
     const trimmed = mgrFormName.trim();
     if (!trimmed) return;
     setMgrSaving(true);
+    setMgrFormError('');
     try {
       const s = await api<SkillFull>('/skills', {
-        method: 'POST', body: JSON.stringify({ name: trimmed, description: mgrFormDesc.trim() }),
+        method: 'POST',
+        body: JSON.stringify({ name: trimmed, description: mgrFormDesc.trim() }),
       });
       setMgrSkills((prev) => [...prev, s].sort((a, b) => a.name.localeCompare(b.name)));
-      setMgrCreating(false);
-      setMgrFormName(''); setMgrFormDesc('');
+      mgrResetSkillForm();
+      setMgrActiveSkillId(s.id);
       toast.success(`Skill "${trimmed}" created`);
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to create skill'); }
-    finally { setMgrSaving(false); }
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to create skill';
+      setMgrFormError(message);
+      toast.error(message);
+    } finally {
+      setMgrSaving(false);
+    }
   }
 
   async function mgrUpdateSkill(id: string) {
     const trimmed = mgrFormName.trim();
     if (!trimmed) return;
+    if (!mgrIsFormDirty()) {
+      mgrResetSkillForm();
+      return;
+    }
     setMgrSaving(true);
+    setMgrFormError('');
     try {
       const updated = await api<SkillFull>(`/skills/${id}`, {
-        method: 'PATCH', body: JSON.stringify({ name: trimmed, description: mgrFormDesc.trim() }),
+        method: 'PATCH',
+        body: JSON.stringify({ name: trimmed, description: mgrFormDesc.trim() }),
       });
       setMgrSkills((prev) => prev.map((s) => (s.id === id ? updated : s)));
-      setMgrEditingId(null);
-      setMgrFormName(''); setMgrFormDesc('');
+      mgrResetSkillForm();
+      setMgrActiveSkillId(updated.id);
       toast.success('Skill updated');
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to update skill'); }
-    finally { setMgrSaving(false); }
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to update skill';
+      setMgrFormError(message);
+      toast.error(message);
+    } finally {
+      setMgrSaving(false);
+    }
   }
 
   async function mgrDeleteSkill(id: string) {
-    if (!window.confirm('Delete this skill? Removes from all agents and deletes all files.')) return;
+    const skill = mgrSkills.find((entry) => entry.id === id);
+    const confirmed = await confirm({
+      title: 'Delete skill',
+      message: `Delete "${skill?.name ?? 'this skill'}" from the preset library? Existing agent-local copies stay in place.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     try {
       await api(`/skills/${id}`, { method: 'DELETE' });
       setMgrSkills((prev) => prev.filter((s) => s.id !== id));
-      if (mgrActiveSkillId === id) { setMgrActiveSkillId(null); setMgrFiles([]); setMgrEditingFile(null); }
+      if (mgrActiveSkillId === id) setMgrActiveSkillId(null);
+      if (mgrEditingId === id) mgrResetSkillForm();
       toast.success('Skill deleted');
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to delete skill'); }
-  }
-
-  async function mgrResyncSkill(id: string) {
-    try {
-      await api(`/skills/${id}/resync`, { method: 'POST' });
-      toast.success('Pushed latest files to all agents');
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to resync'); }
-  }
-
-  async function mgrOpenFile(entry: SkillFileEntry) {
-    if (entry.type === 'folder') { setMgrFilePath(entry.path); return; }
-    try {
-      const data = await api<{ content: string }>(
-        `/skills/${mgrActiveSkillId}/files/content?path=${encodeURIComponent(entry.path)}`,
-      );
-      setMgrEditingFile({ path: entry.path, content: data.content });
-      setMgrEditContent(data.content);
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to read file'); }
-  }
-
-  async function mgrSaveFile() {
-    if (!mgrActiveSkillId || !mgrEditingFile) return;
-    setMgrFileSaving(true);
-    try {
-      await api(`/skills/${mgrActiveSkillId}/files/content`, {
-        method: 'PUT', body: JSON.stringify({ path: mgrEditingFile.path, content: mgrEditContent }),
-      });
-      setMgrEditingFile({ ...mgrEditingFile, content: mgrEditContent });
-      toast.success('File saved');
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to save file'); }
-    finally { setMgrFileSaving(false); }
-  }
-
-  async function mgrCreateFile() {
-    if (!mgrActiveSkillId || !mgrNewFileName.trim()) return;
-    setMgrFileSaving(true);
-    try {
-      const fp = mgrFilePath === '/' ? `/${mgrNewFileName.trim()}` : `${mgrFilePath}/${mgrNewFileName.trim()}`;
-      await api(`/skills/${mgrActiveSkillId}/files/content`, {
-        method: 'PUT', body: JSON.stringify({ path: fp, content: mgrNewFileContent }),
-      });
-      setMgrCreatingFile(false); setMgrNewFileName(''); setMgrNewFileContent('');
-      toast.success('File created');
-      await mgrFetchFiles(mgrActiveSkillId, mgrFilePath);
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to create file'); }
-    finally { setMgrFileSaving(false); }
-  }
-
-  async function mgrDeleteFile(path: string) {
-    if (!mgrActiveSkillId || !window.confirm(`Delete ${path}?`)) return;
-    try {
-      await api(`/skills/${mgrActiveSkillId}/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
-      if (mgrEditingFile?.path === path) setMgrEditingFile(null);
-      await mgrFetchFiles(mgrActiveSkillId, mgrFilePath);
-      toast.success('Deleted');
-    } catch (err) { toast.error(err instanceof ApiError ? err.message : 'Failed to delete'); }
-  }
-
-  async function mgrUploadFile(file: globalThis.File) {
-    if (!mgrActiveSkillId) return;
-    setMgrUploading(true);
-    try {
-      const formData = new FormData();
-      formData.append('path', mgrFilePath);
-      formData.append('file', file);
-      await apiUpload(`/skills/${mgrActiveSkillId}/files/upload`, formData);
-      toast.success('File uploaded');
-      await mgrFetchFiles(mgrActiveSkillId, mgrFilePath);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to upload file');
-    } finally {
-      setMgrUploading(false);
-      if (mgrFileInputRef.current) mgrFileInputRef.current.value = '';
+      toast.error(err instanceof ApiError ? err.message : 'Failed to delete skill');
     }
   }
 
-  function mgrHandleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (file) void mgrUploadFile(file);
-  }
+  useEffect(() => {
+    if (!skillsManagerOpen) return;
 
-  function mgrHandleDrop(e: React.DragEvent) {
-    e.preventDefault();
-    mgrDragCounter.current = 0;
-    setMgrDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) void mgrUploadFile(file);
-  }
-
-  function mgrHandleDragEnter(e: React.DragEvent) {
-    e.preventDefault();
-    mgrDragCounter.current++;
-    setMgrDragOver(true);
-  }
-
-  function mgrHandleDragOver(e: React.DragEvent) {
-    e.preventDefault();
-  }
-
-  function mgrHandleDragLeave(e: React.DragEvent) {
-    e.preventDefault();
-    mgrDragCounter.current--;
-    if (mgrDragCounter.current === 0) setMgrDragOver(false);
-  }
-
-  async function mgrCreateFolder() {
-    if (!mgrActiveSkillId || !mgrNewFolderName.trim()) return;
-    try {
-      await api(`/skills/${mgrActiveSkillId}/files/folders`, {
-        method: 'POST',
-        body: JSON.stringify({ path: mgrFilePath, name: mgrNewFolderName.trim() }),
-      });
-      setMgrShowNewFolder(false);
-      setMgrNewFolderName('');
-      toast.success('Folder created');
-      await mgrFetchFiles(mgrActiveSkillId, mgrFilePath);
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to create folder');
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('[role="dialog"][aria-modal="true"]')) return;
+      event.preventDefault();
+      void (async () => {
+        if (mgrCreating || mgrEditingId) {
+          await mgrAbandonFormIfConfirmed();
+          return;
+        }
+        setSkillsManagerOpen(false);
+      })();
     }
-  }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [mgrAbandonFormIfConfirmed, mgrCreating, mgrEditingId, skillsManagerOpen]);
 
   /* ══════════════════════════════════════════════════════════
      Render
@@ -2743,21 +3820,30 @@ export function AgentsPage() {
                   <div className={styles.headerMenu}>
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { openSkillsManager(); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        openSkillsManager();
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <Blocks size={14} />
                       Skills manager
                     </button>
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { setPageSettingsOpen(!pageSettingsOpen); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        setPageSettingsOpen(!pageSettingsOpen);
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <SlidersHorizontal size={14} />
                       Page settings
                     </button>
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { setManageGroupsOpen(!manageGroupsOpen); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        setManageGroupsOpen(!manageGroupsOpen);
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <Layers size={14} />
                       Manage groups
@@ -2765,14 +3851,20 @@ export function AgentsPage() {
                     <div className={styles.headerMenuDivider} />
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { setCollapsedAgents('all'); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        setCollapsedAgents('all');
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <ChevronsDownUp size={14} />
                       Collapse all
                     </button>
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { setCollapsedAgents(new Set()); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        setCollapsedAgents(new Set());
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <ChevronsUpDown size={14} />
                       Expand all
@@ -2780,7 +3872,10 @@ export function AgentsPage() {
                     <div className={styles.headerMenuDivider} />
                     <button
                       className={styles.headerMenuItem}
-                      onClick={() => { void cleanAllConversations(); setHeaderMenuOpen(false); }}
+                      onClick={() => {
+                        void cleanAllConversations();
+                        setHeaderMenuOpen(false);
+                      }}
                     >
                       <Eraser size={14} />
                       Clean all chats
@@ -2950,7 +4045,26 @@ export function AgentsPage() {
                           <Plus size={13} />
                         </button>
                       </div>
-                      {!isCollapsed && groupAgents.map((agent) => renderAgentItem(agent))}
+                      {!isCollapsed &&
+                        groupAgents.map((agent) => (
+                          <AgentSidebarItem
+                            key={agent.id}
+                            agent={agent}
+                            conversations={convsByAgent[agent.id] || []}
+                            collapsed={isAgentCollapsed(agent.id)}
+                            isActive={activeAgentId === agent.id}
+                            activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                            groupsEnabled={groups.length > 0}
+                            pendingConversationKeys={pendingConversationKeys}
+                            onToggleCollapse={toggleAgentCollapse}
+                            onOpenContextMenu={handleOpenAgentContextMenu}
+                            onOpenSettings={handleOpenAgentSettings}
+                            onCleanConversations={cleanConversations}
+                            onCreateConversation={createConversation}
+                            onSelectConversation={selectConversation}
+                            onDeleteConversation={deleteConversation}
+                          />
+                        ))}
                     </div>
                   );
                 })}
@@ -2986,7 +4100,25 @@ export function AgentsPage() {
                         </div>
                       )}
                       {(!showHeader || !isCollapsed) &&
-                        ungrouped.map((agent) => renderAgentItem(agent))}
+                        ungrouped.map((agent) => (
+                          <AgentSidebarItem
+                            key={agent.id}
+                            agent={agent}
+                            conversations={convsByAgent[agent.id] || []}
+                            collapsed={isAgentCollapsed(agent.id)}
+                            isActive={activeAgentId === agent.id}
+                            activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                            groupsEnabled={groups.length > 0}
+                            pendingConversationKeys={pendingConversationKeys}
+                            onToggleCollapse={toggleAgentCollapse}
+                            onOpenContextMenu={handleOpenAgentContextMenu}
+                            onOpenSettings={handleOpenAgentSettings}
+                            onCleanConversations={cleanConversations}
+                            onCreateConversation={createConversation}
+                            onSelectConversation={selectConversation}
+                            onDeleteConversation={deleteConversation}
+                          />
+                        ))}
                     </div>
                   );
                 })()}
@@ -3063,68 +4195,130 @@ export function AgentsPage() {
                     </div>
                   ) : (
                     <div className={styles.messagesArea} ref={messagesRef}>
-                      {messages.map((msg) => (
-                        <div
-                          key={msg.id}
-                          className={`${styles.messageRow} ${
-                            msg.direction === 'outbound'
-                              ? styles.messageRowUser
-                              : styles.messageRowAgent
-                          }`}
-                        >
-                          <div className={styles.messageContent}>
-                            <div
-                              className={`${styles.messageBubble} ${
-                                msg.direction === 'outbound'
-                                  ? styles.messageBubbleUser
-                                  : styles.messageBubbleAgent
-                              } ${msg.attachments?.some((a) => a.type === 'image') ? styles.messageBubbleImage : ''}`}
-                            >
-                              {msg.attachments?.map((att, i) =>
-                                att.type === 'image' ? (
-                                  <ChatImage
-                                    key={i}
-                                    storagePath={att.storagePath}
-                                    alt={att.fileName}
-                                  />
-                                ) : null,
-                              )}
-                              {msg.content &&
-                                (msg.direction === 'inbound' ? (
-                                  <MarkdownContent>{msg.content}</MarkdownContent>
-                                ) : (
-                                  msg.content
-                                ))}
-                            </div>
-                            <div
-                              className={`${styles.messageMeta} ${
-                                msg.direction === 'outbound' ? styles.messageMetaUser : ''
-                              }`}
-                            >
-                              {new Date(msg.createdAt).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
-                              {msg.direction === 'inbound' && (
-                                <button
-                                  className={styles.copyBtn}
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(msg.content);
-                                    setCopiedId(msg.id);
-                                    setTimeout(() => setCopiedId(null), 1500);
-                                  }}
-                                  aria-label="Copy message"
+                      {messages.map((msg) => {
+                        const messageMeta = parseAgentMessageMetadata(msg.metadata);
+                        const monitorRunId =
+                          msg.direction === 'inbound' ? (messageMeta?.runId ?? null) : null;
+
+                        return (
+                          <div
+                            key={msg.id}
+                            className={`${styles.messageRow} ${
+                              msg.direction === 'outbound'
+                                ? styles.messageRowUser
+                                : styles.messageRowAgent
+                            }`}
+                          >
+                            <div className={styles.messageContent}>
+                              {/* Branch navigator — shown when message has siblings */}
+                              {(msg.siblingCount ?? 1) > 1 && (
+                                <div
+                                  className={`${styles.branchNav} ${msg.direction === 'outbound' ? styles.branchNavUser : ''}`}
                                 >
-                                  {copiedId === msg.id ? <Check size={12} /> : <Copy size={12} />}
-                                </button>
+                                  <button
+                                    className={styles.branchNavBtn}
+                                    disabled={(msg.siblingIndex ?? 0) === 0}
+                                    onClick={() => void handleSwitchBranchByOffset(msg, -1)}
+                                    aria-label="Previous branch"
+                                  >
+                                    <ArrowLeft size={12} />
+                                  </button>
+                                  <span className={styles.branchNavLabel}>
+                                    {(msg.siblingIndex ?? 0) + 1}/{msg.siblingCount}
+                                  </span>
+                                  <button
+                                    className={styles.branchNavBtn}
+                                    disabled={
+                                      (msg.siblingIndex ?? 0) >= (msg.siblingCount ?? 1) - 1
+                                    }
+                                    onClick={() => void handleSwitchBranchByOffset(msg, 1)}
+                                    aria-label="Next branch"
+                                  >
+                                    <ArrowRight size={12} />
+                                  </button>
+                                </div>
                               )}
+                              <div
+                                className={`${styles.messageBubble} ${
+                                  msg.direction === 'outbound'
+                                    ? styles.messageBubbleUser
+                                    : styles.messageBubbleAgent
+                                } ${msg.attachments?.some((a) => a.type === 'image') ? styles.messageBubbleImage : ''}`}
+                              >
+                                {msg.attachments?.map((att, i) =>
+                                  att.type === 'image' ? (
+                                    <ChatImage
+                                      key={i}
+                                      storagePath={att.storagePath}
+                                      alt={att.fileName}
+                                    />
+                                  ) : (
+                                    <ChatFileAttachment key={i} attachment={att} />
+                                  ),
+                                )}
+                                {msg.content &&
+                                  (msg.direction === 'inbound' ? (
+                                    <MarkdownContent>{msg.content}</MarkdownContent>
+                                  ) : (
+                                    <div className={styles.messagePlainText}>{msg.content}</div>
+                                  ))}
+                              </div>
+                              <div
+                                className={`${styles.messageMeta} ${
+                                  msg.direction === 'outbound' ? styles.messageMetaUser : ''
+                                }`}
+                              >
+                                {new Date(msg.createdAt).toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                                {isEditableChatMessage(msg) && (
+                                  <button
+                                    className={styles.editMsgBtn}
+                                    onClick={() => startEditingMessage(msg)}
+                                    aria-label="Edit message"
+                                  >
+                                    <Pencil size={12} />
+                                  </button>
+                                )}
+                                {msg.direction === 'inbound' && (
+                                  <>
+                                    {monitorRunId && (
+                                      <button
+                                        className={styles.messageMonitorBtn}
+                                        onClick={() => openMonitorRun(monitorRunId)}
+                                        aria-label="Open run in monitor"
+                                        title="Open exact run in monitor"
+                                      >
+                                        <ExternalLink size={12} />
+                                        Monitor
+                                      </button>
+                                    )}
+                                    <button
+                                      className={styles.copyBtn}
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(msg.content);
+                                        setCopiedId(msg.id);
+                                        setTimeout(() => setCopiedId(null), 1500);
+                                      }}
+                                      aria-label="Copy message"
+                                    >
+                                      {copiedId === msg.id ? (
+                                        <Check size={12} />
+                                      ) : (
+                                        <Copy size={12} />
+                                      )}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
 
                       {/* Pending response bubble */}
-                      {streaming && (
+                      {showStreamingBubble && (
                         <div className={`${styles.messageRow} ${styles.messageRowAgent}`}>
                           <div className={styles.messageContent}>
                             <div
@@ -3135,15 +4329,27 @@ export function AgentsPage() {
                                 Thinking…
                               </span>
                             </div>
-                            <button
-                              className={styles.stopRunBtn}
-                              onClick={stopActiveRun}
-                              disabled={stoppingRun}
-                              title="Stop run"
-                            >
-                              <Square size={12} />
-                              Stop
-                            </button>
+                            <div className={styles.streamingActions}>
+                              {activeConversationRun && (
+                                <button
+                                  className={styles.messageMonitorBtn}
+                                  onClick={() => openMonitorRun(activeConversationRun.id)}
+                                  title="Open current run in monitor"
+                                >
+                                  <ExternalLink size={12} />
+                                  Monitor
+                                </button>
+                              )}
+                              <button
+                                className={styles.stopRunBtn}
+                                onClick={stopActiveRun}
+                                disabled={stoppingRun}
+                                title="Stop run"
+                              >
+                                <Square size={12} />
+                                Stop
+                              </button>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -3151,7 +4357,7 @@ export function AgentsPage() {
                   )}
 
                   {/* Queue panel */}
-                  {queueItems.length > 0 && (
+                  {queuedQueueItems.length > 0 && (
                     <div className={styles.queuePanel}>
                       <div className={styles.queuePanelHeader}>
                         <button
@@ -3160,7 +4366,8 @@ export function AgentsPage() {
                         >
                           <Clock size={13} />
                           <span>
-                            {queueItems.length} message{queueItems.length === 1 ? '' : 's'} in queue
+                            {queuedQueueItems.length} message
+                            {queuedQueueItems.length === 1 ? '' : 's'} in queue
                           </span>
                           <ChevronRight
                             size={14}
@@ -3178,7 +4385,7 @@ export function AgentsPage() {
                       </div>
                       {queuePanelOpen && (
                         <div className={styles.queuePanelItems}>
-                          {queueItems.map((item, idx) => (
+                          {queuedQueueItems.map((item, idx) => (
                             <div key={item.id} className={styles.queueItem}>
                               <span className={styles.queueItemIndex}>{idx + 1}</span>
                               {editingQueueItemId === item.id ? (
@@ -3252,82 +4459,24 @@ export function AgentsPage() {
                     </div>
                   )}
 
-                  {/* Reply box */}
-                  <div
-                    className={`${styles.replyBox} ${draggingOver ? styles.replyBoxDragOver : ''}`}
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
-                  >
-                    {uploading && <div className={styles.uploadingIndicator}>Uploading images…</div>}
-                    {stagedImages.length > 0 && (
-                      <div className={styles.stagedImagesRow}>
-                        {stagedImages.map((img, i) => (
-                          <div key={img.previewUrl} className={styles.stagedImagePreview}>
-                            <img
-                              src={img.previewUrl}
-                              alt="Preview"
-                              className={styles.stagedImageThumb}
-                            />
-                            <button
-                              className={styles.stagedImageRemove}
-                              onClick={() => removeStagedImage(i)}
-                              aria-label="Remove image"
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className={styles.replyRow}>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        className={styles.hiddenFileInput}
-                        onChange={handleFileSelect}
-                      />
-                      <button
-                        className={styles.attachBtn}
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={streaming || uploading || stagedImages.length >= MAX_STAGED_IMAGES}
-                        aria-label="Attach images"
-                        title={stagedImages.length >= MAX_STAGED_IMAGES ? `Max ${MAX_STAGED_IMAGES} images` : 'Attach images'}
-                      >
-                        <Image size={18} />
-                      </button>
-                      <textarea
-                        ref={inputRef}
-                        className={styles.replyInput}
-                        placeholder={
-                          stagedImages.length > 0
-                            ? 'Add a caption… (optional)'
-                            : streaming
-                              ? 'Type to queue a message…'
-                              : 'Type a message…'
-                        }
-                        value={input}
-                        onChange={(e) => {
-                          setInput(e.target.value);
-                        }}
-                        onKeyDown={handleKeyDown}
-                        onPaste={handlePaste}
-                        rows={1}
-                        disabled={uploading}
-                      />
-                      <button
-                        className={styles.sendBtn}
-                        onClick={sendMessage}
-                        disabled={uploading || (!input.trim() && stagedImages.length === 0)}
-                        aria-label="Send message"
-                        title="Send message"
-                      >
-                        <Send size={18} />
-                      </button>
-                    </div>
-                  </div>
+                  <ReplyComposer
+                    streaming={streaming}
+                    editingMessage={
+                      editingMessageId
+                        ? {
+                            id: editingMessageId,
+                            initialValue: editingMessageInitialContent,
+                            value: editingMessageContent,
+                            existingImages: editingMessageImages,
+                            onChange: setEditingMessageContent,
+                            onCancel: cancelEditingMessage,
+                            onSubmit: submitEditedMessage,
+                          }
+                        : null
+                    }
+                    onSendAttachments={sendAttachmentMessage}
+                    onSendText={sendTextMessage}
+                  />
                 </>
               )}
             </>
@@ -3426,17 +4575,49 @@ export function AgentsPage() {
 
                 <div>
                   <div className={styles.fieldLabel}>Avatar</div>
-                  <AgentAvatarPicker
-                    value={form.avatar}
-                    onChange={(avatar) => setForm((f) => ({ ...f, avatar }))}
-                    savedPresets={avatarPresets}
-                    onCreatePreset={handleCreateAvatarPreset}
-                    onRenamePreset={handleRenameAvatarPreset}
-                    onDeletePreset={handleDeleteAvatarPreset}
-                    savedColorPresets={colorPresets}
-                    onCreateColorPreset={handleCreateColorPreset}
-                    onDeleteColorPreset={handleDeleteColorPreset}
-                  />
+                  <div ref={createAvatarPickerRef} className={styles.createAvatarField}>
+                    <button
+                      type="button"
+                      className={styles.createAvatarTrigger}
+                      onClick={() => setCreateAvatarOpen((open) => !open)}
+                      aria-expanded={createAvatarOpen}
+                      aria-label="Customize avatar"
+                    >
+                      <AgentAvatar
+                        icon={form.avatar.icon}
+                        bgColor={form.avatar.bgColor}
+                        logoColor={form.avatar.logoColor}
+                        size={40}
+                      />
+                      <div className={styles.createAvatarTriggerText}>
+                        <span className={styles.createAvatarTriggerTitle}>Customize avatar</span>
+                        <span className={styles.createAvatarTriggerHint}>
+                          Click to choose shape and colors
+                        </span>
+                      </div>
+                      <ChevronDown
+                        size={16}
+                        className={`${styles.createAvatarChevron} ${
+                          createAvatarOpen ? styles.createAvatarChevronOpen : ''
+                        }`}
+                      />
+                    </button>
+                    {createAvatarOpen && (
+                      <div className={styles.createAvatarPickerPanel}>
+                        <AgentAvatarPicker
+                          value={form.avatar}
+                          onChange={(avatar) => setForm((f) => ({ ...f, avatar }))}
+                          savedPresets={avatarPresets}
+                          onCreatePreset={handleCreateAvatarPreset}
+                          onRenamePreset={handleRenameAvatarPreset}
+                          onDeletePreset={handleDeleteAvatarPreset}
+                          savedColorPresets={colorPresets}
+                          onCreateColorPreset={handleCreateColorPreset}
+                          onDeleteColorPreset={handleDeleteColorPreset}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <Textarea
@@ -3475,10 +4656,103 @@ export function AgentsPage() {
                           ]
                             .filter(Boolean)
                             .join(' ')}
-                          onClick={() => setForm((f) => ({ ...f, preset: preset.id }))}
+                          onClick={() =>
+                            setForm((f) => ({
+                              ...f,
+                              preset: preset.id,
+                              presetParameters: filterPresetParameterValues(
+                                preset,
+                                f.presetParameters,
+                              ),
+                            }))
+                          }
                         >
                           <div className={styles.presetName}>{preset.name}</div>
                           <div className={styles.presetDescription}>{preset.description}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(selectedPreset?.parameters?.length ?? 0) > 0 && (
+                  <div>
+                    <div className={styles.fieldLabel}>Preset Setup</div>
+                    <div className={styles.modelOptionsRow}>
+                      {selectedPreset?.parameters?.map((parameter) => (
+                        <div key={parameter.key} className={styles.modelOptionField}>
+                          {parameter.type === 'directory' ? (
+                            <>
+                              <div className={styles.fieldLabel}>
+                                {parameter.label}
+                                {!parameter.required && (
+                                  <span className={styles.fieldHint}> (optional)</span>
+                                )}
+                              </div>
+                              <div
+                                className={[
+                                  styles.directoryPickerField,
+                                  formErrors[`presetParameters.${parameter.key}`]
+                                    ? styles.directoryPickerFieldError
+                                    : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' ')}
+                              >
+                                <div className={styles.directoryPickerValue}>
+                                  <Folder size={14} />
+                                  <span className={styles.directoryPickerValueText}>
+                                    {form.presetParameters[parameter.key]?.trim() ||
+                                      'Use current folder'}
+                                  </span>
+                                </div>
+                                <div className={styles.directoryPickerActions}>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => void handlePickPresetDirectory(parameter.key)}
+                                    disabled={pickingPresetDirectoryKey !== null}
+                                  >
+                                    <FolderOpen size={14} />
+                                    {pickingPresetDirectoryKey === parameter.key
+                                      ? 'Choosing...'
+                                      : 'Browse'}
+                                  </Button>
+                                  {!!form.presetParameters[parameter.key]?.trim() && (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => updatePresetParameterValue(parameter.key, '')}
+                                      disabled={pickingPresetDirectoryKey !== null}
+                                    >
+                                      Clear
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                              {formErrors[`presetParameters.${parameter.key}`] && (
+                                <div className={styles.directoryPickerError}>
+                                  {formErrors[`presetParameters.${parameter.key}`]}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <Input
+                              label={`${parameter.label}${parameter.required ? '' : ' (optional)'}`}
+                              placeholder={parameter.placeholder}
+                              value={form.presetParameters[parameter.key] ?? ''}
+                              onChange={(e) =>
+                                updatePresetParameterValue(parameter.key, e.target.value)
+                              }
+                              error={formErrors[`presetParameters.${parameter.key}`]}
+                              spellCheck={false}
+                            />
+                          )}
+                          {parameter.description && (
+                            <div className={styles.fieldHint}>{parameter.description}</div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -3613,9 +4887,10 @@ export function AgentsPage() {
                 </div>
 
                 <div>
-                  <div className={styles.fieldLabel}>Workspace API Key</div>
+                  <div className={styles.fieldLabel}>OpenWork API Key</div>
                   <div className={styles.fieldHint}>
-                    The agent uses this key to authenticate with your workspace — not a model provider key.
+                    The agent uses this key to authenticate with your workspace — not a model
+                    provider key.
                   </div>
                   <div className={styles.keyModeTabs}>
                     <button
@@ -4124,273 +5399,289 @@ export function AgentsPage() {
       )}
 
       {/* ── Skills Manager Modal (page-level) ── */}
-      {skillsManagerOpen && (() => {
-        const mgrActiveSkill = mgrSkills.find((s) => s.id === mgrActiveSkillId);
-        const mgrPathSegments = mgrFilePath === '/' ? [] : mgrFilePath.split('/').filter(Boolean);
-        const mgrSorted = [...mgrFiles].sort((a, b) => {
-          if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
+      {skillsManagerOpen &&
+        (() => {
+          const mgrActiveSkill = mgrSkills.find((s) => s.id === mgrActiveSkillId);
+          const mgrEditingSkill = mgrSkills.find((s) => s.id === mgrEditingId);
+          const mgrShowingCreateForm = mgrCreating;
+          const mgrShowingEditForm = Boolean(mgrEditingSkill);
+          const mgrHasDirtyForm = mgrIsFormDirty();
 
-        return (
-          <div className={styles.skillsMgrOverlay} onClick={() => setSkillsManagerOpen(false)}>
-            <div className={styles.skillsMgrModal} onClick={(e) => e.stopPropagation()}>
-              {/* Left sidebar: skill list */}
-              <div className={styles.skillsMgrSidebar}>
-                <div className={styles.skillsMgrSidebarHeader}>
-                  <span className={styles.skillsMgrSidebarTitle}>Skills</span>
-                  <Tooltip label="New skill">
-                    <button
-                      className={styles.skillsMgrNewBtn}
-                      onClick={() => {
-                        setMgrCreating(true);
-                        setMgrEditingId(null);
-                        setMgrFormName(''); setMgrFormDesc('');
-                        setTimeout(() => mgrNameRef.current?.focus(), 50);
-                      }}
-                    >
-                      <Plus size={14} />
-                    </button>
-                  </Tooltip>
-                </div>
-
-                <div className={styles.skillsMgrList}>
-                  {mgrCreating && (
-                    <div className={styles.skillsMgrInlineForm}>
-                      <div>
-                        <div className={styles.skillsMgrInlineLabel}>Name</div>
-                        <input
-                          ref={mgrNameRef}
-                          className={styles.skillsMgrInlineInput}
-                          type="text"
-                          placeholder="e.g. API Guidelines"
-                          value={mgrFormName}
-                          onChange={(e) => setMgrFormName(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter') void mgrCreateSkill(); if (e.key === 'Escape') setMgrCreating(false); }}
-                          maxLength={100}
-                        />
-                      </div>
-                      <div>
-                        <div className={styles.skillsMgrInlineLabel}>Description</div>
-                        <input
-                          className={styles.skillsMgrInlineInput}
-                          type="text"
-                          placeholder="One-line summary"
-                          value={mgrFormDesc}
-                          onChange={(e) => setMgrFormDesc(e.target.value)}
-                          maxLength={500}
-                        />
-                      </div>
-                      <div className={styles.skillsMgrInlineActions}>
-                        <button className={styles.skillsMgrCancelBtn} onClick={() => setMgrCreating(false)}>Cancel</button>
-                        <button className={styles.skillsMgrSaveBtn} onClick={() => void mgrCreateSkill()} disabled={!mgrFormName.trim() || mgrSaving}>
-                          {mgrSaving ? 'Saving...' : 'Create'}
-                        </button>
-                      </div>
+          return (
+            <div className={styles.skillsMgrOverlay} onClick={() => void closeSkillsManager()}>
+              <div className={styles.skillsMgrModal} onClick={(e) => e.stopPropagation()}>
+                {/* Left sidebar: skill list */}
+                <div className={styles.skillsMgrSidebar}>
+                  <div className={styles.skillsMgrSidebarHeader}>
+                    <div className={styles.skillsMgrSidebarHeaderText}>
+                      <span className={styles.skillsMgrSidebarTitle}>Skills</span>
+                      <p className={styles.skillsMgrSidebarSubtitle}>
+                        Reusable preset skills for agents
+                      </p>
                     </div>
-                  )}
+                    <Tooltip label="New skill">
+                      <button
+                        className={styles.skillsMgrNewBtn}
+                        onClick={() => void mgrHandleCreateRequest()}
+                        aria-label="Create skill"
+                      >
+                        <Plus size={14} />
+                      </button>
+                    </Tooltip>
+                  </div>
 
-                  {mgrLoading ? (
-                    <div className={styles.loadingState} style={{ padding: 'var(--space-4)' }}>Loading...</div>
-                  ) : mgrSkills.length === 0 && !mgrCreating ? (
-                    <div className={styles.skillsMgrEmpty}>
-                      <Blocks size={24} className={styles.skillsMgrEmptyIcon} />
-                      <p className={styles.skillsMgrEmptyTitle}>No skills yet</p>
-                      <p className={styles.skillsMgrEmptyDesc}>Create reusable instruction packages to attach to agents.</p>
-                    </div>
-                  ) : (
-                    mgrSkills.map((skill) => {
-                      if (mgrEditingId === skill.id) {
-                        return (
-                          <div key={skill.id} className={styles.skillsMgrInlineForm}>
-                            <div>
-                              <div className={styles.skillsMgrInlineLabel}>Name</div>
-                              <input className={styles.skillsMgrInlineInput} type="text" value={mgrFormName} onChange={(e) => setMgrFormName(e.target.value)} maxLength={100} autoFocus />
-                            </div>
-                            <div>
-                              <div className={styles.skillsMgrInlineLabel}>Description</div>
-                              <input className={styles.skillsMgrInlineInput} type="text" value={mgrFormDesc} onChange={(e) => setMgrFormDesc(e.target.value)} maxLength={500} />
-                            </div>
-                            <div className={styles.skillsMgrInlineActions}>
-                              <button className={styles.skillsMgrCancelBtn} onClick={() => setMgrEditingId(null)}>Cancel</button>
-                              <button className={styles.skillsMgrSaveBtn} onClick={() => void mgrUpdateSkill(skill.id)} disabled={!mgrFormName.trim() || mgrSaving}>
-                                {mgrSaving ? 'Saving...' : 'Save'}
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      }
-                      return (
+                  <div className={styles.skillsMgrList}>
+                    {mgrLoading ? (
+                      <div className={styles.loadingState} style={{ padding: 'var(--space-4)' }}>
+                        Loading...
+                      </div>
+                    ) : mgrSkills.length === 0 ? (
+                      <div className={styles.skillsMgrEmpty}>
+                        <Blocks size={24} className={styles.skillsMgrEmptyIcon} />
+                        <p className={styles.skillsMgrEmptyTitle}>No skills yet</p>
+                        <p className={styles.skillsMgrEmptyDesc}>
+                          Create reusable preset-library skills that agents can copy locally.
+                        </p>
+                      </div>
+                    ) : (
+                      mgrSkills.map((skill) => (
                         <div
                           key={skill.id}
-                          className={`${styles.skillsMgrItem} ${mgrActiveSkillId === skill.id ? styles.skillsMgrItemActive : ''}`}
-                          onClick={() => {
-                            setMgrActiveSkillId(skill.id);
-                            setMgrFilePath('/');
-                            setMgrEditingFile(null);
-                            setMgrCreatingFile(false);
-                            void mgrFetchFiles(skill.id, '/');
-                          }}
+                          className={`${styles.skillsMgrItem} ${mgrActiveSkillId === skill.id ? styles.skillsMgrItemActive : ''} ${mgrEditingId === skill.id ? styles.skillsMgrItemEditing : ''}`}
+                          onClick={() => void mgrHandleSelectSkill(skill.id)}
                         >
                           <div className={styles.skillsMgrItemIcon}>
                             <Blocks size={14} />
                           </div>
                           <div className={styles.skillsMgrItemInfo}>
                             <div className={styles.skillsMgrItemName}>{skill.name}</div>
-                            {skill.description && <div className={styles.skillsMgrItemDesc}>{skill.description}</div>}
+                            {skill.description && (
+                              <div className={styles.skillsMgrItemDesc}>{skill.description}</div>
+                            )}
+                          </div>
+                          <div
+                            className={styles.skillsMgrItemActions}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Tooltip label="Edit details">
+                              <button
+                                className={styles.skillsMgrItemEditBtn}
+                                onClick={() => void mgrHandleEditRequest(skill)}
+                                aria-label={`Edit ${skill.name}`}
+                              >
+                                <Pencil size={13} />
+                              </button>
+                            </Tooltip>
                           </div>
                         </div>
-                      );
-                    })
-                  )}
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Right panel: detail + files */}
+                <div className={styles.skillsMgrMain}>
+                  {/* ── Top bar (always visible) ── */}
+                  <div className={styles.skillsMgrTopBar}>
+                    {mgrShowingEditForm && mgrEditingSkill ? (
+                      <form
+                        className={styles.skillsMgrTopBarInner}
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void mgrUpdateSkill(mgrEditingSkill.id);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.preventDefault();
+                            void mgrAbandonFormIfConfirmed();
+                          }
+                        }}
+                      >
+                        <div className={styles.skillsMgrTopFields}>
+                          <input
+                            ref={mgrNameRef}
+                            className={styles.skillsMgrInlineInput}
+                            type="text"
+                            placeholder="Skill name"
+                            value={mgrFormName}
+                            onChange={(e) => setMgrFormName(e.target.value)}
+                            maxLength={100}
+                          />
+                          <input
+                            className={`${styles.skillsMgrInlineInput} ${styles.skillsMgrInlineInputSub}`}
+                            type="text"
+                            placeholder="Description (optional)"
+                            value={mgrFormDesc}
+                            onChange={(e) => setMgrFormDesc(e.target.value)}
+                            maxLength={500}
+                          />
+                        </div>
+                        {mgrFormError && (
+                          <div className={styles.skillsMgrInlineError}>{mgrFormError}</div>
+                        )}
+                        <div className={styles.skillsMgrTopActions}>
+                          <button
+                            type="button"
+                            className={styles.skillsMgrTopBtnGhost}
+                            onClick={() => void mgrAbandonFormIfConfirmed()}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className={styles.skillsMgrTopBtnPrimary}
+                            disabled={!mgrFormName.trim() || !mgrHasDirtyForm || mgrSaving}
+                          >
+                            {mgrSaving ? 'Saving...' : 'Save'}
+                          </button>
+                        </div>
+                      </form>
+                    ) : mgrShowingCreateForm ? (
+                      <form
+                        className={styles.skillsMgrTopBarInner}
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void mgrCreateSkill();
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.preventDefault();
+                            void mgrAbandonFormIfConfirmed();
+                          }
+                        }}
+                      >
+                        <div className={styles.skillsMgrTopFields}>
+                          <input
+                            ref={mgrNameRef}
+                            className={styles.skillsMgrInlineInput}
+                            type="text"
+                            placeholder="Skill name"
+                            value={mgrFormName}
+                            onChange={(e) => setMgrFormName(e.target.value)}
+                            maxLength={100}
+                          />
+                          <input
+                            className={`${styles.skillsMgrInlineInput} ${styles.skillsMgrInlineInputSub}`}
+                            type="text"
+                            placeholder="Description (optional)"
+                            value={mgrFormDesc}
+                            onChange={(e) => setMgrFormDesc(e.target.value)}
+                            maxLength={500}
+                          />
+                        </div>
+                        {mgrFormError && (
+                          <div className={styles.skillsMgrInlineError}>{mgrFormError}</div>
+                        )}
+                        <div className={styles.skillsMgrTopActions}>
+                          <button
+                            type="button"
+                            className={styles.skillsMgrTopBtnGhost}
+                            onClick={() => void mgrAbandonFormIfConfirmed()}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className={styles.skillsMgrTopBtnPrimary}
+                            disabled={!mgrFormName.trim() || mgrSaving}
+                          >
+                            {mgrSaving ? 'Creating...' : 'Create'}
+                          </button>
+                        </div>
+                      </form>
+                    ) : mgrActiveSkill ? (
+                      <div className={styles.skillsMgrTopBarInner}>
+                        <div className={styles.skillsMgrTopIdentity}>
+                          <div className={styles.skillsMgrTopIcon}>
+                            <Blocks size={16} />
+                          </div>
+                          <div className={styles.skillsMgrTopMeta}>
+                            <span className={styles.skillsMgrTopName}>
+                              {mgrActiveSkill.name}
+                            </span>
+                            {mgrActiveSkill.description && (
+                              <span className={styles.skillsMgrTopDesc}>
+                                {mgrActiveSkill.description}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className={styles.skillsMgrTopActions}>
+                          <Tooltip label="Edit">
+                            <button
+                              className={styles.skillsMgrTopBtnIcon}
+                              onClick={() => void mgrHandleEditRequest(mgrActiveSkill)}
+                              aria-label={`Edit ${mgrActiveSkill.name}`}
+                            >
+                              <Pencil size={14} />
+                            </button>
+                          </Tooltip>
+                          <Tooltip label="Delete">
+                            <button
+                              className={`${styles.skillsMgrTopBtnIcon} ${styles.skillsMgrTopBtnDanger}`}
+                              onClick={() => void mgrDeleteSkill(mgrActiveSkill.id)}
+                              aria-label={`Delete ${mgrActiveSkill.name}`}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className={styles.skillsMgrTopBarInner}>
+                        <span className={styles.skillsMgrTopLabel}>Skills Manager</span>
+                      </div>
+                    )}
+                    <button
+                      className={styles.skillsMgrClose}
+                      onClick={() => void closeSkillsManager()}
+                      aria-label="Close skills manager"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+
+                  {/* ── Body ── */}
+                  <div className={styles.skillsMgrMainBody}>
+                    {mgrActiveSkillId && mgrActiveSkill ? (
+                      <div className={styles.skillsMgrFileList}>
+                        <FileBrowser
+                          key={mgrActiveSkill.id}
+                          endpoints={mgrFileBrowserEndpoints}
+                          rootLabel="Files"
+                          rootIcon={Folder}
+                        />
+                      </div>
+                    ) : (
+                      <div className={styles.skillsMgrPlaceholder}>
+                        <Blocks
+                          size={36}
+                          strokeWidth={1.2}
+                          className={styles.skillsMgrPlaceholderIcon}
+                        />
+                        <p className={styles.skillsMgrPlaceholderText}>
+                          {mgrShowingCreateForm
+                            ? 'Save the skill to start adding files'
+                            : 'Select a skill to manage its files'}
+                        </p>
+                        {!mgrShowingCreateForm && (
+                          <button
+                            className={styles.skillsMgrPlaceholderBtn}
+                            onClick={() => void mgrHandleCreateRequest()}
+                          >
+                            <Plus size={14} />
+                            New skill
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-
-              {/* Right panel: detail + files */}
-              <div className={styles.skillsMgrMain}>
-                {mgrActiveSkillId && mgrActiveSkill ? (
-                  <>
-                    {/* File editor view */}
-                    {mgrEditingFile ? (
-                      <>
-                        <div className={styles.skillsMgrEditorHeader}>
-                          <button className={styles.skillsMgrBackBtn} onClick={() => setMgrEditingFile(null)}>
-                            <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
-                            Back
-                          </button>
-                          <span className={styles.skillsMgrEditorPath}>{mgrEditingFile.path}</span>
-                          <button
-                            className={styles.skillsMgrEditorSaveBtn}
-                            onClick={() => void mgrSaveFile()}
-                            disabled={mgrFileSaving || mgrEditContent === mgrEditingFile.content}
-                          >
-                            <Save size={13} />
-                            {mgrFileSaving ? 'Saving...' : 'Save'}
-                          </button>
-                          <button className={styles.skillsMgrClose} onClick={() => setSkillsManagerOpen(false)}>
-                            <X size={16} />
-                          </button>
-                        </div>
-                        <textarea
-                          className={styles.skillsMgrEditor}
-                          value={mgrEditContent}
-                          onChange={(e) => setMgrEditContent(e.target.value)}
-                          spellCheck={false}
-                        />
-                      </>
-                    ) : mgrCreatingFile ? (
-                      <>
-                        <div className={styles.skillsMgrEditorHeader}>
-                          <button className={styles.skillsMgrBackBtn} onClick={() => { setMgrCreatingFile(false); setMgrNewFileName(''); setMgrNewFileContent(''); }}>
-                            <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
-                            Back
-                          </button>
-                          <span className={styles.skillsMgrEditorPath}>New file in {mgrActiveSkill.name}</span>
-                          <button className={styles.skillsMgrClose} onClick={() => setSkillsManagerOpen(false)}>
-                            <X size={16} />
-                          </button>
-                        </div>
-                        <div className={styles.skillsMgrNewFileForm}>
-                          <input
-                            className={styles.skillsMgrNewFileInput}
-                            type="text"
-                            placeholder="filename.md"
-                            value={mgrNewFileName}
-                            onChange={(e) => setMgrNewFileName(e.target.value)}
-                            autoFocus
-                          />
-                          <textarea
-                            className={styles.skillsMgrEditor}
-                            value={mgrNewFileContent}
-                            onChange={(e) => setMgrNewFileContent(e.target.value)}
-                            placeholder="File content..."
-                            spellCheck={false}
-                          />
-                          <div className={styles.skillsMgrNewFileActions}>
-                            <button className={styles.skillsMgrCancelBtn} onClick={() => { setMgrCreatingFile(false); setMgrNewFileName(''); setMgrNewFileContent(''); }}>
-                              Cancel
-                            </button>
-                            <button
-                              className={styles.skillsMgrSaveBtn}
-                              onClick={() => void mgrCreateFile()}
-                              disabled={mgrFileSaving || !mgrNewFileName.trim()}
-                            >
-                              {mgrFileSaving ? 'Creating...' : 'Create file'}
-                            </button>
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        {/* Skill detail header */}
-                        <div className={styles.skillsMgrMainHeader}>
-                          <span className={styles.skillsMgrMainTitle}>{mgrActiveSkill.name}</span>
-                          <div className={styles.skillsMgrActions}>
-                            <Tooltip label="Rename skill">
-                              <button className={styles.skillsMgrActionBtnIcon} onClick={() => { setMgrEditingId(mgrActiveSkillId); setMgrCreating(false); setMgrFormName(mgrActiveSkill.name); setMgrFormDesc(mgrActiveSkill.description); }}>
-                                <Pencil size={14} />
-                              </button>
-                            </Tooltip>
-                            <Tooltip label="Push latest files to all agents">
-                              <button className={styles.skillsMgrActionBtn} onClick={() => void mgrResyncSkill(mgrActiveSkillId)}>
-                                <RefreshCw size={12} />
-                                Resync
-                              </button>
-                            </Tooltip>
-                            <Tooltip label="Delete skill">
-                              <button className={`${styles.skillsMgrActionBtnIcon} ${styles.skillsMgrActionBtnDanger}`} onClick={() => void mgrDeleteSkill(mgrActiveSkillId)}>
-                                <Trash2 size={14} />
-                              </button>
-                            </Tooltip>
-                          </div>
-                          <button className={styles.skillsMgrClose} onClick={() => setSkillsManagerOpen(false)}>
-                            <X size={16} />
-                          </button>
-                        </div>
-                        {mgrActiveSkill.description && (
-                          <div className={styles.skillsMgrMainDesc}>{mgrActiveSkill.description}</div>
-                        )}
-
-                        <div className={styles.skillsMgrFileList}>
-                          <FileBrowser
-                            endpoints={{
-                              list: (dirPath: string) => `/skills/${mgrActiveSkillId}/files?path=${encodeURIComponent(dirPath)}`,
-                              createFolder: `/skills/${mgrActiveSkillId}/files/folders`,
-                              upload: `/skills/${mgrActiveSkillId}/files/upload`,
-                              download: (filePath: string) => `/skills/${mgrActiveSkillId}/files/download?path=${encodeURIComponent(filePath)}`,
-                              delete: (entryPath: string) => `/skills/${mgrActiveSkillId}/files?path=${encodeURIComponent(entryPath)}`,
-                              reveal: `/skills/${mgrActiveSkillId}/files/reveal`,
-                            }}
-                            rootLabel="Files"
-                            rootIcon={Folder}
-                          />
-                        </div>
-                      </>
-                    )}
-                  </>
-                ) : (
-                  /* No skill selected placeholder */
-                  <>
-                    <div className={styles.skillsMgrMainHeader}>
-                      <span className={styles.skillsMgrMainTitle}>Skills Manager</span>
-                      <button className={styles.skillsMgrClose} onClick={() => setSkillsManagerOpen(false)}>
-                        <X size={16} />
-                      </button>
-                    </div>
-                    <div className={styles.skillsMgrPlaceholder}>
-                      <Blocks size={40} strokeWidth={1} className={styles.skillsMgrPlaceholderIcon} />
-                      <p className={styles.skillsMgrPlaceholderText}>Select a skill to manage its files</p>
-                      <p className={styles.skillsMgrPlaceholderHint}>
-                        Skills are reusable instruction packages. When attached to an agent, the skill folder is copied into the agent's workspace.
-                      </p>
-                    </div>
-                  </>
-                )}
-              </div>
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
+      {confirmDialog}
     </div>
   );
 }

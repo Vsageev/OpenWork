@@ -9,8 +9,7 @@
     "build": "tsc && rm -rf dist/presets && cp -r src/presets dist/presets",
     "start": "node dist/index.js",
     "lint": "eslint src/",
-    "test": "node --import tsx --test test/**/*.test.ts",
-    "typecheck": "tsc --noEmit",
+"typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "db:bootstrap": "node --import tsx src/db/bootstrap.ts"
   },

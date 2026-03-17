@@ -119,7 +119,7 @@ export function renderChatWidget(
   // Powered by
   const powered = document.createElement('div');
   powered.className = 'ws-chat-powered';
-  powered.textContent = 'Powered by Workspace';
+  powered.textContent = 'Powered by OpenWork';
   chatWindow.appendChild(powered);
 
   // --- Pre-chat form setup ---

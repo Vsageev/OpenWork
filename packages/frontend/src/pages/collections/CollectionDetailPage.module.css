@@ -1416,10 +1416,6 @@
 }
 
 .savedViewsDropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 50;
   min-width: 220px;
   background: var(--color-card);
   border: 1px solid var(--color-border);

@@ -334,6 +334,10 @@ button.colName:hover .fileName {
   justify-content: flex-end;
 }
 
+.toolbarAnchor {
+  display: inline-flex;
+}
+
 .iconFolder {
   color: var(--color-warning);
   flex-shrink: 0;
@@ -648,10 +652,6 @@ button.colName:hover .fileName {
 }
 
 .rowMenu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 50;
   min-width: 160px;
   background: var(--color-card);
   border: 1px solid var(--color-border);

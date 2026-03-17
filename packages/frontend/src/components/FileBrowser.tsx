@@ -3,6 +3,7 @@ import {
   Folder,
   File,
   Upload,
+  FolderInput,
   FolderPlus,
   Trash2,
   Download,
@@ -23,7 +24,7 @@ import {
   MoreVertical,
   type LucideIcon,
 } from 'lucide-react';
-import { Button, Input, Tooltip } from '../ui';
+import { AnchoredOverlay, Button, Input, Tooltip } from '../ui';
 import { api, apiUpload, ApiError } from '../lib/api';
 import { toast } from '../stores/toast';
 import { useConfirm } from '../hooks/useConfirm';
@@ -59,6 +60,10 @@ export interface FileBrowserEndpoints {
   reveal: string;
   /** PATCH — body: { path, newName }. Omit to disable rename. */
   rename?: string;
+  /** GET text content for previews that need authenticated loading: returns { content }. */
+  readTextContent?: (filePath: string) => string;
+  /** PUT — body: { path, content }. Enables editing in the preview modal when supported. */
+  writeTextContent?: string;
 }
 
 export interface FileBrowserProps {
@@ -70,9 +75,61 @@ export interface FileBrowserProps {
   showMultiSelect?: boolean;
   /** Show rename action on rows */
   showRename?: boolean;
+  /** Add a folder-import option to the Upload control. */
+  showUploadFolder?: boolean;
+  /** Label for the folder-import action inside Upload. */
+  uploadFolderLabel?: string;
+  /** Label for the built-in empty-folder action. */
+  createFolderLabel?: string;
+  /** Placeholder for the built-in empty-folder input. */
+  createFolderPlaceholder?: string;
+  /** Override the built-in folder button action. Receives the current directory path. */
+  onCreateFolderClick?: (context: { currentPath: string }) => void;
   /** Extra toolbar buttons rendered after Upload/Folder */
-  extraToolbarButtons?: React.ReactNode;
+  extraToolbarButtons?: React.ReactNode | ((context: { currentPath: string }) => React.ReactNode);
 }
+
+interface RowMenuState {
+  entryPath: string;
+  anchorElement: HTMLButtonElement | null;
+  anchorRect: DOMRect | null;
+}
+
+type DirectoryInputProps = React.InputHTMLAttributes<HTMLInputElement> & {
+  webkitdirectory?: string;
+  directory?: string;
+};
+
+type DirectoryPickerEntry =
+  | {
+    kind: 'directory';
+    name: string;
+    values: () => AsyncIterable<DirectoryPickerEntry>;
+  }
+  | {
+    kind: 'file';
+    name: string;
+    getFile: () => Promise<globalThis.File>;
+  };
+
+type DirectoryPickerHandle = Extract<DirectoryPickerEntry, { kind: 'directory' }>;
+
+type UploadItem = {
+  file: globalThis.File;
+  relativeDir: string;
+};
+
+type PickedDirectorySelection = {
+  emptyDirectories: string[];
+  items: UploadItem[];
+  skippedCount: number;
+};
+
+const IGNORED_UPLOAD_FILE_NAMES = new Set([
+  '.DS_Store',
+  'Thumbs.db',
+  'desktop.ini',
+]);
 
 /* ─── Helpers ─── */
 
@@ -88,6 +145,45 @@ function getEntryIcon(entry: FileEntry) {
     : getFileIcon(entry);
 }
 
+function normalizeRelativeDir(relativeDir: string) {
+  return relativeDir
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .join('/');
+}
+
+function shouldIgnoreUploadPath(fileName: string, relativeDir = '') {
+  if (fileName.startsWith('._')) return true;
+  if (IGNORED_UPLOAD_FILE_NAMES.has(fileName)) return true;
+
+  return normalizeRelativeDir(relativeDir)
+    .split('/')
+    .filter(Boolean)
+    .some((segment) => segment === '__MACOSX');
+}
+
+function shouldIgnoreUploadFile(file: globalThis.File, relativeDir = '') {
+  const webkitRelativeDir = file.webkitRelativePath
+    ?.replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .slice(0, -1)
+    .join('/');
+
+  return shouldIgnoreUploadPath(file.name, relativeDir || webkitRelativeDir || '');
+}
+
+function isDirectoryPickerAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function isDirectoryPickerSupported(
+  currentWindow: Window,
+): currentWindow is Window & { showDirectoryPicker: () => Promise<DirectoryPickerHandle> } {
+  return typeof (currentWindow as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
+}
+
 /* ─── Component ─── */
 
 export function FileBrowser({
@@ -96,6 +192,11 @@ export function FileBrowser({
   rootIcon: RootIcon,
   showMultiSelect = false,
   showRename = false,
+  showUploadFolder = false,
+  uploadFolderLabel = 'Add folder',
+  createFolderLabel = 'Folder',
+  createFolderPlaceholder = 'Folder name',
+  onCreateFolderClick,
   extraToolbarButtons,
 }: FileBrowserProps) {
   const [currentPath, setCurrentPath] = useState('/');
@@ -129,10 +230,14 @@ export function FileBrowser({
 
   // Upload / drag-and-drop
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
+  const uploadMenuAnchorRef = useRef<HTMLSpanElement>(null);
+  const uploadMenuDropdownRef = useRef<HTMLDivElement>(null);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
 
   const fetchEntries = useCallback(async (dirPath: string) => {
     setLoading(true);
@@ -180,19 +285,151 @@ export function FileBrowser({
     }
   }
 
-  async function uploadFiles(files: globalThis.File[]) {
-    if (files.length === 0) return;
+  function resetUploadInputs() {
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (folderInputRef.current) folderInputRef.current.value = '';
+  }
+
+  function resolveTargetPath(relativeDir: string) {
+    const normalizedRelativeDir = normalizeRelativeDir(relativeDir);
+    if (!normalizedRelativeDir) return currentPath;
+    return currentPath === '/'
+      ? `/${normalizedRelativeDir}`
+      : `${currentPath}/${normalizedRelativeDir}`;
+  }
+
+  function buildUploadItems(files: globalThis.File[], options?: { preserveRelativePaths?: boolean }) {
+    return files.map<UploadItem>((file) => ({
+      file,
+      relativeDir: options?.preserveRelativePaths
+        ? normalizeRelativeDir(
+          file.webkitRelativePath
+            ?.replace(/\\/g, '/')
+            .split('/')
+            .filter(Boolean)
+            .slice(0, -1)
+            .join('/') ?? '',
+        )
+        : '',
+    }));
+  }
+
+  async function collectPickedDirectorySelection(handle: DirectoryPickerHandle): Promise<PickedDirectorySelection> {
+    const items: UploadItem[] = [];
+    const emptyDirectories: string[] = [];
+    let skippedCount = 0;
+
+    async function walkDirectory(
+      directoryHandle: DirectoryPickerHandle,
+      pathSegments: string[],
+    ): Promise<boolean> {
+      let hasFilesInSubtree = false;
+
+      for await (const entry of directoryHandle.values()) {
+        if (entry.kind === 'directory') {
+          if (entry.name === '__MACOSX') {
+            continue;
+          }
+
+          const childHasFiles = await walkDirectory(entry, [...pathSegments, entry.name]);
+          if (childHasFiles) {
+            hasFilesInSubtree = true;
+          }
+          continue;
+        }
+
+        const relativeDir = normalizeRelativeDir(pathSegments.join('/'));
+        if (shouldIgnoreUploadPath(entry.name, relativeDir)) {
+          skippedCount++;
+          continue;
+        }
+
+        items.push({
+          file: await entry.getFile(),
+          relativeDir,
+        });
+        hasFilesInSubtree = true;
+      }
+
+      if (!hasFilesInSubtree) {
+        emptyDirectories.push(normalizeRelativeDir(pathSegments.join('/')));
+      }
+
+      return hasFilesInSubtree;
+    }
+
+    await walkDirectory(handle, [handle.name]);
+    return { emptyDirectories, items, skippedCount };
+  }
+
+  async function ensureEmptyDirectories(relativeDirs: string[]) {
+    const sortedUniqueDirs = Array.from(new Set(relativeDirs.filter(Boolean)))
+      .sort((a, b) => a.split('/').length - b.split('/').length);
+
+    let created = 0;
+    let existing = 0;
+    let failed = 0;
+
+    for (const relativeDir of sortedUniqueDirs) {
+      const segments = normalizeRelativeDir(relativeDir).split('/').filter(Boolean);
+      const name = segments.pop();
+      if (!name) continue;
+
+      const parentRelativeDir = segments.join('/');
+
+      try {
+        await api(endpoints.createFolder, {
+          method: 'POST',
+          body: JSON.stringify({
+            path: resolveTargetPath(parentRelativeDir),
+            name,
+          }),
+        });
+        created++;
+      } catch (err) {
+        if (err instanceof ApiError && err.message === 'A file or folder with this name already exists') {
+          existing++;
+          continue;
+        }
+        failed++;
+      }
+    }
+
+    return { created, existing, failed };
+  }
+
+  async function uploadFiles(
+    items: UploadItem[],
+    options?: { emptyDirectories?: string[]; skippedCount?: number },
+  ) {
+    const filteredItems = items.filter((item) => !shouldIgnoreUploadFile(item.file, item.relativeDir));
+    const skippedCount = (options?.skippedCount ?? 0) + (items.length - filteredItems.length);
+    const emptyDirectories = options?.emptyDirectories ?? [];
+
+    if (filteredItems.length === 0 && emptyDirectories.length === 0) {
+      resetUploadInputs();
+      if (skippedCount > 0) {
+        toast.warning('Skipped hidden system files');
+      }
+      return;
+    }
+
     setUploading(true);
-    const total = files.length;
+    const {
+      created: createdEmptyDirectories,
+      existing: existingEmptyDirectories,
+      failed: failedEmptyDirectories,
+    } = await ensureEmptyDirectories(emptyDirectories);
+    const total = filteredItems.length;
     let done = 0;
     let failCount = 0;
     if (total > 1) setUploadProgress({ done: 0, total });
 
-    for (const file of files) {
+    for (const item of filteredItems) {
       try {
         const formData = new FormData();
-        formData.append('path', currentPath);
-        formData.append('file', file);
+        formData.append('path', resolveTargetPath(item.relativeDir));
+        formData.append('file', item.file);
         await apiUpload(endpoints.upload, formData);
         done++;
         if (total > 1) setUploadProgress({ done, total });
@@ -205,22 +442,90 @@ export function FileBrowser({
 
     await fetchEntries(currentPath);
 
-    if (failCount === 0) {
-      toast.success(total === 1 ? 'File uploaded' : `${total} files uploaded`);
-    } else if (failCount < total) {
-      toast.warning(`${total - failCount} of ${total} files uploaded — ${failCount} failed`);
+    if (failCount === 0 && failedEmptyDirectories === 0) {
+      let successMessage = '';
+      if (total > 0 && createdEmptyDirectories > 0) {
+        successMessage = `${total === 1 ? '1 file uploaded' : `${total} files uploaded`} and ${createdEmptyDirectories} empty ${createdEmptyDirectories === 1 ? 'folder' : 'folders'} added`;
+      } else if (total > 0) {
+        successMessage = total === 1 ? 'File uploaded' : `${total} files uploaded`;
+      } else if (existingEmptyDirectories > 0) {
+        successMessage = existingEmptyDirectories === 1
+          ? 'Folder already exists'
+          : 'Folder structure already exists';
+      } else {
+        successMessage = createdEmptyDirectories === 1 ? 'Empty folder added' : `${createdEmptyDirectories} empty folders added`;
+      }
+
+      toast.success(
+        skippedCount > 0
+          ? `${successMessage} — skipped ${skippedCount} system file${skippedCount === 1 ? '' : 's'}`
+          : successMessage,
+      );
+    } else if (failCount < total || (total === 0 && createdEmptyDirectories > 0)) {
+      const parts = [];
+      if (total > 0) {
+        parts.push(`${total - failCount} of ${total} files uploaded`);
+      }
+      if (createdEmptyDirectories > 0) {
+        parts.push(`${createdEmptyDirectories} empty ${createdEmptyDirectories === 1 ? 'folder' : 'folders'} added`);
+      }
+      if (existingEmptyDirectories > 0 && total === 0) {
+        parts.push(existingEmptyDirectories === 1 ? 'folder already existed' : 'folder structure already existed');
+      }
+      const failures = [];
+      if (failCount > 0) {
+        failures.push(`${failCount} file${failCount === 1 ? '' : 's'} failed`);
+      }
+      if (failedEmptyDirectories > 0) {
+        failures.push(`${failedEmptyDirectories} folder${failedEmptyDirectories === 1 ? '' : 's'} failed`);
+      }
+      toast.warning(`${parts.join(', ')}${failures.length > 0 ? ` — ${failures.join(', ')}` : ''}`);
     } else {
-      toast.error('Failed to upload files');
+      toast.error(total > 0 ? 'Failed to upload files' : 'Failed to add empty folders');
     }
 
     setUploading(false);
     setUploadProgress(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    resetUploadInputs();
   }
 
   function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
-    if (files && files.length > 0) uploadFiles(Array.from(files));
+    if (files && files.length > 0) uploadFiles(buildUploadItems(Array.from(files)));
+  }
+
+  function handleFolderUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      uploadFiles(buildUploadItems(Array.from(files), { preserveRelativePaths: true }));
+    }
+  }
+
+  function openFileUploadPicker() {
+    setUploadMenuOpen(false);
+    fileInputRef.current?.click();
+  }
+
+  async function openFolderUploadPicker() {
+    setUploadMenuOpen(false);
+    if (isDirectoryPickerSupported(window)) {
+      try {
+        const handle = await window.showDirectoryPicker();
+        const selection = await collectPickedDirectorySelection(handle);
+        await uploadFiles(selection.items, {
+          emptyDirectories: selection.emptyDirectories,
+          skippedCount: selection.skippedCount,
+        });
+      } catch (error) {
+        if (isDirectoryPickerAbortError(error)) {
+          return;
+        }
+        toast.error(error instanceof Error ? error.message : 'Failed to add folder');
+      }
+      return;
+    }
+
+    folderInputRef.current?.click();
   }
 
   // Reset drag state if drag ends outside the window
@@ -237,13 +542,71 @@ export function FileBrowser({
     };
   }, []);
 
+  useEffect(() => {
+    if (!uploadMenuOpen) return;
+    const ownerDocument = uploadMenuAnchorRef.current?.ownerDocument ?? document;
+
+    function isWithinMenu(target: EventTarget | null, event: Event) {
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      if (uploadMenuAnchorRef.current && path.includes(uploadMenuAnchorRef.current)) return true;
+      if (uploadMenuDropdownRef.current && path.includes(uploadMenuDropdownRef.current)) return true;
+      const node = target as Node | null;
+      return Boolean(
+        node && (
+          uploadMenuAnchorRef.current?.contains(node) ||
+          uploadMenuDropdownRef.current?.contains(node)
+        ),
+      );
+    }
+
+    function handlePointerDown(e: PointerEvent) {
+      if (!isWithinMenu(e.target, e)) {
+        setUploadMenuOpen(false);
+      }
+    }
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setUploadMenuOpen(false);
+      }
+    }
+
+    const timer = window.setTimeout(() => {
+      ownerDocument.addEventListener('pointerdown', handlePointerDown);
+      ownerDocument.addEventListener('keydown', handleKeyDown);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      ownerDocument.removeEventListener('pointerdown', handlePointerDown);
+      ownerDocument.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [uploadMenuOpen]);
+
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     dragCounter.current = 0;
     setDragOver(false);
     const files = e.dataTransfer.files;
-    if (files && files.length > 0) uploadFiles(Array.from(files));
+    if (files && files.length > 0) uploadFiles(buildUploadItems(Array.from(files)));
   }
+
+  const previewLoadTextContent = previewEntry && endpoints.readTextContent
+    ? async () => {
+      const data = await api<{ content: string }>(endpoints.readTextContent!(previewEntry.path));
+      return data.content;
+    }
+    : undefined;
+  const previewSaveTextContent = previewEntry && endpoints.writeTextContent
+    ? async (content: string) => {
+      await api(endpoints.writeTextContent!, {
+        method: 'PUT',
+        body: JSON.stringify({ path: previewEntry.path, content }),
+      });
+      toast.success('File saved');
+      await fetchEntries(currentPath);
+    }
+    : undefined;
 
   function handleDragEnter(e: React.DragEvent) {
     e.preventDefault();
@@ -457,24 +820,91 @@ export function FileBrowser({
   }, []);
 
   // Compact row dropdown menu
-  const [menuEntryPath, setMenuEntryPath] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const [rowMenuState, setRowMenuState] = useState<RowMenuState | null>(null);
+  const menuDropdownRef = useRef<HTMLDivElement>(null);
+  const menuEntryPath = rowMenuState?.entryPath ?? null;
+  const menuAnchorElement = rowMenuState?.anchorElement ?? null;
+  const menuAnchorRect = rowMenuState?.anchorRect ?? null;
 
-  // Close dropdown on outside click
+  function closeRowMenu() {
+    setRowMenuState(null);
+  }
+
+  function toggleRowMenu(entryPath: string, anchorElement: HTMLButtonElement) {
+    if (menuEntryPath === entryPath) {
+      closeRowMenu();
+      return;
+    }
+    setRowMenuState({
+      entryPath,
+      anchorElement,
+      anchorRect: anchorElement.getBoundingClientRect(),
+    });
+  }
+
+  // Close dropdown on outside press / Escape
   useEffect(() => {
     if (!menuEntryPath) return;
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuEntryPath(null);
+    const ownerDocument = menuAnchorElement?.ownerDocument ?? document;
+
+    function isWithinMenu(target: EventTarget | null, event: Event) {
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      if (menuAnchorElement && path.includes(menuAnchorElement)) return true;
+      if (menuDropdownRef.current && path.includes(menuDropdownRef.current)) return true;
+      const node = target as Node | null;
+      return Boolean(
+        node && (
+          menuAnchorElement?.contains(node) ||
+          menuDropdownRef.current?.contains(node)
+        ),
+      );
+    }
+
+    function handlePointerDown(e: PointerEvent) {
+      if (!isWithinMenu(e.target, e)) {
+        closeRowMenu();
       }
     }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [menuEntryPath]);
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') closeRowMenu();
+    }
+
+    const timer = window.setTimeout(() => {
+      ownerDocument.addEventListener('pointerdown', handlePointerDown);
+      ownerDocument.addEventListener('keydown', handleKeyDown);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      ownerDocument.removeEventListener('pointerdown', handlePointerDown);
+      ownerDocument.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [menuAnchorElement, menuEntryPath]);
 
   const parentPath = currentPath === '/'
     ? null
     : '/' + currentPath.split('/').filter(Boolean).slice(0, -1).join('/');
+  const resolvedExtraToolbarButtons =
+    typeof extraToolbarButtons === 'function'
+      ? extraToolbarButtons({ currentPath })
+      : extraToolbarButtons;
+  const handleCreateFolderButtonClick = () => {
+    if (onCreateFolderClick) {
+      onCreateFolderClick({ currentPath });
+      return;
+    }
+    setShowNewFolder(!showNewFolder);
+    setFolderName('');
+  };
+  const directoryInputProps: DirectoryInputProps = {
+    directory: '',
+    webkitdirectory: '',
+  };
+  const uploadButtonLabel = uploading
+    ? (uploadProgress ? `${uploadProgress.done}/${uploadProgress.total}` : 'Uploading...')
+    : 'Upload';
+  const shouldShowUploadMenu = showUploadFolder;
 
   return (
     <div ref={containerRef} className={`${styles.container} ${isCompact ? styles.compact : ''}`}>
@@ -484,6 +914,14 @@ export function FileBrowser({
         multiple
         className={styles.hiddenInput}
         onChange={handleUpload}
+      />
+      <input
+        {...directoryInputProps}
+        ref={folderInputRef}
+        type="file"
+        multiple
+        className={styles.hiddenInput}
+        onChange={handleFolderUpload}
       />
 
       {/* Breadcrumb */}
@@ -592,23 +1030,24 @@ export function FileBrowser({
               {isCompact ? (
                 <>
                   <Tooltip label={uploading ? 'Uploading...' : 'Upload'}>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading}
-                      aria-label="Upload"
-                    >
-                      <Upload size={14} />
-                    </button>
+                    <span ref={uploadMenuAnchorRef} className={styles.toolbarAnchor}>
+                      <button
+                        className={styles.iconBtn}
+                        onClick={() => shouldShowUploadMenu ? setUploadMenuOpen((open) => !open) : openFileUploadPicker()}
+                        disabled={uploading}
+                        aria-label="Upload"
+                        aria-expanded={shouldShowUploadMenu ? uploadMenuOpen : undefined}
+                        aria-haspopup={shouldShowUploadMenu ? 'menu' : undefined}
+                      >
+                        <Upload size={14} />
+                      </button>
+                    </span>
                   </Tooltip>
-                  <Tooltip label="New folder">
+                  <Tooltip label={createFolderLabel}>
                     <button
                       className={styles.iconBtn}
-                      onClick={() => {
-                        setShowNewFolder(!showNewFolder);
-                        setFolderName('');
-                      }}
-                      aria-label="New folder"
+                      onClick={handleCreateFolderButtonClick}
+                      aria-label={createFolderLabel}
                     >
                       <FolderPlus size={14} />
                     </button>
@@ -616,26 +1055,47 @@ export function FileBrowser({
                 </>
               ) : (
                 <>
-                  <Button size="sm" variant="ghost" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-                    <Upload size={14} />
-                    {uploading
-                      ? (uploadProgress ? `${uploadProgress.done}/${uploadProgress.total}` : 'Uploading...')
-                      : 'Upload'}
-                  </Button>
+                  <span ref={uploadMenuAnchorRef} className={styles.toolbarAnchor}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => shouldShowUploadMenu ? setUploadMenuOpen((open) => !open) : openFileUploadPicker()}
+                      disabled={uploading}
+                      aria-expanded={shouldShowUploadMenu ? uploadMenuOpen : undefined}
+                      aria-haspopup={shouldShowUploadMenu ? 'menu' : undefined}
+                    >
+                      <Upload size={14} />
+                      {uploadButtonLabel}
+                    </Button>
+                  </span>
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => {
-                      setShowNewFolder(!showNewFolder);
-                      setFolderName('');
-                    }}
+                    onClick={handleCreateFolderButtonClick}
                   >
                     <FolderPlus size={14} />
-                    Folder
+                    {createFolderLabel}
                   </Button>
                 </>
               )}
-              {extraToolbarButtons}
+              {resolvedExtraToolbarButtons}
+              {shouldShowUploadMenu && uploadMenuOpen && (
+                <AnchoredOverlay
+                  ref={uploadMenuDropdownRef}
+                  anchorElement={uploadMenuAnchorRef.current}
+                  placement="bottom-end"
+                  className={styles.rowMenu}
+                >
+                  <button className={styles.rowMenuItem} onClick={openFileUploadPicker}>
+                    <Upload size={14} />
+                    Upload files
+                  </button>
+                  <button className={styles.rowMenuItem} onClick={openFolderUploadPicker}>
+                    <FolderInput size={14} />
+                    {uploadFolderLabel}
+                  </button>
+                </AnchoredOverlay>
+              )}
             </span>
           </div>
           {showNewFolder && (
@@ -645,7 +1105,7 @@ export function FileBrowser({
               </div>
               <Input
                 label=""
-                placeholder="Folder name"
+                placeholder={createFolderPlaceholder}
                 value={folderName}
                 onChange={(e) => setFolderName(e.target.value)}
                 onKeyDown={(e) => {
@@ -753,41 +1213,49 @@ export function FileBrowser({
                   {!isCompact && <span className={styles.colDate}>{formatFileDate(entry.createdAt)}</span>}
                   <span className={styles.colActions}>
                     {isCompact ? (
-                      <div className={styles.rowMenuAnchor} ref={menuEntryPath === entry.path ? menuRef : undefined}>
+                      <div className={styles.rowMenuAnchor}>
                         <button
                           className={styles.iconBtn}
                           onClick={(e) => {
                             e.stopPropagation();
-                            setMenuEntryPath(menuEntryPath === entry.path ? null : entry.path);
+                            toggleRowMenu(entry.path, e.currentTarget);
                           }}
                           aria-label="Actions"
+                          aria-haspopup="menu"
+                          aria-expanded={menuEntryPath === entry.path}
                         >
                           <MoreVertical size={16} />
                         </button>
                         {menuEntryPath === entry.path && (
-                          <div className={styles.rowMenu}>
+                          <AnchoredOverlay
+                            ref={menuDropdownRef}
+                            anchorElement={menuAnchorElement}
+                            anchorRect={menuAnchorRect}
+                            className={styles.rowMenu}
+                            placement="bottom-end"
+                          >
                             {entry.type === 'file' && isPreviewable(entry.name) && (
-                              <button className={styles.rowMenuItem} onClick={() => { setPreviewEntry(entry); setMenuEntryPath(null); }}>
+                              <button className={styles.rowMenuItem} onClick={() => { setPreviewEntry(entry); closeRowMenu(); }}>
                                 <Eye size={15} /> Preview
                               </button>
                             )}
                             {entry.type === 'file' && (
-                              <button className={styles.rowMenuItem} onClick={() => { handleDownload(entry.path); setMenuEntryPath(null); }}>
+                              <button className={styles.rowMenuItem} onClick={() => { handleDownload(entry.path); closeRowMenu(); }}>
                                 <Download size={15} /> Download
                               </button>
                             )}
-                            <button className={styles.rowMenuItem} onClick={() => { handleReveal(entry.path); setMenuEntryPath(null); }}>
+                            <button className={styles.rowMenuItem} onClick={() => { handleReveal(entry.path); closeRowMenu(); }}>
                               <FolderOpen size={15} /> Reveal
                             </button>
                             {showRename && (
-                              <button className={styles.rowMenuItem} onClick={() => { startRename(entry); setMenuEntryPath(null); }}>
+                              <button className={styles.rowMenuItem} onClick={() => { startRename(entry); closeRowMenu(); }}>
                                 <Pencil size={15} /> Rename
                               </button>
                             )}
-                            <button className={`${styles.rowMenuItem} ${styles.rowMenuItemDanger}`} onClick={() => { handleDelete(entry); setMenuEntryPath(null); }}>
+                            <button className={`${styles.rowMenuItem} ${styles.rowMenuItemDanger}`} onClick={() => { handleDelete(entry); closeRowMenu(); }}>
                               <Trash2 size={15} /> Delete
                             </button>
-                          </div>
+                          </AnchoredOverlay>
                         )}
                       </div>
                     ) : (
@@ -855,10 +1323,13 @@ export function FileBrowser({
 
       {previewEntry && (
         <FilePreviewModal
+          key={previewEntry.path}
           fileName={previewEntry.name}
           downloadUrl={`/api${endpoints.download(previewEntry.path)}`}
           onClose={() => setPreviewEntry(null)}
           onDownload={() => handleDownload(previewEntry.path)}
+          onLoadTextContent={previewLoadTextContent}
+          onSaveTextContent={previewSaveTextContent}
         />
       )}
 

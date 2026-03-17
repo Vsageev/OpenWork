@@ -22,7 +22,6 @@ import {
   getSkillFilePath,
   getSkillEntryPath,
   writeSkillFile,
-  resyncSkillToAllAgents,
 } from '../services/skills.js';
 import { getAgent } from '../services/agents.js';
 
@@ -108,7 +107,7 @@ export async function skillRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Skills'],
-        summary: 'Delete a skill (detaches from all agents)',
+        summary: 'Delete a skill from the preset library',
         params: z.object({ id: z.string() }),
       },
     },
@@ -359,25 +358,6 @@ export async function skillRoutes(app: FastifyInstance) {
     },
   );
 
-  // Resync a skill to all agents that have it attached (push latest files)
-  typedApp.post(
-    '/api/skills/:id/resync',
-    {
-      onRequest: [app.authenticate, requirePermission('settings:update')],
-      schema: {
-        tags: ['Skills'],
-        summary: 'Re-copy skill files to all agents that have this skill attached',
-        params: z.object({ id: z.string() }),
-      },
-    },
-    async (request, reply) => {
-      const skill = getSkill(request.params.id);
-      if (!skill) return reply.notFound('Skill not found');
-      resyncSkillToAllAgents(request.params.id);
-      return reply.status(204).send();
-    },
-  );
-
   // ── Agent skill attachment ──
 
   typedApp.get(
@@ -386,7 +366,7 @@ export async function skillRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('settings:read')],
       schema: {
         tags: ['Skills'],
-        summary: 'List skills attached to an agent',
+        summary: 'List skills referenced by an agent instruction file',
         params: z.object({ id: z.string() }),
       },
     },
@@ -403,7 +383,7 @@ export async function skillRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Skills'],
-        summary: 'Attach a skill to an agent',
+        summary: 'Copy a preset-library skill into an agent workspace',
         params: z.object({ id: z.string() }),
         body: z.object({
           skillId: z.string().min(1),
@@ -428,7 +408,7 @@ export async function skillRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Skills'],
-        summary: 'Detach a skill from an agent',
+        summary: 'Remove a local skill from an agent workspace',
         params: z.object({
           id: z.string(),
           skillId: z.string(),

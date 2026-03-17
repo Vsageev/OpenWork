@@ -40,7 +40,7 @@ function getMobileHeaderInfo(pathname: string): { title: string; canGoBack: bool
   if (pathname.startsWith('/collections/')) return { title: 'Collection', canGoBack: true };
   if (pathname.startsWith('/boards/')) return { title: 'Board', canGoBack: true };
   if (pathname.startsWith('/cards/')) return { title: 'Card', canGoBack: true };
-  return { title: 'Workspace', canGoBack: false };
+  return { title: 'OpenWork', canGoBack: false };
 }
 
 export function AppLayout() {

@@ -27,11 +27,15 @@ function parseExpiry(duration: string): number {
   return value * multipliers[unit];
 }
 
-export async function generateTokens(app: FastifyInstance, userId: string) {
-  const accessToken = app.jwt.sign(
+function generateAccessToken(app: FastifyInstance, userId: string): string {
+  return app.jwt.sign(
     { sub: userId },
     { expiresIn: env.JWT_ACCESS_EXPIRES_IN },
   );
+}
+
+export async function generateTokens(app: FastifyInstance, userId: string) {
+  const accessToken = generateAccessToken(app, userId);
 
   const rawRefresh = randomBytes(48).toString('base64url');
   const tokenHash = hashToken(rawRefresh);
@@ -55,14 +59,14 @@ export async function refreshAccessToken(app: FastifyInstance, rawRefreshToken: 
 
   if (!stored) return null;
 
-  // Delete old token (rotation)
-  store.delete('refreshTokens', stored.id as string);
-
   const user = store.findOne('users', (r: any) => r.id === stored.userId);
 
   if (!user || !(user as any).isActive || (user as any).type === 'agent') return null;
 
-  return generateTokens(app, (user as any).id);
+  return {
+    accessToken: generateAccessToken(app, (user as any).id),
+    refreshToken: rawRefreshToken,
+  };
 }
 
 export async function revokeUserRefreshTokens(userId: string) {

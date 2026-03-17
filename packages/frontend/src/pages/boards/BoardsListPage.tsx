@@ -49,6 +49,15 @@ interface BoardDetail {
   cards: BoardCardEntry[];
 }
 
+interface BoardPreviewColumn extends BoardColumn {
+  count: number;
+}
+
+interface BoardPreview {
+  columns: BoardPreviewColumn[];
+  totalCards: number;
+}
+
 interface BoardsResponse {
   total: number;
   entries: Board[];
@@ -238,6 +247,29 @@ export function BoardsListPage() {
     return sorted;
   }, [boards, sort]);
 
+  const boardPreviews = useMemo(() => {
+    const previews: Record<string, BoardPreview> = {};
+
+    for (const [boardId, detail] of Object.entries(boardDetails)) {
+      const sortedColumns = [...detail.columns].sort((a, b) => a.position - b.position);
+      const countsByColumnId = new Map<string, number>();
+
+      for (const card of detail.cards) {
+        countsByColumnId.set(card.columnId, (countsByColumnId.get(card.columnId) ?? 0) + 1);
+      }
+
+      previews[boardId] = {
+        totalCards: detail.cards.length,
+        columns: sortedColumns.map((column) => ({
+          ...column,
+          count: countsByColumnId.get(column.id) ?? 0,
+        })),
+      };
+    }
+
+    return previews;
+  }, [boardDetails]);
+
   async function handleDeleteBoard(board: Board) {
     if (isGeneralBoard(board)) return;
 
@@ -356,14 +388,9 @@ export function BoardsListPage() {
       ) : (
         <div className={styles.grid}>
           {sortedBoards.map((board) => {
-            const detail = boardDetails[board.id];
-            const columns = detail?.columns?.slice().sort((a, b) => a.position - b.position) ?? [];
-            const cards = detail?.cards ?? [];
-            const totalCards = cards.length;
-            const columnCounts = columns.map((col) => ({
-              ...col,
-              count: cards.filter((c) => c.columnId === col.id).length,
-            }));
+            const preview = boardPreviews[board.id];
+            const columns = preview?.columns ?? [];
+            const totalCards = preview?.totalCards ?? 0;
             return (
             <article key={board.id} className={styles.boardCard}>
               <Link to={`/boards/${board.id}`} className={styles.boardLink}>
@@ -374,7 +401,7 @@ export function BoardsListPage() {
                 {columns.length > 0 && (
                   <div className={styles.columnPreview}>
                     <div className={styles.columnBars}>
-                      {columnCounts.map((col) => (
+                      {columns.map((col) => (
                         <div
                           key={col.id}
                           className={styles.columnBar}
@@ -387,7 +414,7 @@ export function BoardsListPage() {
                       ))}
                     </div>
                     <div className={styles.columnLabels}>
-                      {columnCounts.map((col) => (
+                      {columns.map((col) => (
                         <span key={col.id} className={styles.columnLabel} title={col.name}>
                           <span className={styles.columnDot} style={{ backgroundColor: col.color }} />
                           {col.name}
