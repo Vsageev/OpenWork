@@ -9,6 +9,10 @@ export interface CronJob {
   enabled: boolean;
 }
 
+export interface CronJobWithNextRun extends CronJob {
+  nextRunAt: string | null;
+}
+
 interface RunningCronTask {
   task: cron.ScheduledTask;
   signature: string;
@@ -27,6 +31,34 @@ function jobSignature(job: Pick<CronJob, 'cron' | 'prompt'>): string {
 
 function normalizeCronExpression(cronExpr: string): string {
   return cronExpr.trim();
+}
+
+function getTaskNextRunAt(task: cron.ScheduledTask): string | null {
+  const nextRun = task.getNextRun();
+  return nextRun ? nextRun.toISOString() : null;
+}
+
+function getCronJobNextRunAt(agentId: string, job: CronJob): string | null {
+  if (!job.enabled) return null;
+
+  const cronExpr = normalizeCronExpression(job.cron);
+  if (!cron.validate(cronExpr)) return null;
+
+  const running = runningTasks.get(taskKey(agentId, job.id));
+  if (!running) return null;
+  if (running.signature !== jobSignature({ ...job, cron: cronExpr })) return null;
+
+  return getTaskNextRunAt(running.task);
+}
+
+export function listAgentCronJobsWithNextRun(
+  agentId: string,
+  cronJobs: CronJob[],
+): CronJobWithNextRun[] {
+  return cronJobs.map((job) => ({
+    ...job,
+    nextRunAt: getCronJobNextRunAt(agentId, job),
+  }));
 }
 
 function stopTask(key: string, running: RunningCronTask): void {

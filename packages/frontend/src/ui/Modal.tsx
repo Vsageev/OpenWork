@@ -13,6 +13,7 @@ export interface ModalProps {
 export function Modal({ children, onClose, size = 'md', ariaLabel }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<Element | null>(null);
+  const overlayPressStartedRef = useRef(false);
 
   // Store the previously focused element and focus the dialog
   useEffect(() => {
@@ -85,13 +86,24 @@ export function Modal({ children, onClose, size = 'md', ariaLabel }: ModalProps)
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
+      if (e.target === e.currentTarget && overlayPressStartedRef.current) {
+        onClose();
+      }
+      overlayPressStartedRef.current = false;
     },
     [onClose],
   );
 
+  const handleOverlayPointerDown = useCallback((e: React.PointerEvent) => {
+    overlayPressStartedRef.current = e.target === e.currentTarget;
+  }, []);
+
   return createPortal(
-    <div className={styles.overlay} onClick={handleOverlayClick}>
+    <div
+      className={styles.overlay}
+      onClick={handleOverlayClick}
+      onPointerDown={handleOverlayPointerDown}
+    >
       <div
         ref={dialogRef}
         className={`${styles.dialog} ${styles[size]}`}

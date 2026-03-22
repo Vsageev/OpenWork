@@ -4,7 +4,7 @@ import styles from './ApiKeyFormFields.module.css';
 const API_RESOURCES = [
   'contacts', 'cards', 'tasks', 'boards', 'folders',
   'messages', 'activities', 'templates', 'webhooks',
-  'settings', 'collections', 'users', 'backups', 'reports', 'audit-logs',
+  'settings', 'collections', 'users', 'backups', 'audit-logs',
   'storage', 'tags', 'conversations',
 ] as const;
 

@@ -1292,9 +1292,12 @@ export function AgentMonitorPage() {
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <h2 className={styles.sectionTitle}>Active Runs</h2>
-          {activeRuns.length > 0 && (
-            <span className={styles.countBadge}>{activeRuns.length}</span>
-          )}
+          <span
+            className={`${styles.countBadge}${activeRuns.length === 0 ? ` ${styles.countBadgeInactive}` : ''}`}
+            title="Currently running agent runs"
+          >
+            {activeRuns.length}
+          </span>
         </div>
 
         {activeRuns.length === 0 ? (

@@ -22,7 +22,6 @@ export type Permission =
   | 'backups:read'
   | 'backups:create'
   | 'backups:delete'
-  | 'reports:read'
   | 'settings:read'
   | 'settings:update'
   | 'audit-logs:read'

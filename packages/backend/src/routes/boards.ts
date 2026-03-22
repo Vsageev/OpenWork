@@ -30,10 +30,12 @@ import {
   type AgentBatchRunFilterStatus,
 } from '../services/agent-batch-queue.js';
 import {
-  listBoardCronTemplates,
+  listBoardCronTemplatesWithNextRun,
   createBoardCronTemplate,
   updateBoardCronTemplate,
   deleteBoardCronTemplate,
+  withBoardCronTemplateNextRun,
+  syncBoardCronJobs,
 } from '../services/board-cron.js';
 import { runBoardAgentBatch, countBoardBatchCards } from '../services/board-batch.js';
 
@@ -418,7 +420,8 @@ export async function boardRoutes(app: FastifyInstance) {
       const board = await getBoardById(request.params.id);
       if (!board) return reply.notFound('Board not found');
 
-      const entries = listBoardCronTemplates(request.params.id);
+      syncBoardCronJobs(request.params.id);
+      const entries = listBoardCronTemplatesWithNextRun(request.params.id);
       return reply.send({ entries, total: entries.length });
     },
   );
@@ -452,7 +455,7 @@ export async function boardRoutes(app: FastifyInstance) {
         request.user.sub,
       );
 
-      return reply.status(201).send(template);
+      return reply.status(201).send(withBoardCronTemplateNextRun(template));
     },
   );
 
@@ -479,7 +482,7 @@ export async function boardRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const updated = updateBoardCronTemplate(request.params.templateId, request.body);
       if (!updated) return reply.notFound('Cron template not found');
-      return reply.send(updated);
+      return reply.send(withBoardCronTemplateNextRun(updated));
     },
   );
 

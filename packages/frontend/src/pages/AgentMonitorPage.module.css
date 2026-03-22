@@ -110,6 +110,11 @@
   font-weight: 600;
 }
 
+.countBadgeInactive {
+  background: var(--color-border-subtle);
+  color: var(--color-text-secondary);
+}
+
 .historyCount {
   font-size: 13px;
   color: var(--color-text-tertiary);

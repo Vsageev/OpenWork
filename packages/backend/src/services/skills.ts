@@ -162,6 +162,7 @@ export function deleteSkill(id: string): boolean {
 
 interface AgentSkillReference {
   id: string;
+  name: string;
   path: string;
   description: string;
 }
@@ -171,8 +172,8 @@ function buildSkillsSection(skills: AgentSkillReference[]): string {
 
   const lines = skills.map((skill) =>
     skill.description
-      ? `- \`${skill.path}\` — ${skill.description}`
-      : `- \`${skill.path}\``,
+      ? `- \`${skill.name}\` — ${skill.description} Path: \`${skill.path}\`.`
+      : `- \`${skill.name}\` Path: \`${skill.path}\`.`,
   );
 
   return [SKILLS_START, '## Skills', ...lines, SKILLS_END].join('\n');
@@ -189,6 +190,14 @@ function findInstructionFile(agentId: string): string | null {
 
 function normalizeAgentRelativePath(relativePath: string): string {
   return relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function normalizeAgentSkillPath(skillPath: string): string | null {
+  const normalized = path.posix.normalize(normalizeAgentRelativePath(skillPath));
+  if (!normalized.startsWith('skills/') || !normalized.endsWith('/index.md')) {
+    return null;
+  }
+  return normalized;
 }
 
 function encodeAgentSkillId(relativePath: string): string {
@@ -228,20 +237,33 @@ function parseAgentSkillReferences(content: string): AgentSkillReference[] | nul
   const refs: AgentSkillReference[] = [];
 
   for (const rawLine of section.split('\n')) {
-    const pathMatch = rawLine.match(/`([^`]+)`/);
+    const matches = Array.from(rawLine.matchAll(/`([^`]+)`/g));
+    if (matches.length === 0) continue;
+
+    const pathMatch = matches.find((match) => normalizeAgentSkillPath(match[1]));
     if (!pathMatch) continue;
 
-    const skillPath = path.posix.normalize(normalizeAgentRelativePath(pathMatch[1]));
-    if (!skillPath.startsWith('skills/') || !skillPath.endsWith('/index.md')) continue;
+    const skillPath = normalizeAgentSkillPath(pathMatch[1]);
+    if (!skillPath) continue;
 
     const id = normalizeAgentRelativePath(path.posix.dirname(skillPath));
     if (seen.has(id)) continue;
     seen.add(id);
 
-    const trailing = rawLine.slice(pathMatch.index! + pathMatch[0].length).trim();
-    const description = trailing.replace(/^[-–—:]+\s*/, '').trim();
+    const nameMatch = matches.find(
+      (match) => match.index! < pathMatch.index! && !normalizeAgentSkillPath(match[1]),
+    );
+    const name = nameMatch?.[1].trim() ?? '';
 
-    refs.push({ id, path: skillPath, description });
+    const descriptionSource = nameMatch
+      ? rawLine.slice(nameMatch.index! + nameMatch[0].length, pathMatch.index)
+      : rawLine.slice(pathMatch.index! + pathMatch[0].length);
+    const description = descriptionSource
+      .replace(/^[-*+\s:–—.]+/, '')
+      .replace(/\s*Path:\s*$/i, '')
+      .trim();
+
+    refs.push({ id, name, path: skillPath, description });
   }
 
   return refs;
@@ -258,15 +280,38 @@ function readAgentSkillDisplay(filePath: string): { name: string; description: s
 
   let name = fallbackName;
   let description = '';
+  let bodyStartIndex = 0;
+  let hasExplicitName = false;
 
-  for (const line of lines) {
+  if (lines[0]?.trim() === '---') {
+    bodyStartIndex = 1;
+    while (bodyStartIndex < lines.length) {
+      const trimmed = lines[bodyStartIndex].trim();
+      if (trimmed === '---') {
+        bodyStartIndex += 1;
+        break;
+      }
+      if (trimmed.startsWith('name:')) {
+        name = trimmed.slice('name:'.length).trim().replace(/^['"]|['"]$/g, '') || fallbackName;
+        hasExplicitName = true;
+      } else if (trimmed.startsWith('description:')) {
+        description =
+          trimmed.slice('description:'.length).trim().replace(/^['"]|['"]$/g, '') || description;
+      }
+      bodyStartIndex += 1;
+    }
+  }
+
+  for (const line of lines.slice(bodyStartIndex)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     if (trimmed.startsWith('# ')) {
-      name = trimmed.slice(2).trim() || fallbackName;
+      if (!hasExplicitName) {
+        name = trimmed.slice(2).trim() || fallbackName;
+      }
       continue;
     }
-    if (!trimmed.startsWith('#')) {
+    if (!trimmed.startsWith('#') && !description) {
       description = trimmed;
       break;
     }
@@ -289,7 +334,17 @@ function writeAgentSkillsSection(agentId: string, skills: AgentSkillReference[])
     throw new Error('Agent instruction file not found');
   }
 
-  const newSection = buildSkillsSection(skills);
+  const hydratedSkills = skills.map((skill) => {
+    if (skill.name && skill.description) return skill;
+
+    const display = readAgentSkillDisplay(resolveAgentRelativePath(agentId, skill.path));
+    return {
+      ...skill,
+      name: skill.name || display.name,
+      description: skill.description || display.description,
+    };
+  });
+  const newSection = buildSkillsSection(hydratedSkills);
   let content = fs.readFileSync(filePath, 'utf-8');
 
   const startIdx = content.indexOf(SKILLS_START);
@@ -332,7 +387,7 @@ export function getAgentSkills(agentId: string): AgentSkillRecord[] {
 
     return {
       id: encodeAgentSkillId(ref.id),
-      name: display.name,
+      name: ref.name || display.name,
       description: ref.description || display.description,
       path: ref.path,
       missing,
@@ -361,11 +416,13 @@ export function attachSkillToAgent(agentId: string, skillId: string): void {
   }
 
   copyDirSync(src, dest);
+  const display = readAgentSkillDisplay(path.join(dest, 'index.md'));
 
   writeAgentSkillsSection(agentId, [
     ...currentSkills,
     {
       id: destId,
+      name: display.name,
       path: skillPath,
       description: skill.description,
     },

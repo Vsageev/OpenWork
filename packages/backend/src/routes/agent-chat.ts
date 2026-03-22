@@ -4,7 +4,6 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
-import { store } from '../db/index.js';
 import { getAgent } from '../services/agents.js';
 import { uploadFile } from '../services/storage.js';
 import { validateUploadedFile } from '../utils/file-validation.js';
@@ -12,6 +11,7 @@ import { createAgentRateLimiter } from '../lib/api-helpers.js';
 import {
   listAgentConversations,
   listRecentAgentConversations,
+  getAgentConversation,
   createAgentConversation,
   validateConversationOwnership,
   deleteAgentConversation,
@@ -20,10 +20,11 @@ import {
   saveAgentConversationMessage,
   enqueueAgentPrompt,
   getAgentQueuedPromptCount,
-  executeRespondToLastMessage,
   isAgentBusy,
-  getConversationQueueItems,
+  canRespondToMessageStartImmediately,
+  getConversationExecutionItems,
   updateQueueItem,
+  retryQueueItem,
   deleteQueueItem,
   clearAgentConversationQueue,
   reorderQueueItems,
@@ -32,8 +33,10 @@ import {
   getActiveMessagePath,
   editMessageAndBranch,
   switchBranch,
+  AgentChatError,
 } from '../services/agent-chat.js';
 import { listAgentRuns } from '../services/agent-runs.js';
+import { ApiError } from '../utils/api-errors.js';
 
 // Rate limiter for agent prompt execution — shared across all requests in this process
 export const promptRateLimiter = createAgentRateLimiter();
@@ -57,10 +60,12 @@ async function persistUploadedChatFiles(
     const fileCheck = validateUploadedFile(filePart.mimetype, filePart.filename, {
       mode: imagesOnly ? 'strict' : 'nonExecutable',
     });
-    if (!fileCheck.valid) throw new Error(fileCheck.error!);
+    if (!fileCheck.valid) {
+      throw ApiError.badRequest('invalid_chat_upload', fileCheck.error!);
+    }
 
     if (imagesOnly && !filePart.mimetype.startsWith('image/')) {
-      throw new Error('Only image files are supported');
+      throw ApiError.badRequest('chat_upload_images_only', 'Only image files are supported');
     }
 
     const ext = path.extname(filePart.filename) || '.jpg';
@@ -79,6 +84,58 @@ async function persistUploadedChatFiles(
   }
 
   return attachments;
+}
+
+function requireAgentExists(agentId: string) {
+  const agent = getAgent(agentId);
+  if (!agent) throw ApiError.notFound('agent_not_found', 'Agent not found');
+  return agent;
+}
+
+function requireConversationExists(conversationId: string, agentId: string) {
+  const conversation = validateConversationOwnership(conversationId, agentId);
+  if (!conversation) {
+    throw ApiError.notFound('conversation_not_found', 'Conversation not found');
+  }
+  return conversation;
+}
+
+function serializeActivePathEntries(conversationId: string) {
+  return getActiveMessagePath(conversationId).map((msg) => ({
+    ...msg,
+    siblingIndex: msg._siblingIndex,
+    siblingCount: msg._siblingCount,
+    siblingIds: msg._siblingIds,
+    _siblingIndex: undefined,
+    _siblingCount: undefined,
+    _siblingIds: undefined,
+  }));
+}
+
+function requirePromptRateLimit(requestUserId: string, agentId: string) {
+  const rateLimitKey = `${requestUserId}:${agentId}`;
+  if (!promptRateLimiter.isAllowed(rateLimitKey)) {
+    throw ApiError.tooMany(
+      'agent_prompt_rate_limited',
+      'Too many prompt requests. Please wait before sending another message.',
+    );
+  }
+}
+
+function toAgentChatApiError(error: AgentChatError): ApiError {
+  if (error.statusCode === 404) {
+    return ApiError.notFound(error.code, error.message, error.hint);
+  }
+  if (error.statusCode === 409) {
+    return ApiError.conflict(error.code, error.message, error.hint);
+  }
+  return ApiError.badRequest(error.code, error.message, error.hint);
+}
+
+function rethrowAgentChatError(error: unknown): never {
+  if (error instanceof ApiError) throw error;
+  if (error instanceof AgentChatError) throw toAgentChatApiError(error);
+  throw error;
 }
 
 export async function agentChatRoutes(app: FastifyInstance) {
@@ -119,8 +176,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
 
       const { limit, offset } = request.query;
       const result = listAgentConversations(request.params.id, limit, offset);
@@ -143,11 +199,33 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
 
       const conv = createAgentConversation(request.params.id, request.body.subject);
       return reply.status(201).send(conv);
+    },
+  );
+
+  // Get a single conversation for an agent
+  typedApp.get(
+    '/api/agents/:id/chat/conversations/:conversationId',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Get a single chat conversation for an agent',
+        params: z.object({ id: z.string(), conversationId: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+
+      const conversation = getAgentConversation(request.params.id, request.params.conversationId);
+      if (!conversation) {
+        throw ApiError.notFound('conversation_not_found', 'Conversation not found');
+      }
+
+      return reply.send(conversation);
     },
   );
 
@@ -166,11 +244,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.conversationId, request.params.id);
 
       const updated = renameAgentConversation(request.params.conversationId, request.body.subject);
       return reply.send(updated);
@@ -189,11 +264,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.conversationId, request.params.id);
 
       const updated = markAgentConversationRead(request.params.conversationId);
       return reply.send(updated);
@@ -212,11 +284,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.conversationId, request.params.id);
 
       deleteAgentConversation(request.params.conversationId);
       return reply.status(204).send();
@@ -240,24 +309,10 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.query.conversationId, request.params.id);
 
-      const conv = validateConversationOwnership(request.query.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      // Return tree-aware active path with sibling info
-      const activePath = getActiveMessagePath(request.query.conversationId);
-      const entries = activePath.map((msg) => ({
-        ...msg,
-        siblingIndex: msg._siblingIndex,
-        siblingCount: msg._siblingCount,
-        siblingIds: msg._siblingIds,
-        _siblingIndex: undefined,
-        _siblingCount: undefined,
-        _siblingIds: undefined,
-      }));
-
+      const entries = serializeActivePathEntries(request.query.conversationId);
       const { limit, offset } = request.query;
       const paged = entries.slice(offset, offset + limit);
       return reply.send({ total: entries.length, limit, offset, entries: paged });
@@ -281,11 +336,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.body.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
 
       const message = saveAgentConversationMessage({
         conversationId: request.body.conversationId,
@@ -327,18 +379,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
 
-      // Rate limit per user per agent to prevent prompt spam
       const userId = (request.user as { sub: string }).sub;
-      const rateLimitKey = `${userId}:${request.params.id}`;
-      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
-        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
-      }
-
-      const conv = validateConversationOwnership(request.body.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requirePromptRateLimit(userId, request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
 
       try {
         const wasQueuedOrBusy =
@@ -360,36 +405,27 @@ export async function agentChatRoutes(app: FastifyInstance) {
           },
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to queue prompt';
-        const statusCode = 500;
-        return reply.status(statusCode).send({
-          statusCode,
-          error: 'Internal Server Error',
-          message,
-        });
+        rethrowAgentChatError(err);
       }
     },
   );
 
-  // List queued items for a conversation
+  // List execution items for a conversation
   typedApp.get(
     '/api/agents/:id/chat/conversations/:cid/queue',
     {
       onRequest: [app.authenticate, requirePermission('settings:read')],
       schema: {
         tags: ['Agent Chat'],
-        summary: 'List pending queue items for a conversation',
+        summary: 'List chat execution items for a conversation',
         params: z.object({ id: z.string(), cid: z.string() }),
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      const items = getConversationQueueItems(request.params.id, request.params.cid);
+      const items = getConversationExecutionItems(request.params.id, request.params.cid);
       return reply.send({ entries: items });
     },
   );
@@ -406,11 +442,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
       const deleted = clearAgentConversationQueue(request.params.id, request.params.cid);
       return reply.send({ deleted });
@@ -433,20 +466,51 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
 
-      const conv = validateConversationOwnership(request.body.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      try {
+        const updated = updateQueueItem(
+          request.params.itemId,
+          request.params.id,
+          request.body.conversationId,
+          { prompt: request.body.prompt },
+        );
+        return reply.send(updated);
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
+    },
+  );
 
-      const updated = updateQueueItem(
-        request.params.itemId,
-        request.params.id,
-        request.body.conversationId,
-        { prompt: request.body.prompt },
-      );
-      if (!updated) return reply.notFound('Queue item not found or not editable');
-      return reply.send(updated);
+  // Retry a failed or cancelled item
+  typedApp.post(
+    '/api/agents/:id/chat/queue/:itemId/retry',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Retry a failed or cancelled chat execution item',
+        params: z.object({ id: z.string(), itemId: z.string() }),
+        body: z.object({
+          conversationId: z.string(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
+
+      try {
+        const retried = retryQueueItem(
+          request.params.itemId,
+          request.params.id,
+          request.body.conversationId,
+        );
+        return reply.send(retried);
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
     },
   );
 
@@ -465,19 +529,15 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
 
-      const conv = validateConversationOwnership(request.body.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      const deleted = deleteQueueItem(
-        request.params.itemId,
-        request.params.id,
-        request.body.conversationId,
-      );
-      if (!deleted) return reply.notFound('Queue item not found or not deletable');
-      return reply.status(204).send();
+      try {
+        deleteQueueItem(request.params.itemId, request.params.id, request.body.conversationId);
+        return reply.status(204).send();
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
     },
   );
 
@@ -496,26 +556,27 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      const ok = reorderQueueItems(request.params.id, request.params.cid, request.body.orderedIds);
-      if (!ok) return reply.badRequest('Invalid queue item IDs');
-      return reply.send({ ok: true });
+      try {
+        reorderQueueItems(request.params.id, request.params.cid, request.body.orderedIds);
+        return reply.send({ ok: true });
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
     },
   );
 
-  // Trigger agent to respond to the latest message (e.g. after image upload) and wait for completion
+  // Queue an agent response to the latest message (e.g. after image upload)
   typedApp.post(
     '/api/agents/:id/chat/respond',
     {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Agent Chat'],
-        summary: 'Trigger agent to respond to the latest conversation message (e.g. after image upload)',
+        summary:
+          'Queue an agent response to the latest conversation message (e.g. after image upload)',
         params: z.object({ id: z.string() }),
         body: z.object({
           conversationId: z.string(),
@@ -523,41 +584,44 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
 
-      // Rate limit per user per agent
       const userId = (request.user as { sub: string }).sub;
-      const rateLimitKey = `${userId}:${request.params.id}`;
-      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
-        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
-      }
-
-      if (isAgentBusy(request.params.id, request.body.conversationId)) {
-        return reply.status(409).send({
-          statusCode: 409,
-          error: 'Conflict',
-          message: 'Agent is already processing a prompt',
-        });
-      }
-
-      const conv = validateConversationOwnership(request.body.conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requirePromptRateLimit(userId, request.params.id);
+      requireConversationExists(request.body.conversationId, request.params.id);
 
       try {
-        const message = await executeRespondToLastMessage(
+        const activePath = getActiveMessagePath(request.body.conversationId);
+        const leaf = activePath.length > 0 ? activePath[activePath.length - 1] : null;
+        const targetMessageId = typeof leaf?.id === 'string' ? (leaf.id as string) : null;
+        if (!targetMessageId) {
+          throw ApiError.badRequest(
+            'response_target_missing',
+            'Conversation has no message to respond to',
+          );
+        }
+
+        const willQueueBehind = !canRespondToMessageStartImmediately(
           request.params.id,
           request.body.conversationId,
+          targetMessageId,
         );
-        return reply.status(201).send(message);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to execute prompt';
-        const statusCode = message === 'Agent is already processing a prompt' ? 409 : 500;
-        return reply.status(statusCode).send({
-          statusCode,
-          error: statusCode === 409 ? 'Conflict' : 'Internal Server Error',
-          message,
+        const queued = enqueueAgentPrompt(request.params.id, request.body.conversationId, '', {
+          mode: 'respond_to_message',
+          targetMessageId,
         });
+        const statusCode = willQueueBehind ? 202 : 201;
+        return reply.status(statusCode).send({
+          status: 'queued',
+          queueItem: queued.queueItem,
+          queuedCount: queued.queuedCount,
+          concurrency: {
+            running: getGlobalRunningAgentCount(),
+            limit: getMaxConcurrentAgentLimit(),
+          },
+        });
+      } catch (err) {
+        rethrowAgentChatError(err);
       }
     },
   );
@@ -579,18 +643,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      // Rate limit per user per agent
       const userId = (request.user as { sub: string }).sub;
-      const rateLimitKey = `${userId}:${request.params.id}`;
-      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
-        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
-      }
+      requirePromptRateLimit(userId, request.params.id);
 
       try {
         const newMessage = editMessageAndBranch(
@@ -601,9 +658,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
         );
 
         // Queue the edited prompt for processing
-        const wasQueuedOrBusy =
-          isAgentBusy(request.params.id, request.params.cid) ||
-          getAgentQueuedPromptCount(request.params.id, request.params.cid) > 0;
+        const willQueueBehind = !canRespondToMessageStartImmediately(
+          request.params.id,
+          request.params.cid,
+          newMessage.id as string,
+        );
         const queued = enqueueAgentPrompt(
           request.params.id,
           request.params.cid,
@@ -613,9 +672,10 @@ export async function agentChatRoutes(app: FastifyInstance) {
             targetMessageId: newMessage.id as string,
           },
         );
-        const statusCode = wasQueuedOrBusy ? 202 : 201;
+        const statusCode = willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
           message: newMessage,
+          entries: serializeActivePathEntries(request.params.cid),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {
@@ -624,8 +684,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
           },
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to edit message';
-        return reply.badRequest(message);
+        rethrowAgentChatError(err);
       }
     },
   );
@@ -641,17 +700,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
       const userId = (request.user as { sub: string }).sub;
-      const rateLimitKey = `${userId}:${request.params.id}`;
-      if (!promptRateLimiter.isAllowed(rateLimitKey)) {
-        return reply.tooManyRequests('Too many prompt requests. Please wait before sending another message.');
-      }
+      requirePromptRateLimit(userId, request.params.id);
 
       const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
@@ -681,38 +734,33 @@ export async function agentChatRoutes(app: FastifyInstance) {
         }
       }
 
-      if (!messageId) return reply.badRequest('messageId is required');
+      if (!messageId) {
+        throw ApiError.badRequest('message_id_required', 'messageId is required');
+      }
       if (!content.trim() && fileParts.length === 0 && keepStoragePaths.length === 0) {
-        return reply.badRequest('Content or files are required');
+        throw ApiError.badRequest('message_content_required', 'Content or files are required');
       }
 
       try {
         const attachments = await persistUploadedChatFiles(fileParts, { imagesOnly: true });
-        const newMessage = editMessageAndBranch(
-          request.params.cid,
-          messageId,
-          content.trim(),
-          {
-            attachments,
-            keepStoragePaths,
-          },
-        );
+        const newMessage = editMessageAndBranch(request.params.cid, messageId, content.trim(), {
+          attachments,
+          keepStoragePaths,
+        });
 
-        const wasQueuedOrBusy =
-          isAgentBusy(request.params.id, request.params.cid) ||
-          getAgentQueuedPromptCount(request.params.id, request.params.cid) > 0;
-        const queued = enqueueAgentPrompt(
+        const willQueueBehind = !canRespondToMessageStartImmediately(
           request.params.id,
           request.params.cid,
-          content,
-          {
-            mode: 'respond_to_message',
-            targetMessageId: newMessage.id as string,
-          },
+          newMessage.id as string,
         );
-        const statusCode = wasQueuedOrBusy ? 202 : 201;
+        const queued = enqueueAgentPrompt(request.params.id, request.params.cid, content, {
+          mode: 'respond_to_message',
+          targetMessageId: newMessage.id as string,
+        });
+        const statusCode = willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
           message: newMessage,
+          entries: serializeActivePathEntries(request.params.cid),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {
@@ -721,8 +769,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
           },
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to edit message';
-        return reply.badRequest(message);
+        rethrowAgentChatError(err);
       }
     },
   );
@@ -742,29 +789,15 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
-
-      const conv = validateConversationOwnership(request.params.cid, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
 
       try {
         switchBranch(request.params.cid, request.body.messageId);
-        // Return the updated active path
-        const activePath = getActiveMessagePath(request.params.cid);
-        const entries = activePath.map((msg) => ({
-          ...msg,
-          siblingIndex: msg._siblingIndex,
-          siblingCount: msg._siblingCount,
-          siblingIds: msg._siblingIds,
-          _siblingIndex: undefined,
-          _siblingCount: undefined,
-          _siblingIds: undefined,
-        }));
+        const entries = serializeActivePathEntries(request.params.cid);
         return reply.send({ entries });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to switch branch';
-        return reply.badRequest(message);
+        rethrowAgentChatError(err);
       }
     },
   );
@@ -781,8 +814,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const agent = getAgent(request.params.id);
-      if (!agent) return reply.notFound('Agent not found');
+      requireAgentExists(request.params.id);
 
       const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
@@ -808,19 +840,16 @@ export async function agentChatRoutes(app: FastifyInstance) {
         }
       }
 
-      if (fileParts.length === 0) return reply.badRequest('No files uploaded');
-      if (!conversationId) return reply.badRequest('conversationId is required');
-
-      const conv = validateConversationOwnership(conversationId, request.params.id);
-      if (!conv) return reply.notFound('Conversation not found');
-
-      let attachments: ChatUploadAttachment[];
-      try {
-        attachments = await persistUploadedChatFiles(fileParts);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to upload files';
-        return reply.badRequest(message);
+      if (fileParts.length === 0) {
+        throw ApiError.badRequest('chat_upload_missing_files', 'No files uploaded');
       }
+      if (!conversationId) {
+        throw ApiError.badRequest('conversation_id_required', 'conversationId is required');
+      }
+
+      requireConversationExists(conversationId, request.params.id);
+
+      const attachments = await persistUploadedChatFiles(fileParts);
 
       const messageType = attachments.every((attachment) => attachment.type === 'image')
         ? 'image'

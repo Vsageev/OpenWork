@@ -61,7 +61,7 @@ packages/
   frontend/    React 19 SPA, Vite, React Router
   shared/      Shared TypeScript types
   widget/      Embeddable web form & chat widgets
-scripts/       Dev utility scripts (cert generation)
+scripts/       Dev utility scripts (certs, stale process check — see docs/RUNBOOK.md)
 docs/          Design system and developer guides
 ```
 
@@ -131,7 +131,7 @@ Usage example:
 - **Cards & Folders** — organize work items with tags and links
 - **Boards** — Kanban-style boards with customizable columns
 - **Unified Inbox** — all conversations in one place
-- **Telegram** — bot integration, media support, webhook handling
+- **Telegram** — workspace-managed bot setup, media support, webhook handling
 - **AI Agents** — configurable agents with preset system, file workspaces, and chat interface
 - **Connectors** — external service integrations
 - **Embeddable Widgets** — web forms and chat widgets for external sites
@@ -161,6 +161,16 @@ pnpm docker:full
 ## Environment Variables
 
 See `packages/backend/.env.example` for all backend config.
+
+### Telegram setup
+
+OpenWork can provide the Telegram bot for the workspace so end users do not need to create one in BotFather.
+
+1. Set `TELEGRAM_MANAGED_BOT_TOKEN` in `packages/backend/.env`.
+2. Set `TELEGRAM_WEBHOOK_BASE_URL` or use ngrok from the Connectors admin UI.
+3. In the app, open `Connectors` and add Telegram using the recommended managed-bot option.
+
+If you prefer, admins can still connect a custom Telegram bot manually.
 
 ## Guidelines
 

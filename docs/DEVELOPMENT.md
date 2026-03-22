@@ -2,6 +2,7 @@
 
 General dev setup, commands, and troubleshooting. For module-specific guidance, see:
 
+- [Runbook](./RUNBOOK.md) — stale process cleanup, common issues, quick fixes
 - [Backend Development](./backend-development.md) — routes, services, error handling, implementation patterns
 - [Design System](./design-system.md) — colors, typography, components, animation rules
 

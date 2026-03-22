@@ -1,11 +1,12 @@
-import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { store } from '../db/index.js';
 import { env } from '../config/env.js';
 import { createApiKey, deleteApiKey, validateApiKey } from './api-keys.js';
+import { deleteAgentEnvVarsByAgentId } from './agent-env-vars.js';
 import { stopAllAgentCronJobs } from './agent-cron.js';
 import type { CronJob } from './agent-cron.js';
 import { hashPassword } from './auth.js';
@@ -158,6 +159,7 @@ interface CliInfo {
   command: string;
   installed: boolean;
   downloadUrl: string;
+  resolvedCommand: string | null;
 }
 
 const CLI_DEFS: { id: string; name: string; command: string; downloadUrl: string }[] = [
@@ -174,6 +176,18 @@ const CLI_DEFS: { id: string; name: string; command: string; downloadUrl: string
     downloadUrl: 'https://developers.openai.com/codex/quickstart/',
   },
   {
+    id: 'cursor',
+    name: 'Cursor',
+    command: 'cursor-agent',
+    downloadUrl: 'https://docs.cursor.com/cli/using',
+  },
+  {
+    id: 'opencode',
+    name: 'OpenCode',
+    command: 'opencode',
+    downloadUrl: 'https://opencode.ai/docs/cli/',
+  },
+  {
     id: 'qwen',
     name: 'Qwen',
     command: 'qwen',
@@ -185,23 +199,121 @@ const MODEL_ID_BY_ALIAS = new Map<string, string>(
   CLI_DEFS.flatMap((def) => [
     [def.id, def.id],
     [def.name.toLowerCase(), def.id],
+    [def.command.toLowerCase(), def.id],
   ]),
 );
 
-function isCommandAvailable(command: string): boolean {
+const COMMON_CLI_SEARCH_DIRS = [
+  path.join(os.homedir(), '.opencode', 'bin'),
+  path.join(os.homedir(), '.local', 'bin'),
+  path.join(os.homedir(), '.cargo', 'bin'),
+  path.join(os.homedir(), 'bin'),
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+];
+
+function isExecutableFile(filePath: string): boolean {
   try {
-    execSync(`which ${command}`, { stdio: 'ignore' });
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return false;
+    fs.accessSync(
+      filePath,
+      process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK,
+    );
     return true;
   } catch {
     return false;
   }
 }
 
+function getWindowsExecutableNames(command: string): string[] {
+  const pathext = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const lowerCommand = command.toLowerCase();
+  if (pathext.some((ext) => lowerCommand.endsWith(ext.toLowerCase()))) {
+    return [command];
+  }
+  return [command, ...pathext.map((ext) => `${command}${ext}`)];
+}
+
+function candidateExecutableNames(command: string): string[] {
+  return process.platform === 'win32' ? getWindowsExecutableNames(command) : [command];
+}
+
+export function resolveCommandExecutable(command: string): string | null {
+  const trimmed = command.trim();
+  if (!trimmed) return null;
+
+  const hasPathSeparator =
+    trimmed.includes(path.sep) || (path.posix.sep !== path.sep && trimmed.includes(path.posix.sep));
+
+  if (hasPathSeparator) {
+    return isExecutableFile(trimmed) ? trimmed : null;
+  }
+
+  const searchDirs = Array.from(
+    new Set([...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean), ...COMMON_CLI_SEARCH_DIRS]),
+  );
+
+  for (const dir of searchDirs) {
+    for (const candidateName of candidateExecutableNames(trimmed)) {
+      const candidatePath = path.join(dir, candidateName);
+      if (isExecutableFile(candidatePath)) {
+        return candidatePath;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getCliDef(idOrAlias: string) {
+  const normalized = normalizeModelValue(idOrAlias);
+  return CLI_DEFS.find((def) => def.id === normalized) ?? null;
+}
+
+export function getCliInfo(idOrAlias: string) {
+  return getCliDef(idOrAlias);
+}
+
+export function resolveCliExecutable(idOrAlias: string): string | null {
+  const cliDef = getCliDef(idOrAlias);
+  if (cliDef) {
+    return resolveCommandExecutable(cliDef.command);
+  }
+  return resolveCommandExecutable(idOrAlias);
+}
+
+export function getMissingCliMessage(idOrAlias: string): string | null {
+  const cliDef = getCliDef(idOrAlias);
+  if (!cliDef) return null;
+  if (resolveCliExecutable(cliDef.id)) return null;
+  return (
+    `${cliDef.name} CLI is not installed or not available on the server PATH ` +
+    `(expected command: ${cliDef.command}). Install it from ${cliDef.downloadUrl}.`
+  );
+}
+
+export function assertCliAvailableForModel(model: string): void {
+  const message = getMissingCliMessage(model);
+  if (message) {
+    throw new Error(message);
+  }
+}
+
 export function checkCliStatus(): CliInfo[] {
-  return CLI_DEFS.map((def) => ({
-    ...def,
-    installed: isCommandAvailable(def.command),
-  }));
+  return CLI_DEFS.map((def) => {
+    const resolvedCommand = resolveCliExecutable(def.id);
+    return {
+      ...def,
+      resolvedCommand,
+      installed: Boolean(resolvedCommand),
+    };
+  });
 }
 
 export function listPresets() {
@@ -209,9 +321,12 @@ export function listPresets() {
     id: p.id,
     name: p.name,
     description: p.description,
-    parameters: p.parameters.map(({ contentTemplate, emptyContentTemplate, ...parameter }) => ({
-      ...parameter,
-    })),
+    parameters: p.parameters.map((parameter) => {
+      const { contentTemplate, emptyContentTemplate, ...publicParameter } = parameter;
+      void contentTemplate;
+      void emptyContentTemplate;
+      return publicParameter;
+    }),
   }));
 }
 
@@ -724,6 +839,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
   let serviceUserId: string | null = null;
   let wsKeyId: string | null = null;
   const normalizedModel = normalizeModelValue(params.model);
+  assertCliAvailableForModel(normalizedModel);
 
   try {
     // Step 1: Create service user
@@ -861,7 +977,11 @@ export async function updateAgent(
   const patch: Record<string, unknown> = {};
   if (data.name !== undefined) patch.name = data.name;
   if (data.description !== undefined) patch.description = data.description;
-  if (data.model !== undefined) patch.model = normalizeModelValue(data.model);
+  if (data.model !== undefined) {
+    const normalizedModel = normalizeModelValue(data.model);
+    assertCliAvailableForModel(normalizedModel);
+    patch.model = normalizedModel;
+  }
   if (data.modelId !== undefined) patch.modelId = data.modelId;
   if (data.thinkingLevel !== undefined) patch.thinkingLevel = data.thinkingLevel;
   if (data.status !== undefined) patch.status = data.status;
@@ -960,6 +1080,7 @@ export async function deleteAgent(id: string): Promise<boolean> {
   }
 
   store.delete('agents', id);
+  deleteAgentEnvVarsByAgentId(id);
 
   // Remove workspace folder
   const dir = agentDir(id);

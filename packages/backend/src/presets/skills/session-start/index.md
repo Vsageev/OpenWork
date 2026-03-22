@@ -3,28 +3,23 @@
 At the beginning of each session, gather the local context that is most likely
 to matter for the current task before you act.
 
-## Read first
+## Typical flow
 
-- The agent entrypoint file in the current folder (`AGENTS.md`, `CLAUDE.MD`,
-  or equivalent).
-- Any attached skill entrypoints referenced from that file.
-- Files explicitly named by the user.
-- Nearby project docs, configs, or source files that are likely to constrain
-  the task.
-- Existing local memory files such as `MEMORIES.md`, `memory.md`, `notes.md`,
-  or similarly named docs if they exist.
+1. Inspect the local entrypoint and any files named by the user.
+2. Search for the exact feature, term, config, or path involved in the task.
+3. Read only the most relevant matching files or sections.
+4. Search for everything that might me ralated, don't stop after the first find.
 
-## Scope the research
+## Unix search examples
 
-- Start from the current folder unless instructions say otherwise.
-- Prefer targeted reads and `rg` searches over broad file dumps.
-- Read only what is needed to understand the request, constraints, and
-  established conventions.
-- If multiple interpretations remain plausible after checking the likely
-  context, ask a clarification question before making changes.
+```bash
+# Find the files most likely to matter
+rg --files | rg 'session-start|AGENTS|skill|preset'
 
-## While responding
+# Search for the exact concept before opening files
+rg -n "search first|read only what is needed|clarification" .
 
-- Do not dump everything you read.
-- Briefly surface the constraints or assumptions you found when they affect the
-  work.
+# Read only the relevant section instead of dumping the whole file
+sed -n '1,160p' packages/backend/src/presets/skills/session-start/index.md
+```
+

@@ -1,4 +1,4 @@
 {
   "name": "openwork-api",
-  "description": "OpenWork platform API — the host workspace that every agent runs inside"
+  "description": "OpenWork host-platform API reference for tasks that interact with the platform running the agent"
 }

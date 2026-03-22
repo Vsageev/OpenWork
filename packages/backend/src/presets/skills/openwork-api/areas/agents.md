@@ -66,6 +66,33 @@ Agent presentation and grouping helpers:
   - `DELETE /api/agent-batch-runs`
   - `POST /api/agent-batch-runs/:runId/cancel`
 
+## Previous run logs and history
+
+When the task asks what happened in an earlier agent run, do not assume prior
+logs are inaccessible just because they are not in the current prompt context.
+Use this lookup path first:
+
+1. Find the relevant run with `GET /api/agent-runs`, usually filtered by
+   `agentId`, `conversationId`, `status`, or `triggerType`.
+2. Fetch the full run record with `GET /api/agent-runs/:id`. This endpoint
+   includes `stdout` and `stderr` logs, plus run metadata such as
+   `conversationId`, `triggerPrompt`, and timestamps.
+3. If you need to confirm how logs are persisted, inspect
+   `packages/backend/src/routes/agent-runs.ts`,
+   `packages/backend/src/services/agent-runs.ts`, and
+   `packages/backend/src/services/agent-chat.ts`.
+
+Implementation notes that matter:
+
+- Route summary in `agent-runs.ts` explicitly says
+  `GET /api/agent-runs/:id` "includes logs".
+- `getAgentRun(...)` in `services/agent-runs.ts` prefers reading current
+  `stdoutPath` and `stderrPath` files, then falls back to stored snapshots.
+- Run log files are created under the backend data dir in
+  `services/agent-chat.ts` with a per-run `stdout.log` and `stderr.log`.
+- Conversation messages are separate from run logs. If you need chat history,
+  use the agent chat routes in addition to run inspection.
+
 ## Recommended flow
 
 1. Provision an agent (`POST /api/agents`) and attach skills (`POST /api/agents/:id/skills`).

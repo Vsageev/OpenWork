@@ -6,6 +6,8 @@
     "dev": "pnpm --parallel -r run dev",
     "dev:backend": "pnpm --filter backend dev",
     "dev:frontend": "pnpm --filter frontend dev",
+    "dev:check": "bash scripts/check-processes.sh",
+    "dev:clean": "bash scripts/check-processes.sh --kill --force",
     "db:bootstrap": "pnpm --filter backend db:bootstrap",
     "build": "pnpm -r run build",
     "build:backend": "pnpm --filter backend build",
@@ -15,6 +17,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:reports": "vitest run packages/backend/test/agent-runs.routes.test.ts",
+    "verify": "pnpm typecheck && pnpm test && node scripts/verify-public-pages.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm format:check",
     "clean": "pnpm -r run clean",
     "prepare": "husky",
@@ -43,18 +49,23 @@
     ]
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.3.0",
+    "@vitejs/plugin-react": "^5.1.4",
     "eslint": "^10.0.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.0",
     "globals": "^17.3.0",
     "husky": "^9.1.7",
+    "jsdom": "^27.0.0",
     "lint-staged": "^16.2.7",
     "prettier": "^3.8.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.56.0"
+    "typescript-eslint": "^8.56.0",
+    "vitest": "^3.2.4"
   }
 }

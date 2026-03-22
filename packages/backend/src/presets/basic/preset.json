@@ -10,8 +10,8 @@
       "placeholder": "/Users/name/project",
       "type": "directory",
       "required": false,
-      "contentTemplate": "Default workspace behavior: - Work in `{{value}}` by default for commands and file operations.\n- Use other paths only if the task requires it; ask first when avoidable.",
-      "emptyContentTemplate": "Default workspace behavior: - Work in the current folder by default for commands and file operations.\n- Use other paths only if the task requires it; ask first when avoidable."
+      "contentTemplate": "- The project you are working on is `{{value}}`.\n - Use other paths only if the task requires it; ask first when avoidable.",
+      "emptyContentTemplate": "- Work in the current folder by default for commands and file operations.\n- Use other paths only if the task requires it; ask first when avoidable."
     }
   ],
   "files": [
@@ -20,7 +20,7 @@
       "type": "file",
       "name": "AGENTS.md",
       "template": "CLAUDE.MD.hbs",
-      "models": ["Codex", "Qwen"]
+      "models": ["Codex", "Cursor", "OpenCode", "Qwen"]
     }
   ],
   "defaultSkills": [

@@ -201,8 +201,11 @@ export async function api<T = unknown>(
 export async function apiUpload<T = unknown>(
   path: string,
   formData: FormData,
+  options: Omit<RequestInit, 'method' | 'body'> = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string>),
+  };
 
   if (accessToken) {
     headers['Authorization'] = `Bearer ${accessToken}`;
@@ -211,6 +214,7 @@ export async function apiUpload<T = unknown>(
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
+      ...options,
       method: 'POST',
       headers,
       body: formData,
@@ -227,6 +231,7 @@ export async function apiUpload<T = unknown>(
     if (refreshed === 'success') {
       headers['Authorization'] = `Bearer ${accessToken}`;
       res = await fetch(`${API_BASE}${path}`, {
+        ...options,
         method: 'POST',
         headers,
         body: formData,

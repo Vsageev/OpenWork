@@ -7,8 +7,9 @@
   z-index: 1000;
   padding: var(--space-1) 0;
   min-width: 220px;
-  max-height: 80vh;
+  max-height: calc(100vh - 16px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .menuSection {

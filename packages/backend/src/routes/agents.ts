@@ -40,12 +40,22 @@ import {
   reorderAgentGroups,
 } from '../services/agents.js';
 import { getWorkspaceById } from '../services/workspaces.js';
-import { syncAgentCronJobs } from '../services/agent-cron.js';
+import { listAgentCronJobsWithNextRun, syncAgentCronJobs } from '../services/agent-cron.js';
 import { getProjectDefaultAgentKeyId } from '../services/project-settings.js';
 
 const avatarIconSchema = z.string().max(128);
 const avatarColorSchema = z.string().max(20);
 const avatarPresetNameSchema = z.string().trim().min(1).max(80);
+
+function serializePublicAgent(agent: ReturnType<typeof getAgent> extends infer T ? NonNullable<T> : never) {
+  syncAgentCronJobs(agent.id);
+  const publicAgent = asPublicAgent(agent);
+
+  return {
+    ...publicAgent,
+    cronJobs: listAgentCronJobsWithNextRun(agent.id, publicAgent.cronJobs ?? []),
+  };
+}
 
 export async function agentRoutes(app: FastifyInstance) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
@@ -107,7 +117,7 @@ export async function agentRoutes(app: FastifyInstance) {
       }
 
       const { limit, offset } = request.query;
-      const entries = all.slice(offset, offset + limit).map(asPublicAgent);
+      const entries = all.slice(offset, offset + limit).map(serializePublicAgent);
       return reply.send({ total: all.length, limit, offset, entries });
     },
   );
@@ -339,7 +349,7 @@ export async function agentRoutes(app: FastifyInstance) {
           avatarBgColor,
           avatarLogoColor,
         });
-        return reply.status(201).send(asPublicAgent(agent));
+        return reply.status(201).send(serializePublicAgent(agent));
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }
@@ -362,7 +372,7 @@ export async function agentRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const agent = getAgent(request.params.id);
       if (!agent) return reply.notFound('Agent not found');
-      return reply.send(asPublicAgent(agent));
+      return reply.send(serializePublicAgent(agent));
     },
   );
 
@@ -415,12 +425,7 @@ export async function agentRoutes(app: FastifyInstance) {
       }
       if (!updated) return reply.notFound('Agent not found');
 
-      // Sync cron jobs if they were updated
-      if (request.body.cronJobs !== undefined) {
-        syncAgentCronJobs(request.params.id);
-      }
-
-      return reply.send(asPublicAgent(updated));
+      return reply.send(serializePublicAgent(updated));
     },
   );
 

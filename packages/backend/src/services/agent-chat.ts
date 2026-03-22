@@ -5,7 +5,14 @@ import { store } from '../db/index.js';
 import { env } from '../config/env.js';
 import { extractFinalResponseText } from '../lib/agent-output.js';
 import { allocatePort, releasePort } from '../lib/port-allocator.js';
-import { getAgent, listAgents, prepareAgentWorkspaceAccess } from './agents.js';
+import {
+  getAgent,
+  getCliInfo,
+  listAgents,
+  prepareAgentWorkspaceAccess,
+  resolveCliExecutable,
+} from './agents.js';
+import { listAgentEnvVars, listRuntimeAgentEnvVarBindings } from './agent-env-vars.js';
 import { createAgentRun, completeAgentRun } from './agent-runs.js';
 import { getFallbackModelConfig } from './project-settings.js';
 
@@ -17,6 +24,39 @@ const AGENT_CHAT_QUEUE_COLLECTION = 'agentChatQueue';
 const AGENT_CHAT_QUEUE_RETRY_BASE_MS = 1000;
 const AGENT_CHAT_QUEUE_RETRY_MAX_MS = 30000;
 const AGENT_CHAT_QUEUE_DEFAULT_MAX_ATTEMPTS = 4;
+
+interface AgentChatErrorOptions {
+  code: string;
+  statusCode: 400 | 404 | 409;
+  message: string;
+  hint?: string;
+}
+
+export class AgentChatError extends Error {
+  readonly code: string;
+  readonly statusCode: 400 | 404 | 409;
+  readonly hint?: string;
+
+  constructor(options: AgentChatErrorOptions) {
+    super(options.message);
+    this.name = 'AgentChatError';
+    this.code = options.code;
+    this.statusCode = options.statusCode;
+    this.hint = options.hint;
+  }
+
+  static badRequest(code: string, message: string, hint?: string) {
+    return new AgentChatError({ code, statusCode: 400, message, hint });
+  }
+
+  static notFound(code: string, message: string, hint?: string) {
+    return new AgentChatError({ code, statusCode: 404, message, hint });
+  }
+
+  static conflict(code: string, message: string, hint?: string) {
+    return new AgentChatError({ code, statusCode: 409, message, hint });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Global agent concurrency limiter
@@ -35,6 +75,15 @@ const RATE_LIMIT_PATTERNS = [
 
 function isRateLimitError(stderr: string): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => p.test(stderr));
+}
+
+const PERMANENT_QUEUE_ERROR_PATTERNS = [
+  /CLI is not installed or not available on the server PATH/i,
+  /Command ".+" is not installed or not available on the server PATH/i,
+];
+
+function isPermanentQueueError(errorMessage: string): boolean {
+  return PERMANENT_QUEUE_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage));
 }
 
 /**
@@ -90,7 +139,12 @@ function rateLimitBackoffMs(attempt: number): number {
 }
 
 export function getGlobalRunningAgentCount(): number {
-  return globalRunningCount;
+  const livePersistedRuns = store.count(
+    'agent_runs',
+    (r: Record<string, unknown>) =>
+      r.status === 'running' && typeof r.pid === 'number' && isPidAlive(r.pid as number),
+  );
+  return Math.max(globalRunningCount, livePersistedRuns);
 }
 
 export function getMaxConcurrentAgentLimit(): number {
@@ -106,9 +160,9 @@ interface QueueDrainTimer {
 }
 
 type TreePathMessage = Record<string, unknown> & {
-  _siblingIndex: number;
-  _siblingCount: number;
-  _siblingIds: string[];
+  _siblingIndex?: number;
+  _siblingCount?: number;
+  _siblingIds?: string[];
 };
 
 type QueueExecutionMode = 'append_prompt' | 'respond_to_message';
@@ -152,13 +206,25 @@ function appendAttachmentPathsToPrompt(
   return `${prompt ? prompt + '\n\n' : ''}${sections.join('\n\n')}`;
 }
 
+function buildMissingCliError(command: string, model: string): Error {
+  const cliInfo = getCliInfo(model) ?? getCliInfo(command);
+  if (!cliInfo) {
+    return new Error(`Command "${command}" is not installed or not available on the server PATH.`);
+  }
+
+  return new Error(
+    `${cliInfo.name} CLI is not installed or not available on the server PATH ` +
+      `(expected command: ${cliInfo.command}). Install it from ${cliInfo.downloadUrl}.`,
+  );
+}
+
 function buildCliCommand(options: BuildCliOptions): CliCommand {
   const { model, modelId, thinkingLevel, prompt, imagePaths, filePaths } = options;
   const modelLower = model.trim().toLowerCase();
+  const fullPrompt = appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths);
 
   if (modelLower.includes('claude')) {
     const args: string[] = [];
-    const fullPrompt = appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths);
 
     // Stream structured events so run logs contain full model output, not only final text.
     args.push(
@@ -205,17 +271,35 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
     }
     // Use explicit prompt flag for compatibility with CLI variants that don't
     // accept positional prompt input in non-interactive mode.
-    args.push('--prompt', appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths));
+    args.push('--prompt', fullPrompt);
     return { bin: 'qwen', args };
+  }
+  if (modelLower.includes('cursor')) {
+    // Stream structured events so run logs contain full model output, including thinking deltas.
+    const args = ['--print', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--trust'];
+    if (modelId) {
+      args.push('--model', modelId);
+    }
+    args.push(fullPrompt);
+    return { bin: 'cursor-agent', args };
+  }
+  if (modelLower.includes('opencode')) {
+    const args = ['run', '--format', 'json'];
+    if (modelId) {
+      args.push('--model', modelId);
+    }
+    if (thinkingLevel) {
+      args.push('--variant', thinkingLevel);
+    }
+    for (const filePath of [...(imagePaths ?? []), ...(filePaths ?? [])]) {
+      args.push('--file', filePath);
+    }
+    args.push(fullPrompt);
+    return { bin: 'opencode', args };
   }
 
   // Fallback: treat model name as CLI binary with claude-like flags
-  const args = [
-    '-p',
-    appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths),
-    '--output-format',
-    'text',
-  ];
+  const args = ['-p', fullPrompt, '--output-format', 'text'];
   if (modelId) {
     args.push('--model', modelId);
   }
@@ -267,26 +351,44 @@ export function listAgentConversations(agentId: string, limit = 50, offset = 0) 
     const aTime = a.lastMessageAt ? new Date(a.lastMessageAt as string).getTime() : 0;
     const bTime = b.lastMessageAt ? new Date(b.lastMessageAt as string).getTime() : 0;
     if (bTime !== aTime) return bTime - aTime;
-    return (
-      new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime()
-    );
+    return new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime();
   });
 
   const entries = sorted.slice(offset, offset + limit).map((conv) => {
     const conversationId = conv.id as string;
     const busy = isAgentBusy(agentId, conversationId);
-    const rawQueuedCount = getPendingQueueCount(agentId, conversationId);
+    const rawQueuedCount = getQueuedAppendPromptCount(agentId, conversationId);
+    const hasFailed = conversationHasActiveExecutionFailure(agentId, conversationId);
     // If agent is not busy, the first queued item will be picked up immediately
     // by the drain timer, so don't count it as "queued behind".
     const queuedCount = busy ? rawQueuedCount : Math.max(0, rawQueuedCount - 1);
-    const isBusy = busy || rawQueuedCount > 0;
+    const isBusy = busy || hasPendingExecutionItems(agentId, conversationId);
     return {
       ...conv,
       isBusy,
       queuedCount,
+      hasFailed,
     };
   });
   return { entries, total: all.length };
+}
+
+export function getAgentConversation(agentId: string, conversationId: string) {
+  const conversation = validateConversationOwnership(conversationId, agentId);
+  if (!conversation) return null;
+
+  const busy = isAgentBusy(agentId, conversationId);
+  const rawQueuedCount = getQueuedAppendPromptCount(agentId, conversationId);
+  const hasFailed = conversationHasActiveExecutionFailure(agentId, conversationId);
+  const queuedCount = busy ? rawQueuedCount : Math.max(0, rawQueuedCount - 1);
+  const isBusy = busy || hasPendingExecutionItems(agentId, conversationId);
+
+  return {
+    ...conversation,
+    isBusy,
+    queuedCount,
+    hasFailed,
+  };
 }
 
 /**
@@ -297,15 +399,12 @@ export function listRecentAgentConversations(limit = 10) {
   const agents = listAgents();
   const agentMap = new Map(agents.map((a) => [a.id, a]));
 
-  const all = store.find(
-    'conversations',
-    (r: Record<string, unknown>) => {
-      if (r.channelType !== 'agent') return false;
-      if (isBackgroundTriggerConversationRecord(r)) return false;
-      const meta = parseMetadata(r.metadata);
-      return !!meta?.agentId && agentMap.has(meta.agentId as string);
-    },
-  );
+  const all = store.find('conversations', (r: Record<string, unknown>) => {
+    if (r.channelType !== 'agent') return false;
+    if (isBackgroundTriggerConversationRecord(r)) return false;
+    const meta = parseMetadata(r.metadata);
+    return !!meta?.agentId && agentMap.has(meta.agentId as string);
+  });
 
   const sorted = all.sort((a, b) => {
     const aTime = a.lastMessageAt ? new Date(a.lastMessageAt as string).getTime() : 0;
@@ -372,8 +471,14 @@ export function validateConversationOwnership(
  * Delete a conversation and all its messages.
  */
 export function deleteAgentConversation(conversationId: string) {
-  store.deleteWhere('messages', (r: Record<string, unknown>) => r.conversationId === conversationId);
-  store.deleteWhere('messageDrafts', (r: Record<string, unknown>) => r.conversationId === conversationId);
+  store.deleteWhere(
+    'messages',
+    (r: Record<string, unknown>) => r.conversationId === conversationId,
+  );
+  store.deleteWhere(
+    'messageDrafts',
+    (r: Record<string, unknown>) => r.conversationId === conversationId,
+  );
   clearConversationQueue(conversationId);
   return store.delete('conversations', conversationId);
 }
@@ -429,13 +534,35 @@ function buildChildrenMap(
   return childrenMap;
 }
 
-function withSiblingMetadata(
+function isNonFinalAgentUpdateMessage(message: Record<string, unknown>): boolean {
+  if (message.type !== 'system') return false;
+  const metadata = parseMetadata(message.metadata);
+  return metadata?.agentChatUpdate === true && metadata?.isFinal === false;
+}
+
+function getSelectableBranchChildren(
+  childrenMap: Map<string, Record<string, unknown>[]>,
+  parentId: string,
+): Record<string, unknown>[] {
+  return (childrenMap.get(parentId) ?? []).filter(
+    (message) => !isNonFinalAgentUpdateMessage(message),
+  );
+}
+
+function withSelectedSiblingMetadata(
   message: Record<string, unknown>,
   siblings: Record<string, unknown>[],
 ): TreePathMessage {
+  if (siblings.length <= 1) {
+    return { ...message };
+  }
+
+  const selectedIndex = siblings.findIndex((sibling) => sibling.id === message.id);
+  if (selectedIndex === -1) return { ...message };
+
   return {
     ...message,
-    _siblingIndex: Math.max(0, siblings.findIndex((sibling) => sibling.id === message.id)),
+    _siblingIndex: selectedIndex,
     _siblingCount: siblings.length,
     _siblingIds: siblings.map((sibling) => sibling.id as string),
   };
@@ -487,16 +614,14 @@ function ensureConversationTree(conversationId: string): void {
  * Walk the conversation tree following active branches and return the active path.
  * For non-tree conversations, returns all messages in chronological order.
  */
-export function getActiveMessagePath(
-  conversationId: string,
-): TreePathMessage[] {
+export function getActiveMessagePath(conversationId: string): TreePathMessage[] {
   const allMessages = listConversationMessages(conversationId);
 
   if (allMessages.length === 0) return [];
 
   // Non-tree conversation: return flat list
   if (!allMessages.some((m) => m.parentId != null)) {
-    return allMessages.map((m) => withSiblingMetadata(m, [m]));
+    return allMessages.map((m) => ({ ...m }));
   }
 
   const activeBranches = getActiveBranches(conversationId);
@@ -507,7 +632,7 @@ export function getActiveMessagePath(
   let currentParent = ROOT_BRANCH_KEY;
 
   while (true) {
-    const siblings = childrenMap.get(currentParent);
+    const siblings = getSelectableBranchChildren(childrenMap, currentParent);
     if (!siblings || siblings.length === 0) break;
 
     const activeChildId = activeBranches[currentParent];
@@ -518,7 +643,7 @@ export function getActiveMessagePath(
     // Default to latest sibling
     if (!activeChild) activeChild = siblings[siblings.length - 1];
 
-    path.push(withSiblingMetadata(activeChild, siblings));
+    path.push(withSelectedSiblingMetadata(activeChild, siblings));
     currentParent = activeChild.id as string;
   }
 
@@ -532,7 +657,7 @@ function getMessagePathToLeaf(conversationId: string, leafMessageId: string): Tr
   if (!allMessages.some((m) => m.parentId != null)) {
     const leafIndex = allMessages.findIndex((message) => message.id === leafMessageId);
     if (leafIndex === -1) return [];
-    return allMessages.slice(0, leafIndex + 1).map((message) => withSiblingMetadata(message, [message]));
+    return allMessages.slice(0, leafIndex + 1).map((message) => ({ ...message }));
   }
 
   const messagesById = new Map(allMessages.map((message) => [message.id as string, message]));
@@ -551,8 +676,8 @@ function getMessagePathToLeaf(conversationId: string, leafMessageId: string): Tr
 
   return lineage.reverse().map((message) => {
     const parentId = (message.parentId as string | null) ?? ROOT_BRANCH_KEY;
-    const siblings = childrenMap.get(parentId) ?? [message];
-    return withSiblingMetadata(message, siblings);
+    const siblings = getSelectableBranchChildren(childrenMap, parentId);
+    return withSelectedSiblingMetadata(message, siblings);
   });
 }
 
@@ -564,6 +689,19 @@ function getActivePathLeaf(conversationId: string): Record<string, unknown> | nu
   return path.length > 0 ? path[path.length - 1] : null;
 }
 
+function getCurrentConversationLeafId(conversationId: string): string | null {
+  const messages = listConversationMessages(conversationId);
+  if (messages.length === 0) return null;
+
+  if (!messages.some((message) => message.parentId != null)) {
+    const latest = messages[messages.length - 1];
+    return typeof latest?.id === 'string' ? (latest.id as string) : null;
+  }
+
+  const leaf = getActivePathLeaf(conversationId);
+  return leaf && typeof leaf.id === 'string' ? (leaf.id as string) : null;
+}
+
 function setActiveBranchSelection(
   conversationId: string,
   parentId: string | null,
@@ -572,6 +710,33 @@ function setActiveBranchSelection(
   const activeBranches = getActiveBranches(conversationId);
   activeBranches[parentId ?? ROOT_BRANCH_KEY] = messageId;
   setActiveBranches(conversationId, activeBranches);
+}
+
+function getActiveBranchSelection(conversationId: string, parentId: string | null): string | null {
+  const activeBranches = getActiveBranches(conversationId);
+  const selected = activeBranches[parentId ?? ROOT_BRANCH_KEY];
+  return typeof selected === 'string' ? selected : null;
+}
+
+function shouldAutoSelectNewChild(
+  conversationId: string,
+  parentId: string | null,
+  currentLeafId: string | null,
+): boolean {
+  if ((parentId ?? null) === (currentLeafId ?? null)) return true;
+  return !getActiveBranchSelection(conversationId, parentId);
+}
+
+function activateMessagePath(conversationId: string, leafMessageId: string): void {
+  const path = getMessagePathToLeaf(conversationId, leafMessageId);
+  for (const message of path) {
+    if (typeof message.id !== 'string') continue;
+    setActiveBranchSelection(
+      conversationId,
+      (message.parentId as string | null) ?? null,
+      message.id as string,
+    );
+  }
 }
 
 /**
@@ -591,21 +756,28 @@ export function editMessageAndBranch(
   ensureConversationTree(conversationId);
 
   const original = store.getById('messages', messageId);
-  if (!original) throw new Error('Message not found');
-  if (original.conversationId !== conversationId) throw new Error('Message does not belong to conversation');
-  if (original.direction !== 'outbound') throw new Error('Only user messages can be edited');
+  if (!original) throw AgentChatError.notFound('message_not_found', 'Message not found');
+  if (original.conversationId !== conversationId) {
+    throw AgentChatError.notFound('message_not_found', 'Message not found');
+  }
+  if (original.direction !== 'outbound') {
+    throw AgentChatError.badRequest(
+      'message_edit_not_supported',
+      'Only user messages can be edited',
+    );
+  }
   if (original.type !== 'text' && original.type !== 'image') {
-    throw new Error('Only text and image messages can be edited');
+    throw AgentChatError.badRequest(
+      'message_edit_not_supported',
+      'Only text and image messages can be edited',
+    );
   }
 
   const parentId = (original.parentId as string | null) ?? null;
   const originalAttachments =
     original.type === 'image' ? cloneAttachmentRecords(parseAttachments(original.attachments)) : [];
   const hasKeepStoragePaths = Array.isArray(options.keepStoragePaths);
-  const keepStoragePathSet =
-    hasKeepStoragePaths
-      ? new Set(options.keepStoragePaths)
-      : null;
+  const keepStoragePathSet = hasKeepStoragePaths ? new Set(options.keepStoragePaths) : null;
   const retainedOriginalAttachments =
     keepStoragePathSet === null
       ? originalAttachments
@@ -623,14 +795,20 @@ export function editMessageAndBranch(
       ? [...retainedOriginalAttachments, ...appendedAttachments]
       : appendedAttachments;
   if (combinedAttachments.length > MAX_CHAT_MESSAGE_IMAGES) {
-    throw new Error(`A message can contain up to ${MAX_CHAT_MESSAGE_IMAGES} images`);
+    throw AgentChatError.badRequest(
+      'message_attachment_limit_exceeded',
+      `A message can contain up to ${MAX_CHAT_MESSAGE_IMAGES} images`,
+    );
   }
 
   const normalizedAttachments = combinedAttachments.length > 0 ? combinedAttachments : null;
   const nextType = normalizedAttachments ? 'image' : 'text';
   const trimmedContent = newContent.trim();
   if (nextType === 'text' && !trimmedContent) {
-    throw new Error('Edited message content is required');
+    throw AgentChatError.badRequest(
+      'edited_message_content_required',
+      'Edited message content is required',
+    );
   }
 
   // Create new sibling message
@@ -660,15 +838,20 @@ export function editMessageAndBranch(
  */
 export function switchBranch(conversationId: string, messageId: string): void {
   const msg = store.getById('messages', messageId);
-  if (!msg) throw new Error('Message not found');
-  if (msg.conversationId !== conversationId) throw new Error('Message does not belong to conversation');
+  if (!msg) throw AgentChatError.notFound('message_not_found', 'Message not found');
+  if (msg.conversationId !== conversationId) {
+    throw AgentChatError.notFound('message_not_found', 'Message not found');
+  }
 
   const parentId = msg.parentId as string | null;
-  const siblings = listConversationMessages(conversationId).filter(
-    (candidate) => ((candidate.parentId as string | null) ?? null) === (parentId ?? null),
-  );
-  if (!siblings.some((candidate) => candidate.id === messageId)) {
-    throw new Error('Message is not a valid branch choice');
+  const siblings = listConversationMessages(conversationId)
+    .filter((candidate) => ((candidate.parentId as string | null) ?? null) === (parentId ?? null))
+    .filter((candidate) => !isNonFinalAgentUpdateMessage(candidate));
+  if (siblings.length <= 1 || !siblings.some((candidate) => candidate.id === messageId)) {
+    throw AgentChatError.badRequest(
+      'invalid_branch_choice',
+      'Message is not a valid branch choice',
+    );
   }
 
   setActiveBranchSelection(conversationId, parentId, messageId);
@@ -699,6 +882,8 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     params.metadata?.agentChatUpdate === true &&
     params.metadata?.isFinal === false;
   const updateActiveBranch = params.updateActiveBranch ?? true;
+  const canAdvanceActiveBranch =
+    updateActiveBranch && (treeEnabled || params.parentId !== undefined) && !isProgressUpdate;
 
   // Resolve parentId: explicit value, or auto-compute from active path leaf
   let parentId: string | null = null;
@@ -708,6 +893,9 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     const leaf = getActivePathLeaf(params.conversationId);
     parentId = leaf ? (leaf.id as string) : null;
   }
+  const currentLeafId = canAdvanceActiveBranch
+    ? getCurrentConversationLeafId(params.conversationId)
+    : null;
 
   const msg = store.insert('messages', {
     conversationId: params.conversationId,
@@ -726,7 +914,10 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     isUnread: markUnread,
   });
 
-  if (updateActiveBranch && (treeEnabled || params.parentId !== undefined) && !isProgressUpdate) {
+  if (
+    canAdvanceActiveBranch &&
+    shouldAutoSelectNewChild(params.conversationId, parentId, currentLeafId)
+  ) {
     setActiveBranchSelection(params.conversationId, parentId, msg.id as string);
   }
 
@@ -740,11 +931,7 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
   return msg;
 }
 
-function saveMessage(
-  conversationId: string,
-  direction: 'inbound' | 'outbound',
-  content: string,
-) {
+function saveMessage(conversationId: string, direction: 'inbound' | 'outbound', content: string) {
   return saveAgentConversationMessage({
     conversationId,
     direction,
@@ -752,6 +939,72 @@ function saveMessage(
     type: 'text',
     metadata: null,
   });
+}
+
+function getQueueItemAnchorMessageId(queueItem: Record<string, unknown>): string | null {
+  const queuedMessageId =
+    typeof queueItem.queuedMessageId === 'string' ? (queueItem.queuedMessageId as string) : null;
+  if (queuedMessageId) return queuedMessageId;
+
+  return typeof queueItem.targetMessageId === 'string'
+    ? (queueItem.targetMessageId as string)
+    : null;
+}
+
+function ensureQueuedPromptMessage(
+  queueItemId: string,
+  queueItem: Record<string, unknown>,
+  conversationId: string,
+  prompt: string,
+): Record<string, unknown> {
+  const existingMessageId =
+    typeof queueItem.queuedMessageId === 'string' ? (queueItem.queuedMessageId as string) : null;
+  if (existingMessageId) {
+    const existingMessage = store.getById('messages', existingMessageId);
+    if (existingMessage && existingMessage.conversationId === conversationId) {
+      return existingMessage;
+    }
+  }
+
+  const getConversationMessageId = (messageId: unknown): string | null => {
+    if (typeof messageId !== 'string') return null;
+    const message = store.getById('messages', messageId);
+    if (!message || message.conversationId !== conversationId) return null;
+    return messageId;
+  };
+
+  let parentId = getConversationMessageId(queueItem.continuationParentId);
+  const dependsOnQueueItemId =
+    typeof queueItem.dependsOnQueueItemId === 'string'
+      ? (queueItem.dependsOnQueueItemId as string)
+      : null;
+  if (dependsOnQueueItemId) {
+    const dependency = store.getById(AGENT_CHAT_QUEUE_COLLECTION, dependsOnQueueItemId);
+    if (dependency && dependency.conversationId === conversationId) {
+      parentId =
+        getConversationMessageId(dependency.responseMessageId) ??
+        getConversationMessageId(getQueueItemAnchorMessageId(dependency)) ??
+        parentId;
+    }
+  }
+  parentId ??= getCurrentConversationLeafId(conversationId);
+
+  if (parentId) {
+    activateMessagePath(conversationId, parentId);
+  }
+
+  const userMessage = saveAgentConversationMessage({
+    conversationId,
+    direction: 'outbound',
+    content: prompt,
+    type: 'text',
+    metadata: null,
+    parentId,
+  });
+  store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
+    queuedMessageId: userMessage.id,
+  });
+  return userMessage;
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +1068,11 @@ function parseAttachments(raw: unknown): Array<Record<string, unknown>> {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw as Array<Record<string, unknown>>;
   if (typeof raw === 'string') {
-    try { return JSON.parse(raw); } catch { return []; }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
   }
   return [];
 }
@@ -921,10 +1178,13 @@ function buildPromptWithHistory(
       ? getActiveMessagePath(conversationId)
       : listConversationMessages(conversationId);
 
-  const triggerContext = buildTriggerContext('chat', { agentId, conversationId });
+  const triggerContext = buildTriggerContext('chat', {
+    agentId,
+    conversationId,
+  });
 
   if (history.length === 0 && currentPrompt) {
-    return `${triggerContext}\nUser: ${currentPrompt}`;
+    return `${triggerContext}User: ${currentPrompt}`;
   }
 
   const lines: string[] = [];
@@ -994,7 +1254,31 @@ function buildTriggerContext(
   return `${lines.join('\n')}\n`;
 }
 
-function buildChildEnv(agent: { apiKeyId: string; workspaceApiKey: string | null }): Record<string, string | undefined> {
+function buildEnvVarContextBlock(agentId: string): string {
+  const envVars = listAgentEnvVars(agentId).filter((entry) => entry.isActive);
+  if (envVars.length === 0) return '';
+
+  const lines = [
+    'Environment Variable Context',
+    'These env vars are configured for this agent and available in the runtime environment.',
+    'Use them only when needed. Never print full secret values in responses.',
+  ];
+
+  for (const entry of envVars) {
+    lines.push(`- ${entry.key}`);
+    if (entry.description) {
+      lines.push(`  Description: ${entry.description}`);
+    }
+  }
+
+  lines.push('End Environment Variable Context');
+  return lines.join('\n');
+}
+
+function buildChildEnv(
+  agentId: string,
+  agent: { apiKeyId: string; workspaceApiKey: string | null },
+): Record<string, string | undefined> {
   const childEnv: Record<string, string | undefined> = { ...process.env };
 
   // Prevent "nested session" errors when the backend itself runs inside Claude Code
@@ -1017,6 +1301,10 @@ function buildChildEnv(agent: { apiKeyId: string; workspaceApiKey: string | null
     const host = env.HOST === '0.0.0.0' ? 'localhost' : env.HOST;
     childEnv.WORKSPACE_API_URL = `${protocol}://${host}:${env.PORT}`;
     childEnv.WORKSPACE_API_KEY = agent.workspaceApiKey;
+  }
+
+  for (const entry of listRuntimeAgentEnvVarBindings(agentId)) {
+    childEnv[entry.key] = entry.value;
   }
 
   // Provide the projects output directory so agents never build inside the agent data dir
@@ -1050,7 +1338,9 @@ function listAgentApiUpdates(conversationId: string, runStartedAt: number) {
 }
 
 function findFinalAgentApiMessage(messages: Record<string, unknown>[]) {
-  return [...messages].reverse().find((msg) => parseMetadata(msg.metadata)?.isFinal === true) ?? null;
+  return (
+    [...messages].reverse().find((msg) => parseMetadata(msg.metadata)?.isFinal === true) ?? null
+  );
 }
 
 function listConversationInboundMessages(conversationId: string, sinceMs: number) {
@@ -1182,6 +1472,63 @@ function resolveFinalMessageForCompletedRun(
   return null;
 }
 
+/** Matches `POST /api/cards/:id/comments` body max length. */
+const MAX_CARD_AUTO_COMMENT_LENGTH = 5000;
+
+/**
+ * When a card-assignment run finishes successfully, persist the same final text
+ * users see on the agent run (stdout extraction) as a card comment — parallel to
+ * chat runs saving `saveAgentRunResponse`. Uses `agentRunId` for idempotency.
+ */
+function persistCompletedCardAssignmentComment(params: {
+  cardId: string;
+  agentId: string;
+  runId: string;
+  runStartedAtMs: number;
+  stdout: string;
+}): void {
+  const { cardId, agentId, runId, runStartedAtMs, stdout } = params;
+  try {
+    const dupByRun = store.find(
+      'cardComments',
+      (r: Record<string, unknown>) =>
+        r.cardId === cardId && r.agentRunId === runId,
+    );
+    if (dupByRun.length > 0) return;
+
+    let content = extractFinalResponseText(stdout).trim();
+    if (!content) content = '(empty response)';
+    if (content.length > MAX_CARD_AUTO_COMMENT_LENGTH) {
+      content = `${content.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 1)}…`;
+    }
+
+    const since = Number.isFinite(runStartedAtMs) ? runStartedAtMs : 0;
+    const manualDup = store.find(
+      'cardComments',
+      (r: Record<string, unknown>) => {
+        if (r.cardId !== cardId || r.authorId !== agentId) return false;
+        if (r.agentRunId) return false;
+        const t = new Date(r.createdAt as string).getTime();
+        if (!Number.isFinite(t) || t < since) return false;
+        return String(r.content || '').trim() === content;
+      },
+    );
+    if (manualDup.length > 0) return;
+
+    store.insert('cardComments', {
+      cardId,
+      authorId: agentId,
+      content,
+      agentRunId: runId,
+    });
+  } catch (err) {
+    console.error(
+      `[agent-chat] Failed to persist card assignment comment for run ${runId}:`,
+      (err as Error).message,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // RunHandle — replaces ChildProcess in the running processes map
 // ---------------------------------------------------------------------------
@@ -1204,8 +1551,58 @@ const runningProcesses = new Map<string, RunHandle>();
 const queueProcessors = new Set<string>();
 const queueDrainTimers = new Map<string, QueueDrainTimer>();
 
-function processKey(agentId: string, conversationId: string): string {
+function processKey(
+  agentId: string,
+  conversationId: string,
+  targetMessageId?: string | null,
+): string {
+  if (targetMessageId) return `${agentId}:${conversationId}:msg:${targetMessageId}`;
   return `${agentId}:${conversationId}`;
+}
+
+function hasLivePersistedChatRun(
+  agentId: string,
+  conversationId: string,
+  targetMessageId?: string | null,
+): boolean {
+  return store
+    .find(
+      'agent_runs',
+      (r: Record<string, unknown>) =>
+        r.status === 'running' &&
+        r.triggerType === 'chat' &&
+        r.agentId === agentId &&
+        r.conversationId === conversationId,
+    )
+    .some((run) => {
+      const pid = typeof run.pid === 'number' ? (run.pid as number) : null;
+      if (!pid || !isPidAlive(pid)) return false;
+      if (targetMessageId === undefined) return true;
+      const responseParentId =
+        typeof run.responseParentId === 'string' ? (run.responseParentId as string) : null;
+      return responseParentId === (targetMessageId ?? null);
+    });
+}
+
+function hasRunningProcessForTargetMessage(
+  agentId: string,
+  conversationId: string,
+  targetMessageId: string,
+): boolean {
+  if (runningProcesses.has(processKey(agentId, conversationId, targetMessageId))) {
+    return true;
+  }
+  return hasLivePersistedChatRun(agentId, conversationId, targetMessageId);
+}
+
+/** Check if ANY process is running for a given conversation (across all branches). */
+function hasRunningProcessForConversation(agentId: string, conversationId: string): boolean {
+  const prefix = `${agentId}:${conversationId}`;
+  for (const key of runningProcesses.keys()) {
+    if (key === prefix || key.startsWith(`${prefix}:`)) return true;
+  }
+  if (hasLivePersistedChatRun(agentId, conversationId)) return true;
+  return false;
 }
 
 function queueKey(agentId: string, conversationId: string): string {
@@ -1225,7 +1622,10 @@ function isRunMarkedKilledByUser(runId: string | null): boolean {
   return run.killedByUser === true || run.errorMessage === 'Killed by user';
 }
 
-function listConversationQueueItems(agentId: string, conversationId: string): Record<string, unknown>[] {
+function listConversationQueueItems(
+  agentId: string,
+  conversationId: string,
+): Record<string, unknown>[] {
   return store
     .find(
       AGENT_CHAT_QUEUE_COLLECTION,
@@ -1237,13 +1637,42 @@ function listConversationQueueItems(agentId: string, conversationId: string): Re
     );
 }
 
+function getQueueItemMode(item: Record<string, unknown>): QueueExecutionMode {
+  return (item.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
+}
+
+function isPendingQueueItem(item: Record<string, unknown>): boolean {
+  return item.status === 'queued' || item.status === 'processing';
+}
+
+function hasPendingExecutionItems(agentId: string, conversationId: string): boolean {
+  return listConversationQueueItems(agentId, conversationId).some((item) =>
+    isPendingQueueItem(item),
+  );
+}
+
 function getPendingQueueCount(agentId: string, conversationId: string): number {
+  return store.count(
+    AGENT_CHAT_QUEUE_COLLECTION,
+    (r: Record<string, unknown>) =>
+      r.agentId === agentId && r.conversationId === conversationId && r.status === 'queued',
+  );
+}
+
+function getQueuedAppendPromptCount(agentId: string, conversationId: string): number {
   return store.count(
     AGENT_CHAT_QUEUE_COLLECTION,
     (r: Record<string, unknown>) =>
       r.agentId === agentId &&
       r.conversationId === conversationId &&
-      r.status === 'queued',
+      r.status === 'queued' &&
+      getQueueItemMode(r) === 'append_prompt',
+  );
+}
+
+function conversationHasActiveExecutionFailure(agentId: string, conversationId: string): boolean {
+  return listConversationQueueItems(agentId, conversationId).some(
+    (item) => item.status === 'failed',
   );
 }
 
@@ -1299,10 +1728,7 @@ interface AttachOptions {
 }
 
 function attachToProcess(options: AttachOptions): RunHandle {
-  const {
-    runId, runKey, pid, stdoutPath, stderrPath,
-    runStartedAt, agentId,
-  } = options;
+  const { runId, runKey, pid, stdoutPath, stderrPath, runStartedAt, agentId } = options;
 
   let stdoutOffset = 0;
 
@@ -1350,12 +1776,20 @@ function attachToProcess(options: AttachOptions): RunHandle {
     // Read final output
     let stdout = '';
     let stderr = '';
-    try { stdout = fs.readFileSync(stdoutPath, 'utf-8'); } catch { /* */ }
-    try { stderr = fs.readFileSync(stderrPath, 'utf-8'); } catch { /* */ }
+    try {
+      stdout = fs.readFileSync(stdoutPath, 'utf-8');
+    } catch {
+      /* */
+    }
+    try {
+      stderr = fs.readFileSync(stderrPath, 'utf-8');
+    } catch {
+      /* */
+    }
 
     markAgentLastActivity(agentId);
     const hasError = !stdout.trim();
-    const errorMsg = hasError ? (stderr.trim() || 'Process exited') : null;
+    const errorMsg = hasError ? stderr.trim() || 'Process exited' : null;
     completeAgentRun(runId, errorMsg, { stdout, stderr });
 
     if (handle.onExit) {
@@ -1427,7 +1861,7 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
     imagePaths: options.imagePaths,
     filePaths: options.filePaths,
   });
-  const childEnv = buildChildEnv(options.agent);
+  const childEnv = buildChildEnv(options.agentId, options.agent);
 
   // Allocate a random port so the agent's project never conflicts with others
   const projectPort = await allocatePort();
@@ -1463,7 +1897,12 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
 
   let child;
   try {
-    child = spawn(bin, args, {
+    const resolvedBin = resolveCliExecutable(bin);
+    if (!resolvedBin) {
+      throw buildMissingCliError(bin, options.agent.model);
+    }
+
+    child = spawn(resolvedBin, args, {
       cwd: workDir,
       env: childEnv,
       detached: true,
@@ -1568,7 +2007,7 @@ export function reattachRunningProcess(run: Record<string, unknown>) {
   // Reconstruct the run key
   let runKey: string;
   if (triggerType === 'chat' && conversationId) {
-    runKey = processKey(agentId, conversationId);
+    runKey = processKey(agentId, conversationId, responseParentId);
   } else if (triggerType === 'cron_job' && cronJobId) {
     runKey = `${agentId}:cron:${cronJobId}`;
   } else if (triggerType === 'card_assignment' && cardId) {
@@ -1578,6 +2017,7 @@ export function reattachRunningProcess(run: Record<string, unknown>) {
   }
 
   if (runningProcesses.has(runKey)) return;
+  globalRunningCount++;
 
   const runStartedAt = new Date(run.startedAt as string).getTime();
 
@@ -1622,6 +2062,19 @@ export function reattachRunningProcess(run: Record<string, unknown>) {
         finalMessage,
         fallbackErrorMessage,
       );
+      return;
+    }
+
+    if (triggerType === 'card_assignment' && cardId) {
+      if (isRunMarkedKilledByUser(runId)) return;
+      if ((result.code ?? 1) !== 0) return;
+      persistCompletedCardAssignmentComment({
+        cardId,
+        agentId,
+        runId,
+        runStartedAtMs: result.runStartedAt,
+        stdout: result.stdout,
+      });
     }
   };
 
@@ -1669,8 +2122,7 @@ export function recoverCompletedChatRunsOnStartup(): number {
 
   for (const run of completedChatRuns) {
     const runId = typeof run.id === 'string' ? run.id : null;
-    const conversationId =
-      typeof run.conversationId === 'string' ? run.conversationId : null;
+    const conversationId = typeof run.conversationId === 'string' ? run.conversationId : null;
     if (!runId || !conversationId) continue;
 
     const runStartedAtMs = parseIsoDateMs(run.startedAt);
@@ -1719,8 +2171,41 @@ export function recoverCompletedChatRunsOnStartup(): number {
 
 export interface ExecutePromptCallbacks {
   onRunCreated?: (runId: string) => void;
+  onFallbackStarted?: (model: string) => void;
   onDone: (message: Record<string, unknown>) => void;
   onError: (error: string) => void;
+}
+
+function attachFallbackMetadataToMessage(
+  message: Record<string, unknown>,
+  fallbackModel: string,
+): Record<string, unknown> {
+  if (typeof message.id !== 'string') return message;
+  const current = parseMetadata(message.metadata) ?? {};
+  const next = { ...current, fallbackRetry: true, fallbackModel };
+  const updated = store.update('messages', message.id, {
+    metadata: JSON.stringify(next),
+  });
+  return updated ?? { ...message, metadata: JSON.stringify(next) };
+}
+
+function wrapChatExecuteCallbacks(callbacks: ExecutePromptCallbacks): ExecutePromptCallbacks {
+  let fallbackModelName: string | null = null;
+  return {
+    onRunCreated: callbacks.onRunCreated,
+    onFallbackStarted: (model: string) => {
+      fallbackModelName = model;
+      callbacks.onFallbackStarted?.(model);
+    },
+    onDone: (message) => {
+      const finalMessage =
+        fallbackModelName !== null
+          ? attachFallbackMetadataToMessage(message, fallbackModelName)
+          : message;
+      callbacks.onDone(finalMessage);
+    },
+    onError: callbacks.onError,
+  };
 }
 
 function spawnChatProcess(
@@ -1729,141 +2214,126 @@ function spawnChatProcess(
   fullPrompt: string,
   attachmentPaths: ConversationAttachmentDiskPaths,
   callbacks: ExecutePromptCallbacks,
-  options?: { isFallback?: boolean; responseParentId?: string | null },
+  options?: {
+    isFallback?: boolean;
+    responseParentId?: string | null;
+    targetMessageId?: string | null;
+  },
 ) {
   const isFallback = options?.isFallback ?? false;
   const responseParentId = options?.responseParentId ?? null;
+  const targetMessageId = options?.targetMessageId ?? null;
 
-  void prepareAgentWorkspaceAccess(agentId).then((agent) => {
-    if (!agent) {
-      callbacks.onError('Agent not found');
-      return;
-    }
+  void prepareAgentWorkspaceAccess(agentId)
+    .then((agent) => {
+      if (!agent) {
+        callbacks.onError('Agent not found');
+        return;
+      }
 
-    // If this is a fallback retry, override agent model with global fallback settings
-    const effectiveAgent = isFallback ? applyFallbackModel(agent) : agent;
-    if (isFallback && !effectiveAgent) {
-      callbacks.onError('Fallback model is not configured');
-      return;
-    }
+      // If this is a fallback retry, override agent model with global fallback settings
+      const effectiveAgent = isFallback ? applyFallbackModel(agent) : agent;
+      if (isFallback && !effectiveAgent) {
+        callbacks.onError('Fallback model is not configured');
+        return;
+      }
 
-    const key = processKey(agentId, conversationId);
-    const hasImages = attachmentPaths.imagePaths.length > 0;
-    const hasFiles = attachmentPaths.filePaths.length > 0;
-    let spawnedRunId: string | null = null;
+      const key = processKey(agentId, conversationId, targetMessageId);
+      const hasImages = attachmentPaths.imagePaths.length > 0;
+      const hasFiles = attachmentPaths.filePaths.length > 0;
+      let spawnedRunId: string | null = null;
 
-    void runAgentProcess({
-      agentId,
-      agent: effectiveAgent!,
-      runKey: key,
-      prompt: fullPrompt,
-      imagePaths: hasImages ? attachmentPaths.imagePaths : undefined,
-      filePaths: hasFiles ? attachmentPaths.filePaths : undefined,
-      triggerType: 'chat',
-      triggerRef: { conversationId },
-      responseParentId,
-      onRunCreated: (runId) => {
-        spawnedRunId = runId;
-        callbacks.onRunCreated?.(runId);
-      },
-      onExit: ({ code, stdout, stderr, runStartedAt }) => {
-        if (isRunMarkedKilledByUser(spawnedRunId)) {
-          callbacks.onError('Killed by user');
-          return;
-        }
+      void runAgentProcess({
+        agentId,
+        agent: effectiveAgent!,
+        runKey: key,
+        prompt: fullPrompt,
+        imagePaths: hasImages ? attachmentPaths.imagePaths : undefined,
+        filePaths: hasFiles ? attachmentPaths.filePaths : undefined,
+        triggerType: 'chat',
+        triggerRef: { conversationId },
+        responseParentId,
+        onRunCreated: (runId) => {
+          spawnedRunId = runId;
+          callbacks.onRunCreated?.(runId);
+        },
+        onExit: ({ code, stdout, stderr, runStartedAt }) => {
+          if (isRunMarkedKilledByUser(spawnedRunId)) {
+            callbacks.onError('Killed by user');
+            return;
+          }
 
-        if ((code ?? 1) !== 0 && !stdout.trim()) {
-          // Primary model failed — attempt fallback if configured and not already a fallback
+          if ((code ?? 1) !== 0 && !stdout.trim()) {
+            // Primary model failed — attempt fallback if configured and not already a fallback
+            if (!isFallback) {
+              const fallback = getFallbackModelConfig();
+              if (fallback) {
+                const errMsg = stderr.trim() || `Process exited with code ${code}`;
+                console.log(
+                  `[agent-chat] Primary model failed for agent ${agentId}: ${errMsg}. Retrying with fallback model "${fallback.model}"...`,
+                );
+                callbacks.onFallbackStarted?.(fallback.model);
+                spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, callbacks, {
+                  isFallback: true,
+                  responseParentId,
+                  targetMessageId,
+                });
+                return;
+              }
+            }
+            const errMsg = stderr.trim() || `Process exited with code ${code}`;
+            callbacks.onError(errMsg);
+            return;
+          }
+
+          const updatesFromApi = listAgentApiUpdates(conversationId, runStartedAt);
+          const finalApiMessage = findFinalAgentApiMessage(updatesFromApi);
+          // extractFinalResponseText handles both plain text and stream-json output gracefully.
+          const stdoutText = extractFinalResponseText(stdout);
+
+          let msg: Record<string, unknown>;
+          if (finalApiMessage) {
+            msg = attachRunIdToMessage(finalApiMessage, spawnedRunId);
+          } else if (stdoutText) {
+            msg = saveAgentRunResponse(conversationId, stdoutText, responseParentId, {
+              runId: spawnedRunId,
+            });
+          } else if (updatesFromApi.length > 0) {
+            msg = attachRunIdToMessage(updatesFromApi[updatesFromApi.length - 1], spawnedRunId);
+          } else {
+            msg = saveAgentRunResponse(conversationId, '(empty response)', responseParentId, {
+              runId: spawnedRunId,
+            });
+          }
+
+          callbacks.onDone(msg);
+        },
+        onSpawnError: (err) => {
+          // Primary model spawn failed — attempt fallback
           if (!isFallback) {
             const fallback = getFallbackModelConfig();
             if (fallback) {
-              const errMsg = stderr.trim() || `Process exited with code ${code}`;
               console.log(
-                `[agent-chat] Primary model failed for agent ${agentId}: ${errMsg}. Retrying with fallback model "${fallback.model}"...`,
+                `[agent-chat] Primary model spawn failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
               );
-              saveAgentConversationMessage({
-                conversationId,
-                direction: 'inbound',
-                type: 'system',
-                content: `Switched to fallback model`,
-                metadata: {
-                  agentChatUpdate: true,
-                  isFinal: false,
-                  fallbackRetry: true,
-                  fallbackModel: fallback.model,
-                  runId: spawnedRunId,
-                },
-              });
+              callbacks.onFallbackStarted?.(fallback.model);
               spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, callbacks, {
                 isFallback: true,
                 responseParentId,
+                targetMessageId,
               });
               return;
             }
           }
-          const errMsg = stderr.trim() || `Process exited with code ${code}`;
-          callbacks.onError(errMsg);
-          return;
-        }
-
-        const updatesFromApi = listAgentApiUpdates(conversationId, runStartedAt);
-        const finalApiMessage = findFinalAgentApiMessage(updatesFromApi);
-        // extractFinalResponseText handles both plain text and stream-json output gracefully.
-        const stdoutText = extractFinalResponseText(stdout);
-
-        let msg: Record<string, unknown>;
-        if (finalApiMessage) {
-          msg = attachRunIdToMessage(finalApiMessage, spawnedRunId);
-        } else if (stdoutText) {
-          msg = saveAgentRunResponse(conversationId, stdoutText, responseParentId, {
-            runId: spawnedRunId,
-          });
-        } else if (updatesFromApi.length > 0) {
-          msg = attachRunIdToMessage(updatesFromApi[updatesFromApi.length - 1], spawnedRunId);
-        } else {
-          msg = saveAgentRunResponse(conversationId, '(empty response)', responseParentId, {
-            runId: spawnedRunId,
-          });
-        }
-
-        callbacks.onDone(msg);
-      },
-      onSpawnError: (err) => {
-        // Primary model spawn failed — attempt fallback
-        if (!isFallback) {
-          const fallback = getFallbackModelConfig();
-          if (fallback) {
-            console.log(
-              `[agent-chat] Primary model spawn failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
-            );
-            saveAgentConversationMessage({
-              conversationId,
-              direction: 'inbound',
-              type: 'system',
-              content: `Switched to fallback model`,
-              metadata: {
-                agentChatUpdate: true,
-                isFinal: false,
-                fallbackRetry: true,
-                fallbackModel: fallback.model,
-                runId: spawnedRunId,
-              },
-            });
-            spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, callbacks, {
-              isFallback: true,
-              responseParentId,
-            });
-            return;
-          }
-        }
-        callbacks.onError(`Failed to start CLI: ${err.message}`);
-      },
-    }).catch((err: unknown) => {
-      callbacks.onError((err as Error).message);
+          callbacks.onError(`Failed to start CLI: ${err.message}`);
+        },
+      }).catch((err: unknown) => {
+        callbacks.onError((err as Error).message);
+      });
+    })
+    .catch((error: unknown) => {
+      callbacks.onError((error as Error).message);
     });
-  }).catch((error: unknown) => {
-    callbacks.onError((error as Error).message);
-  });
 }
 
 /**
@@ -1886,18 +2356,25 @@ export function executePrompt(
   agentId: string,
   prompt: string,
   conversationId: string,
-  options: { onRunCreated?: (runId: string) => void } = {},
+  options: {
+    onRunCreated?: (runId: string) => void;
+    onFallbackStarted?: (model: string) => void;
+  } = {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const agent = getAgent(agentId);
     if (!agent) {
-      reject(new Error('Agent not found'));
+      reject(AgentChatError.notFound('agent_not_found', 'Agent not found'));
       return;
     }
 
-    const key = processKey(agentId, conversationId);
-    if (runningProcesses.has(key)) {
-      reject(new Error('Agent is already processing a prompt'));
+    if (hasRunningProcessForConversation(agentId, conversationId)) {
+      reject(
+        AgentChatError.conflict(
+          'conversation_processing_in_progress',
+          'Agent is already processing a prompt',
+        ),
+      );
       return;
     }
 
@@ -1907,13 +2384,21 @@ export function executePrompt(
     // Save user message
     const userMessage = saveMessage(conversationId, 'outbound', prompt);
 
-    spawnChatProcess(agentId, conversationId, fullPrompt, { imagePaths: [], filePaths: [] }, {
-      onRunCreated: options.onRunCreated,
-      onDone: resolve,
-      onError: (error) => reject(new Error(error)),
-    }, {
-      responseParentId: userMessage.id as string,
-    });
+    spawnChatProcess(
+      agentId,
+      conversationId,
+      fullPrompt,
+      { imagePaths: [], filePaths: [] },
+      wrapChatExecuteCallbacks({
+        onRunCreated: options.onRunCreated,
+        onFallbackStarted: options.onFallbackStarted,
+        onDone: resolve,
+        onError: (error) => reject(new Error(error)),
+      }),
+      {
+        responseParentId: userMessage.id as string,
+      },
+    );
   });
 }
 
@@ -1921,37 +2406,53 @@ function executeRespondToMessage(
   agentId: string,
   conversationId: string,
   parentMessageId: string,
-  options: { onRunCreated?: (runId: string) => void } = {},
+  options: {
+    onRunCreated?: (runId: string) => void;
+    onFallbackStarted?: (model: string) => void;
+  } = {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const agent = getAgent(agentId);
     if (!agent) {
-      reject(new Error('Agent not found'));
+      reject(AgentChatError.notFound('agent_not_found', 'Agent not found'));
       return;
     }
 
-    const key = processKey(agentId, conversationId);
-    if (runningProcesses.has(key)) {
-      reject(new Error('Agent is already processing a prompt'));
+    if (hasRunningProcessForTargetMessage(agentId, conversationId, parentMessageId)) {
+      reject(
+        AgentChatError.conflict(
+          'message_processing_in_progress',
+          'Agent is already processing this message',
+        ),
+      );
       return;
     }
 
     const parentMessage = store.getById('messages', parentMessageId);
     if (!parentMessage || parentMessage.conversationId !== conversationId) {
-      reject(new Error('Message not found'));
+      reject(AgentChatError.notFound('message_not_found', 'Message not found'));
       return;
     }
 
     const fullPrompt = buildPromptWithHistory(agentId, conversationId, undefined, parentMessageId);
     const attachmentPaths = getConversationAttachmentDiskPaths(conversationId, parentMessageId);
 
-    spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, {
-      onRunCreated: options.onRunCreated,
-      onDone: resolve,
-      onError: (error) => reject(new Error(error)),
-    }, {
-      responseParentId: parentMessageId,
-    });
+    spawnChatProcess(
+      agentId,
+      conversationId,
+      fullPrompt,
+      attachmentPaths,
+      wrapChatExecuteCallbacks({
+        onRunCreated: options.onRunCreated,
+        onFallbackStarted: options.onFallbackStarted,
+        onDone: resolve,
+        onError: (error) => reject(new Error(error)),
+      }),
+      {
+        responseParentId: parentMessageId,
+        targetMessageId: parentMessageId,
+      },
+    );
   });
 }
 
@@ -1965,13 +2466,29 @@ export function executeRespondToLastMessage(
 ): Promise<Record<string, unknown>> {
   const leaf = getActivePathLeaf(conversationId);
   if (!leaf || typeof leaf.id !== 'string') {
-    return Promise.reject(new Error('Conversation has no message to respond to'));
+    return Promise.reject(
+      AgentChatError.badRequest(
+        'response_target_missing',
+        'Conversation has no message to respond to',
+      ),
+    );
   }
   return executeRespondToMessage(agentId, conversationId, leaf.id as string);
 }
 
 export function isAgentBusy(agentId: string, conversationId: string): boolean {
-  return runningProcesses.has(processKey(agentId, conversationId));
+  return hasRunningProcessForConversation(agentId, conversationId);
+}
+
+export function canRespondToMessageStartImmediately(
+  agentId: string,
+  conversationId: string,
+  targetMessageId: string,
+): boolean {
+  if (hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId)) {
+    return false;
+  }
+  return getGlobalRunningAgentCount() < getMaxConcurrentAgents();
 }
 
 function clearConversationQueue(conversationId: string) {
@@ -2026,10 +2543,7 @@ function normalizeQueueMaxAttempts(value: unknown): number {
   return Math.floor(parsed);
 }
 
-function markQueueItemCompleted(
-  queueItemId: string,
-  finalMessage: Record<string, unknown> | null,
-) {
+function markQueueItemCompleted(queueItemId: string, finalMessage: Record<string, unknown> | null) {
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     status: 'completed',
     completedAt: new Date().toISOString(),
@@ -2039,16 +2553,13 @@ function markQueueItemCompleted(
     responseMessageId:
       finalMessage && typeof finalMessage.id === 'string'
         ? finalMessage.id
-        : (finalMessage?.id as string | undefined) ?? null,
+        : ((finalMessage?.id as string | undefined) ?? null),
   });
 }
 
-function markQueueItemCancelledByUser(
-  queueItemId: string,
-  errorMessage = 'Cancelled by user',
-) {
+function markQueueItemCancelledByUser(queueItemId: string, errorMessage = 'Cancelled by user') {
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
-    status: 'failed',
+    status: 'cancelled',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
     runId: null,
@@ -2060,10 +2571,20 @@ function retryOrFailQueueItem(
   queueItemId: string,
   queueItem: Record<string, unknown>,
   agentId: string,
-  conversationId: string,
   errorMessage: string,
   attemptsUsed: number,
 ) {
+  if (isPermanentQueueError(errorMessage)) {
+    store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
+      status: 'failed',
+      completedAt: new Date().toISOString(),
+      nextAttemptAt: null,
+      runId: null,
+      errorMessage,
+    });
+    return;
+  }
+
   const rateLimited = isRateLimitError(errorMessage);
   // Rate-limited runs get extra attempts and longer backoff
   const maxAttempts = rateLimited
@@ -2078,16 +2599,20 @@ function retryOrFailQueueItem(
     if (rateLimited) {
       console.log(
         `[agent-chat] Rate limit detected for agent ${agentId}, attempt ${attemptsUsed}/${maxAttempts}. ` +
-        `Retrying in ${Math.round(retryDelayMs / 1000)}s`,
+          `Retrying in ${Math.round(retryDelayMs / 1000)}s`,
       );
     }
 
     store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
       status: 'queued',
       completedAt: null,
-      errorMessage: rateLimited ? `Rate limited — retrying (attempt ${attemptsUsed}/${maxAttempts})` : errorMessage,
+      errorMessage: rateLimited
+        ? `Rate limited — retrying (attempt ${attemptsUsed}/${maxAttempts})`
+        : errorMessage,
       runId: null,
       nextAttemptAt: new Date(Date.now() + retryDelayMs).toISOString(),
+      usedFallback: false,
+      fallbackModel: null,
     });
     return;
   }
@@ -2103,23 +2628,9 @@ function retryOrFailQueueItem(
     runId: null,
     errorMessage: displayError,
   });
-  saveAgentConversationMessage({
-    conversationId,
-    direction: 'inbound',
-    type: 'system',
-    content: `Queued message failed after ${maxAttempts} attempt${maxAttempts === 1 ? '' : 's'}: ${displayError}`,
-    metadata: {
-      agentChatUpdate: true,
-      isFinal: true,
-      queuedFailure: true,
-      runId: null,
-    },
-  });
 }
 
-function recoverInterruptedQueueItemFromRun(
-  queueItem: Record<string, unknown>,
-): boolean {
+function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>): boolean {
   const queueItemId = typeof queueItem.id === 'string' ? queueItem.id : null;
   const agentId = typeof queueItem.agentId === 'string' ? queueItem.agentId : null;
   const conversationId =
@@ -2166,14 +2677,7 @@ function recoverInterruptedQueueItemFromRun(
       : runStatus === 'completed'
         ? 'Recovered run completed without a response'
         : 'Recovered run failed after backend restart';
-  retryOrFailQueueItem(
-    queueItemId,
-    queueItem,
-    agentId,
-    conversationId,
-    errorMessage,
-    attemptsUsed,
-  );
+  retryOrFailQueueItem(queueItemId, queueItem, agentId, errorMessage, attemptsUsed);
   return true;
 }
 
@@ -2187,9 +2691,7 @@ function findProcessingQueueItemForRun(
     .find(
       AGENT_CHAT_QUEUE_COLLECTION,
       (r: Record<string, unknown>) =>
-        r.agentId === agentId &&
-        r.conversationId === conversationId &&
-        r.status === 'processing',
+        r.agentId === agentId && r.conversationId === conversationId && r.status === 'processing',
     )
     .sort(
       (a: Record<string, unknown>, b: Record<string, unknown>) =>
@@ -2227,7 +2729,12 @@ function finalizeRecoveredQueueItemForRun(
   finalMessage: Record<string, unknown> | null,
   fallbackErrorMessage: string,
 ) {
-  const processingItem = findProcessingQueueItemForRun(agentId, conversationId, runId, runStartedAt);
+  const processingItem = findProcessingQueueItemForRun(
+    agentId,
+    conversationId,
+    runId,
+    runStartedAt,
+  );
   if (!processingItem || typeof processingItem.id !== 'string') return;
 
   if (isRunMarkedKilledByUser(runId)) {
@@ -2247,11 +2754,79 @@ function finalizeRecoveredQueueItemForRun(
     processingItem.id,
     processingItem,
     agentId,
-    conversationId,
     fallbackErrorMessage,
     attemptsUsed,
   );
   scheduleQueueDrain(agentId, conversationId, 0);
+}
+
+/**
+ * Shared logic for processing a single queue item after it has been marked as 'processing'.
+ * Returns the final message on success, throws on failure.
+ */
+async function processQueueItem(
+  readyItemId: string,
+  readyItem: Record<string, unknown>,
+  agentId: string,
+  conversationId: string,
+  mode: QueueExecutionMode,
+  prompt: string,
+  targetMessageId: string | null,
+): Promise<void> {
+  let spawnedRunId: string | null = null;
+  try {
+    let effectiveTargetId = targetMessageId;
+    if (mode === 'append_prompt') {
+      const promptMessage = ensureQueuedPromptMessage(
+        readyItemId,
+        readyItem,
+        conversationId,
+        prompt,
+      );
+      effectiveTargetId =
+        typeof promptMessage.id === 'string' ? (promptMessage.id as string) : null;
+    }
+
+    if (!effectiveTargetId) {
+      throw AgentChatError.notFound('queue_target_missing', 'Queued message target is missing');
+    }
+
+    const onRunCreated = (runId: string) => {
+      spawnedRunId = runId;
+      store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+        runId,
+        lastRunId: runId,
+      });
+    };
+    const onFallbackStarted = (model: string) => {
+      store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+        usedFallback: true,
+        fallbackModel: model,
+      });
+    };
+    const finalMessage = await executeRespondToMessage(agentId, conversationId, effectiveTargetId, {
+      onRunCreated,
+      onFallbackStarted,
+    });
+    const latestItem = store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId);
+    if (!latestItem || latestItem.status !== 'processing') return;
+    markQueueItemCompleted(readyItemId, finalMessage);
+  } catch (err) {
+    const latestItem = store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId);
+    if (!latestItem || latestItem.status !== 'processing') return;
+
+    const activeRunId =
+      typeof latestItem.runId === 'string' && latestItem.runId ? latestItem.runId : spawnedRunId;
+    if (isRunMarkedKilledByUser(activeRunId)) {
+      markQueueItemCancelledByUser(readyItemId);
+      return;
+    }
+
+    const errorMessage =
+      err instanceof Error ? err.message : 'Failed to process queued chat message';
+    const attemptsUsed = normalizeQueueAttemptCount(latestItem.attempts);
+    retryOrFailQueueItem(readyItemId, latestItem, agentId, errorMessage, attemptsUsed);
+  }
 }
 
 async function drainConversationQueue(agentId: string, conversationId: string): Promise<void> {
@@ -2262,10 +2837,11 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
   try {
     while (true) {
       const queueItems = listConversationQueueItems(agentId, conversationId);
+      const now = Date.now();
       const readyItem = queueItems.find((item) => {
         if (item.status !== 'queued') return false;
         const nextAttemptAtMs = parseIsoDateMs(item.nextAttemptAt);
-        return !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= Date.now();
+        return !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= now;
       });
 
       if (!readyItem) {
@@ -2278,23 +2854,16 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
         return;
       }
 
-      if (isAgentBusy(agentId, conversationId)) {
-        scheduleQueueDrain(agentId, conversationId, 1000);
-        return;
-      }
-
-      // Global concurrency gate — defer if all slots are occupied
-      if (globalRunningCount >= getMaxConcurrentAgents()) {
-        scheduleQueueDrain(agentId, conversationId, 2000);
-        return;
-      }
-
       const readyItemId = readyItem.id as string;
       const attempts = Number(readyItem.attempts ?? 0);
       const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
       const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
       const targetMessageId =
-        typeof readyItem.targetMessageId === 'string' ? (readyItem.targetMessageId as string) : null;
+        typeof readyItem.targetMessageId === 'string'
+          ? (readyItem.targetMessageId as string)
+          : null;
+
+      // Validate item
       if (mode === 'append_prompt' && !prompt) {
         store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
           status: 'failed',
@@ -2315,61 +2884,69 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
         });
         continue;
       }
+
+      // Mode-aware busy check:
+      // - respond_to_message (branch edits): only block if this specific target is already running
+      // - append_prompt: block if ANY process is running for the conversation (serial)
+      if (mode === 'respond_to_message' && targetMessageId) {
+        if (hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId)) {
+          // This specific target is already running — reschedule
+          scheduleQueueDrain(agentId, conversationId, 1000);
+          return;
+        }
+      } else {
+        if (hasRunningProcessForConversation(agentId, conversationId)) {
+          scheduleQueueDrain(agentId, conversationId, 1000);
+          return;
+        }
+      }
+
+      // Global concurrency gate — defer if all slots are occupied
+      if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
+        scheduleQueueDrain(agentId, conversationId, 2000);
+        return;
+      }
+
       store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
         status: 'processing',
         attempts: attempts + 1,
         startedAt: new Date().toISOString(),
         runId: null,
         errorMessage: null,
+        completedAt: null,
+        usedFallback: false,
+        fallbackModel: null,
       });
 
-      let spawnedRunId: string | null = null;
-      try {
-        const onRunCreated = (runId: string) => {
-          spawnedRunId = runId;
-          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, { runId });
-        };
-        const finalMessage =
-          mode === 'respond_to_message' && targetMessageId
-            ? await executeRespondToMessage(agentId, conversationId, targetMessageId, {
-                onRunCreated,
-              })
-            : await executePrompt(agentId, prompt, conversationId, { onRunCreated });
-        const latestItem = store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId);
-        if (!latestItem || latestItem.status !== 'processing') {
-          scheduleQueueDrain(agentId, conversationId, 0);
-          continue;
-        }
-        markQueueItemCompleted(readyItemId, finalMessage);
-      } catch (err) {
-        const latestItem = store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId);
-        if (!latestItem || latestItem.status !== 'processing') {
-          scheduleQueueDrain(agentId, conversationId, 0);
-          continue;
-        }
-
-        const activeRunId =
-          typeof latestItem.runId === 'string' && latestItem.runId
-            ? latestItem.runId
-            : spawnedRunId;
-        if (isRunMarkedKilledByUser(activeRunId)) {
-          markQueueItemCancelledByUser(readyItemId);
-          scheduleQueueDrain(agentId, conversationId, 0);
-          continue;
-        }
-
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to process queued chat message';
-        const attemptsUsed = normalizeQueueAttemptCount(latestItem.attempts);
-        retryOrFailQueueItem(
+      if (mode === 'respond_to_message') {
+        // Fire without blocking — branch operations run in parallel.
+        // On completion, re-trigger the drain to pick up any remaining items.
+        void processQueueItem(
           readyItemId,
-          latestItem,
+          readyItem,
           agentId,
           conversationId,
-          errorMessage,
-          attemptsUsed,
-        );
+          mode,
+          prompt,
+          targetMessageId,
+        ).finally(() => {
+          scheduleQueueDrain(agentId, conversationId, 0);
+        });
+        // Continue the loop to pick up more branch items
+        continue;
       }
+
+      // append_prompt — block and process serially
+      await processQueueItem(
+        readyItemId,
+        readyItem,
+        agentId,
+        conversationId,
+        mode,
+        prompt,
+        targetMessageId,
+      );
+      scheduleQueueDrain(agentId, conversationId, 0);
     }
   } finally {
     queueProcessors.delete(key);
@@ -2379,7 +2956,9 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
 function pruneChatQueueHistory() {
   const now = Date.now();
   store.deleteWhere(AGENT_CHAT_QUEUE_COLLECTION, (r: Record<string, unknown>) => {
-    if (r.status !== 'completed' && r.status !== 'failed') return false;
+    if (r.status !== 'completed' && r.status !== 'failed' && r.status !== 'cancelled') {
+      return false;
+    }
     const completedAtMs = parseIsoDateMs(r.completedAt);
     if (!Number.isFinite(completedAtMs)) return false;
     return now - completedAtMs > AGENT_CHAT_QUEUE_RETENTION_MS;
@@ -2387,7 +2966,7 @@ function pruneChatQueueHistory() {
 }
 
 export function getAgentQueuedPromptCount(agentId: string, conversationId: string): number {
-  return getPendingQueueCount(agentId, conversationId);
+  return getQueuedAppendPromptCount(agentId, conversationId);
 }
 
 export function cancelProcessingQueueItemForRun(
@@ -2475,16 +3054,32 @@ export function enqueueAgentPrompt(
   const trimmedPrompt = prompt.trim();
   const mode = options.mode ?? 'append_prompt';
   if (!trimmedPrompt && mode !== 'respond_to_message') {
-    throw new Error('Prompt is required');
+    throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
   }
   const targetMessageId = options.targetMessageId ?? null;
   if (mode === 'respond_to_message') {
     if (!targetMessageId) {
-      throw new Error('Target message is required');
+      throw AgentChatError.badRequest('target_message_required', 'Target message is required');
     }
     const targetMessage = store.getById('messages', targetMessageId);
     if (!targetMessage || targetMessage.conversationId !== conversationId) {
-      throw new Error('Target message not found');
+      throw AgentChatError.notFound('target_message_not_found', 'Target message not found');
+    }
+  }
+
+  let continuationParentId: string | null = null;
+  let dependsOnQueueItemId: string | null = null;
+  if (mode === 'append_prompt') {
+    const pendingAppendItems = listConversationQueueItems(agentId, conversationId).filter(
+      (item) =>
+        (item.status === 'queued' || item.status === 'processing') &&
+        ((item.mode as QueueExecutionMode | undefined) ?? 'append_prompt') === 'append_prompt',
+    );
+    const previousAppendItem = pendingAppendItems[pendingAppendItems.length - 1];
+    if (previousAppendItem && typeof previousAppendItem.id === 'string') {
+      dependsOnQueueItemId = previousAppendItem.id as string;
+    } else {
+      continuationParentId = getCurrentConversationLeafId(conversationId);
     }
   }
 
@@ -2500,19 +3095,24 @@ export function enqueueAgentPrompt(
     attempts: 0,
     maxAttempts: AGENT_CHAT_QUEUE_DEFAULT_MAX_ATTEMPTS,
     runId: null,
+    lastRunId: null,
+    continuationParentId,
+    dependsOnQueueItemId,
     queuedMessageId: null,
     responseMessageId: null,
     errorMessage: null,
     nextAttemptAt: new Date().toISOString(),
     startedAt: null,
     completedAt: null,
+    usedFallback: false,
+    fallbackModel: null,
   });
 
   scheduleQueueDrain(agentId, conversationId, 0);
 
-  // If the agent is not currently busy, the just-enqueued item will be picked
-  // up immediately by the drain timer, so it shouldn't count as "queued behind".
-  const rawCount = getPendingQueueCount(agentId, conversationId);
+  // Only append prompts belong to the visible conversation queue. Branch edits
+  // run independently and should not inflate the queue badge.
+  const rawCount = getQueuedAppendPromptCount(agentId, conversationId);
   const effectiveCount = isAgentBusy(agentId, conversationId)
     ? rawCount
     : Math.max(0, rawCount - 1);
@@ -2533,22 +3133,39 @@ export function getConversationQueueItems(agentId: string, conversationId: strin
   );
 }
 
+export function getConversationExecutionItems(agentId: string, conversationId: string) {
+  return listConversationQueueItems(agentId, conversationId);
+}
+
 export function updateQueueItem(
   itemId: string,
   agentId: string,
   conversationId: string,
   updates: { prompt?: string },
-): Record<string, unknown> | null {
+) {
   const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId);
-  if (!item) return null;
-  if (item.agentId !== agentId || item.conversationId !== conversationId) return null;
-  if (item.status !== 'queued') return null;
+  if (!item || item.agentId !== agentId || item.conversationId !== conversationId) {
+    throw AgentChatError.notFound('queue_item_not_found', 'Queue item not found');
+  }
+  if (item.status !== 'queued') {
+    throw AgentChatError.conflict(
+      'queue_item_not_editable',
+      'Only queued execution items can be edited',
+    );
+  }
 
   const patch: Record<string, unknown> = {};
   if (updates.prompt !== undefined) {
-    if (item.mode === 'respond_to_message') return null;
+    if (item.mode === 'respond_to_message') {
+      throw AgentChatError.badRequest(
+        'queue_item_prompt_immutable',
+        'Branch response items do not support prompt edits',
+      );
+    }
     const trimmed = updates.prompt.trim();
-    if (!trimmed) return null;
+    if (!trimmed) {
+      throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
+    }
     patch.prompt = trimmed;
   }
   if (Object.keys(patch).length === 0) return item;
@@ -2556,24 +3173,51 @@ export function updateQueueItem(
   return store.update(AGENT_CHAT_QUEUE_COLLECTION, itemId, patch);
 }
 
-export function deleteQueueItem(
-  itemId: string,
-  agentId: string,
-  conversationId: string,
-): boolean {
+export function retryQueueItem(itemId: string, agentId: string, conversationId: string) {
   const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId);
-  if (!item) return false;
-  if (item.agentId !== agentId || item.conversationId !== conversationId) return false;
-  if (item.status !== 'queued') return false;
+  if (!item || item.agentId !== agentId || item.conversationId !== conversationId) {
+    throw AgentChatError.notFound('queue_item_not_found', 'Execution item not found');
+  }
+  if (item.status !== 'failed' && item.status !== 'cancelled') {
+    throw AgentChatError.conflict(
+      'queue_item_not_retryable',
+      'Only failed or cancelled execution items can be retried',
+    );
+  }
+
+  const updated = store.update(AGENT_CHAT_QUEUE_COLLECTION, itemId, {
+    status: 'queued',
+    attempts: 0,
+    runId: null,
+    errorMessage: null,
+    nextAttemptAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    responseMessageId: null,
+    usedFallback: false,
+    fallbackModel: null,
+  });
+  scheduleQueueDrain(agentId, conversationId, 0);
+  return updated;
+}
+
+export function deleteQueueItem(itemId: string, agentId: string, conversationId: string) {
+  const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId);
+  if (!item || item.agentId !== agentId || item.conversationId !== conversationId) {
+    throw AgentChatError.notFound('queue_item_not_found', 'Queue item not found');
+  }
+  if (item.status !== 'queued' && item.status !== 'failed' && item.status !== 'cancelled') {
+    throw AgentChatError.conflict(
+      'queue_item_not_deletable',
+      'Only queued, failed, or cancelled execution items can be removed',
+    );
+  }
 
   store.delete(AGENT_CHAT_QUEUE_COLLECTION, itemId);
   return true;
 }
 
-export function clearAgentConversationQueue(
-  agentId: string,
-  conversationId: string,
-): number {
+export function clearAgentConversationQueue(agentId: string, conversationId: string): number {
   const items = getConversationQueueItems(agentId, conversationId);
   const count = items.filter((i) => i.status === 'queued').length;
   clearConversationQueue(conversationId);
@@ -2590,9 +3234,19 @@ export function reorderQueueItems(
 
   // Validate all IDs belong to current queued items
   for (const id of orderedIds) {
-    if (!itemMap.has(id)) return false;
+    if (!itemMap.has(id)) {
+      throw AgentChatError.badRequest(
+        'queue_reorder_invalid_ids',
+        'Queue reorder payload contains unknown item IDs',
+      );
+    }
   }
-  if (orderedIds.length !== items.length) return false;
+  if (orderedIds.length !== items.length) {
+    throw AgentChatError.badRequest(
+      'queue_reorder_incomplete',
+      'Queue reorder payload must include every queued item exactly once',
+    );
+  }
 
   // Assign new createdAt timestamps to enforce ordering
   const baseTime = Date.now();
@@ -2608,10 +3262,7 @@ export function reorderQueueItems(
 // Execute cron task (cron job trigger)
 // ---------------------------------------------------------------------------
 
-export function executeCronTask(
-  agentId: string,
-  job: { id: string; prompt: string },
-) {
+export function executeCronTask(agentId: string, job: { id: string; prompt: string }) {
   const key = `${agentId}:cron:${job.id}`;
   if (runningProcesses.has(key)) {
     // Previous run still in progress — skip this invocation
@@ -2631,57 +3282,62 @@ export function executeCronTask(
     `**Task:** ${job.prompt}\n\n` +
     `Complete this task.`;
 
-  void prepareAgentWorkspaceAccess(agentId).then((agent) => {
-    if (!agent) return;
+  void prepareAgentWorkspaceAccess(agentId)
+    .then((agent) => {
+      if (!agent) return;
 
-    const spawnCronRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
-      void runAgentProcess({
-        agentId,
-        agent: effectiveAgent,
+      const spawnCronRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
+        void runAgentProcess({
+          agentId,
+          agent: effectiveAgent,
 
-        runKey: key,
-        prompt,
-        triggerType: 'cron_job',
-        triggerRef: { cronJobId: job.id },
-        onExit: ({ code, stdout, stderr }) => {
-          if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
-            const fallbackAgent = applyFallbackModel(agent);
-            if (fallbackAgent) {
+          runKey: key,
+          prompt,
+          triggerType: 'cron_job',
+          triggerRef: { cronJobId: job.id },
+          onExit: ({ code, stdout, stderr }) => {
+            if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
+              const fallbackAgent = applyFallbackModel(agent);
+              if (fallbackAgent) {
+                const errMsg = stderr.trim() || `Process exited with code ${code}`;
+                console.log(
+                  `[agent-chat] Cron job ${job.id} primary model failed: ${errMsg}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                );
+                spawnCronRun(fallbackAgent, true);
+                return;
+              }
+            }
+            if ((code ?? 1) !== 0) {
               const errMsg = stderr.trim() || `Process exited with code ${code}`;
-              console.log(
-                `[agent-chat] Cron job ${job.id} primary model failed: ${errMsg}. Retrying with fallback model "${fallbackAgent.model}"...`,
-              );
-              spawnCronRun(fallbackAgent, true);
-              return;
+              console.error(`Agent cron task error for job ${job.id}:`, errMsg);
             }
-          }
-          if ((code ?? 1) !== 0) {
-            const errMsg = stderr.trim() || `Process exited with code ${code}`;
-            console.error(`Agent cron task error for job ${job.id}:`, errMsg);
-          }
-        },
-        onSpawnError: (err) => {
-          if (!isFallback) {
-            const fallbackAgent = applyFallbackModel(agent);
-            if (fallbackAgent) {
-              console.log(
-                `[agent-chat] Cron job ${job.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
-              );
-              spawnCronRun(fallbackAgent, true);
-              return;
+          },
+          onSpawnError: (err) => {
+            if (!isFallback) {
+              const fallbackAgent = applyFallbackModel(agent);
+              if (fallbackAgent) {
+                console.log(
+                  `[agent-chat] Cron job ${job.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                );
+                spawnCronRun(fallbackAgent, true);
+                return;
+              }
             }
-          }
-          console.error(`Agent cron task failed to start for job ${job.id}:`, err.message);
-        },
-      }).catch((err: unknown) => {
-        console.error(`Agent cron task failed for job ${job.id}:`, (err as Error).message);
-      });
-    };
+            console.error(`Agent cron task failed to start for job ${job.id}:`, err.message);
+          },
+        }).catch((err: unknown) => {
+          console.error(`Agent cron task failed for job ${job.id}:`, (err as Error).message);
+        });
+      };
 
-    spawnCronRun(agent, false);
-  }).catch((error: unknown) => {
-    console.error(`Agent cron task failed to prepare for job ${job.id}:`, (error as Error).message);
-  });
+      spawnCronRun(agent, false);
+    })
+    .catch((error: unknown) => {
+      console.error(
+        `Agent cron task failed to prepare for job ${job.id}:`,
+        (error as Error).message,
+      );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2691,7 +3347,11 @@ export function executeCronTask(
 export function executeCardTask(
   agentId: string,
   card: { id: string; name: string; description: string | null; collectionId: string },
-  callbacks: { onDone: () => void; onError: (err: string) => void; onRunCreated?: (runId: string) => void },
+  callbacks: {
+    onDone: () => void;
+    onError: (err: string) => void;
+    onRunCreated?: (runId: string) => void;
+  },
   customPrompt?: string,
 ) {
   const key = `${agentId}:card:${card.id}`;
@@ -2725,62 +3385,79 @@ export function executeCardTask(
       `${descriptionLine}\n\n` +
       `Complete this task.`;
 
-  void prepareAgentWorkspaceAccess(agentId).then((agent) => {
-    if (!agent) {
-      callbacks.onError('Agent not found');
-      return;
-    }
+  void prepareAgentWorkspaceAccess(agentId)
+    .then((agent) => {
+      if (!agent) {
+        callbacks.onError('Agent not found');
+        return;
+      }
 
-    const spawnCardRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
-      void runAgentProcess({
-        agentId,
-        agent: effectiveAgent,
+      let spawnedRunId: string | null = null;
 
-        runKey: key,
-        prompt,
-        triggerType: 'card_assignment',
-        triggerRef: { cardId: card.id },
-        onRunCreated: callbacks.onRunCreated,
-        onExit: ({ code, stdout, stderr }) => {
-          if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
-            const fallbackAgent = applyFallbackModel(agent);
-            if (fallbackAgent) {
+      const spawnCardRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
+        void runAgentProcess({
+          agentId,
+          agent: effectiveAgent,
+
+          runKey: key,
+          prompt,
+          triggerType: 'card_assignment',
+          triggerRef: { cardId: card.id },
+          onRunCreated: (runId) => {
+            spawnedRunId = runId;
+            callbacks.onRunCreated?.(runId);
+          },
+          onExit: ({ code, stdout, stderr, runStartedAt }) => {
+            if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
+              const fallbackAgent = applyFallbackModel(agent);
+              if (fallbackAgent) {
+                const errMsg = stderr.trim() || `Process exited with code ${code}`;
+                console.log(
+                  `[agent-chat] Card task ${card.id} primary model failed: ${errMsg}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                );
+                spawnCardRun(fallbackAgent, true);
+                return;
+              }
+            }
+            if ((code ?? 1) !== 0) {
               const errMsg = stderr.trim() || `Process exited with code ${code}`;
-              console.log(
-                `[agent-chat] Card task ${card.id} primary model failed: ${errMsg}. Retrying with fallback model "${fallbackAgent.model}"...`,
-              );
-              spawnCardRun(fallbackAgent, true);
+              callbacks.onError(errMsg);
               return;
             }
-          }
-          if ((code ?? 1) !== 0) {
-            const errMsg = stderr.trim() || `Process exited with code ${code}`;
-            callbacks.onError(errMsg);
-            return;
-          }
 
-          callbacks.onDone();
-        },
-        onSpawnError: (err) => {
-          if (!isFallback) {
-            const fallbackAgent = applyFallbackModel(agent);
-            if (fallbackAgent) {
-              console.log(
-                `[agent-chat] Card task ${card.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
-              );
-              spawnCardRun(fallbackAgent, true);
-              return;
+            if (spawnedRunId && !isRunMarkedKilledByUser(spawnedRunId)) {
+              persistCompletedCardAssignmentComment({
+                cardId: card.id,
+                agentId,
+                runId: spawnedRunId,
+                runStartedAtMs: runStartedAt,
+                stdout,
+              });
             }
-          }
-          callbacks.onError(`Failed to start CLI: ${err.message}`);
-        },
-      }).catch((err: unknown) => {
-        callbacks.onError((err as Error).message);
-      });
-    };
 
-    spawnCardRun(agent, false);
-  }).catch((error: unknown) => {
-    callbacks.onError((error as Error).message);
-  });
+            callbacks.onDone();
+          },
+          onSpawnError: (err) => {
+            if (!isFallback) {
+              const fallbackAgent = applyFallbackModel(agent);
+              if (fallbackAgent) {
+                console.log(
+                  `[agent-chat] Card task ${card.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                );
+                spawnCardRun(fallbackAgent, true);
+                return;
+              }
+            }
+            callbacks.onError(`Failed to start CLI: ${err.message}`);
+          },
+        }).catch((err: unknown) => {
+          callbacks.onError((err as Error).message);
+        });
+      };
+
+      spawnCardRun(agent, false);
+    })
+    .catch((error: unknown) => {
+      callbacks.onError((error as Error).message);
+    });
 }

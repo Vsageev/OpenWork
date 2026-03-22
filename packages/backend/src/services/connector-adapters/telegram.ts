@@ -1,4 +1,5 @@
 import { store } from '../../db/index.js';
+import { env } from '../../config/env.js';
 import {
   connectBot,
   disconnectBot,
@@ -27,13 +28,27 @@ function readStatus(integrationId: string): IntegrationStatus {
 export const telegramAdapter: ConnectorAdapter = {
   async connect(payload, audit) {
     const ngrokUrl = (payload.ngrokUrl as string | undefined) || undefined;
-    const bot = await connectBot(payload.token as string, audit, { ngrokUrl }) as Record<string, unknown>;
+    const requestedMode = payload.setupMode === 'custom' ? 'custom' : 'managed';
+    const token = requestedMode === 'custom'
+      ? payload.token as string | undefined
+      : env.TELEGRAM_MANAGED_BOT_TOKEN;
+
+    if (!token) {
+      throw new Error(
+        requestedMode === 'custom'
+          ? 'Bot token is required for a custom Telegram bot'
+          : 'Managed Telegram bot is not configured. Set TELEGRAM_MANAGED_BOT_TOKEN and try again.',
+      );
+    }
+
+    const bot = await connectBot(token, audit, { ngrokUrl }) as Record<string, unknown>;
 
     const seed: ConnectorSeed = {
       name: bot.botFirstName as string,
       integrationId: bot.id as string,
       capabilities: ['messaging'],
       config: {
+        setupMode: requestedMode,
         botUsername: bot.botUsername,
         tokenMasked: bot.tokenMasked,
       },

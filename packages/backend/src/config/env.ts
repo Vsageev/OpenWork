@@ -24,6 +24,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32).default('change-me-to-a-real-secret-in-production!!'),
   JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
+  SECRET_ENCRYPTION_KEY: z.string().min(32).optional(),
 
   CORS_ORIGIN: z.string().default('https://localhost:5173'),
 
@@ -33,6 +34,7 @@ const envSchema = z.object({
 
   // Telegram
   TELEGRAM_WEBHOOK_BASE_URL: z.string().url().optional(),
+  TELEGRAM_MANAGED_BOT_TOKEN: z.string().min(1).optional(),
 
   // WhatsApp Business API
   WHATSAPP_WEBHOOK_BASE_URL: z.string().url().optional(),

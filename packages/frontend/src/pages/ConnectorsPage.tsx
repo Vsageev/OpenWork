@@ -47,6 +47,7 @@ const CONNECTOR_TYPES = [
 ] as const;
 
 type ConnectorTypeId = (typeof CONNECTOR_TYPES)[number]['id'];
+type TelegramSetupMode = 'managed' | 'custom';
 
 function normalizeNgrokUrl(value: string) {
   const trimmed = value.trim();
@@ -64,6 +65,7 @@ export function ConnectorsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createStep, setCreateStep] = useState<'type' | 'config'>('type');
   const [selectedType, setSelectedType] = useState<ConnectorTypeId | null>(null);
+  const [setupMode, setSetupMode] = useState<TelegramSetupMode>('managed');
   const [token, setToken] = useState('');
   const [ngrokUrl, setNgrokUrl] = useState('');
   const [ngrokAuto, setNgrokAuto] = useState(false);
@@ -98,6 +100,7 @@ export function ConnectorsPage() {
   function openCreate() {
     setCreateStep('type');
     setSelectedType(null);
+    setSetupMode('managed');
     setToken('');
     setNgrokUrl('');
     setNgrokAuto(false);
@@ -108,6 +111,7 @@ export function ConnectorsPage() {
   function closeCreate() {
     setCreateOpen(false);
     setSelectedType(null);
+    setSetupMode('managed');
     setToken('');
     setNgrokUrl('');
     setNgrokAuto(false);
@@ -117,6 +121,7 @@ export function ConnectorsPage() {
   function handleSelectType(type: ConnectorTypeId) {
     setSelectedType(type);
     setCreateStep('config');
+    setSetupMode('managed');
     setToken('');
     setNgrokUrl('');
     setNgrokAuto(false);
@@ -125,7 +130,8 @@ export function ConnectorsPage() {
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
-    if (!selectedType || !token.trim()) return;
+    if (!selectedType) return;
+    if (selectedType === 'telegram' && setupMode === 'custom' && !token.trim()) return;
 
     setCreating(true);
     setCreateError('');
@@ -134,7 +140,8 @@ export function ConnectorsPage() {
         method: 'POST',
         body: JSON.stringify({
           type: selectedType,
-          token: token.trim(),
+          setupMode,
+          token: setupMode === 'custom' ? token.trim() : undefined,
           ngrokUrl: ngrokAuto ? 'auto' : (normalizeNgrokUrl(ngrokUrl) || undefined),
         }),
       });
@@ -314,7 +321,7 @@ export function ConnectorsPage() {
             <Cable size={32} strokeWidth={1.5} />
           </div>
           <h3>No connectors yet</h3>
-          <p>Connect an external service to start receiving and sending messages.</p>
+          <p>Enable a workspace-managed integration so the team can start receiving and sending messages.</p>
           <Button size="sm" onClick={openCreate}>
             <Plus size={14} />
             Add your first connector
@@ -434,14 +441,80 @@ export function ConnectorsPage() {
             ) : (
               <form onSubmit={handleCreate}>
                 <div className={styles.modalBody}>
-                  <Input
-                    label="Bot Token"
-                    placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    error={createError}
-                    autoFocus
-                  />
+                  {selectedType === 'telegram' && (
+                    <>
+                      <div className={styles.setupIntro}>
+                        <div className={styles.setupEyebrow}>Admin setup</div>
+                        <h4 className={styles.setupTitle}>Choose how Telegram is provisioned</h4>
+                        <p className={styles.setupCopy}>
+                          The default path uses the bot provided by OpenWork, so regular users do not need to create anything in BotFather.
+                        </p>
+                      </div>
+
+                      <div className={styles.setupModeGrid}>
+                        <button
+                          type="button"
+                          className={[styles.setupModeCard, setupMode === 'managed' && styles.setupModeCardActive]
+                            .filter(Boolean)
+                            .join(' ')}
+                          onClick={() => {
+                            setSetupMode('managed');
+                            setCreateError('');
+                          }}
+                        >
+                          <div className={styles.setupModeHeader}>
+                            <span className={styles.setupModeTitle}>Use provided bot</span>
+                            <Badge color="success">Recommended</Badge>
+                          </div>
+                          <div className={styles.setupModeDescription}>
+                            One admin enables the workspace bot here and configures the webhook URL once.
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          className={[styles.setupModeCard, setupMode === 'custom' && styles.setupModeCardActive]
+                            .filter(Boolean)
+                            .join(' ')}
+                          onClick={() => {
+                            setSetupMode('custom');
+                            setCreateError('');
+                          }}
+                        >
+                          <div className={styles.setupModeHeader}>
+                            <span className={styles.setupModeTitle}>Use custom bot</span>
+                          </div>
+                          <div className={styles.setupModeDescription}>
+                            Fallback for teams that intentionally want to bring their own Telegram bot token.
+                          </div>
+                        </button>
+                      </div>
+
+                      <div className={styles.guidePanel}>
+                        <div className={styles.guideTitle}>
+                          {setupMode === 'managed' ? 'Managed bot guide' : 'Custom bot guide'}
+                        </div>
+                        <p className={styles.guideCopy}>
+                          {setupMode === 'managed'
+                            ? 'Admins can activate the provided bot directly here. If the backend has not been provisioned yet, add TELEGRAM_MANAGED_BOT_TOKEN and retry.'
+                            : 'Paste the BotFather token below only if you intentionally need your own Telegram bot instead of the shared workspace one.'}
+                        </p>
+                      </div>
+
+                      {setupMode === 'custom' ? (
+                        <Input
+                          label="Bot Token"
+                          placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+                          value={token}
+                          onChange={(e) => setToken(e.target.value)}
+                          error={createError}
+                          autoFocus
+                        />
+                      ) : (
+                        createError && <div className={styles.inlineError}>{createError}</div>
+                      )}
+                    </>
+                  )}
                   <label className={styles.toggleRow}>
                     <div>
                       <div className={styles.toggleLabel}>Auto-start ngrok</div>
@@ -477,6 +550,7 @@ export function ConnectorsPage() {
                     onClick={() => {
                       setCreateStep('type');
                       setSelectedType(null);
+                      setSetupMode('managed');
                       setToken('');
                       setNgrokUrl('');
                       setNgrokAuto(false);
@@ -485,8 +559,12 @@ export function ConnectorsPage() {
                   >
                     Back
                   </Button>
-                  <Button type="submit" size="md" disabled={creating || !token.trim()}>
-                    {creating ? 'Connecting...' : 'Connect'}
+                  <Button
+                    type="submit"
+                    size="md"
+                    disabled={creating || (setupMode === 'custom' && !token.trim())}
+                  >
+                    {creating ? 'Connecting...' : (setupMode === 'managed' ? 'Enable Bot' : 'Connect')}
                   </Button>
                 </div>
               </form>

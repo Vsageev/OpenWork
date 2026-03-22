@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { X, Plus, Pencil, Trash2, Clock, Check } from 'lucide-react';
+import { formatDate } from 'shared';
 import { Button } from '../../ui';
 import { Input } from '../../ui/Input';
 import { Textarea } from '../../ui/Textarea';
@@ -31,6 +32,7 @@ interface CronTemplate {
   tagIds: string[];
   cron: string;
   enabled: boolean;
+  nextRunAt?: string | null;
   createdAt: string;
 }
 
@@ -44,6 +46,12 @@ interface BoardCronTemplatesPanelProps {
   boardId: string;
   columns: BoardColumn[];
   onClose: () => void;
+}
+
+function describeTemplateNextRun(template: Pick<CronTemplate, 'enabled' | 'nextRunAt'>): string {
+  if (!template.enabled) return 'Next trigger disabled';
+  if (!template.nextRunAt) return 'Next trigger unavailable';
+  return `Next trigger ${formatDate(template.nextRunAt)}`;
 }
 
 export function BoardCronTemplatesPanel({ boardId, columns, onClose }: BoardCronTemplatesPanelProps) {
@@ -165,12 +173,12 @@ export function BoardCronTemplatesPanel({ boardId, columns, onClose }: BoardCron
 
   async function handleToggle(t: CronTemplate) {
     try {
-      await api(`/boards/${boardId}/cron-templates/${t.id}`, {
+      const updated = await api<CronTemplate>(`/boards/${boardId}/cron-templates/${t.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ enabled: !t.enabled }),
       });
       setTemplates((prev) =>
-        prev.map((item) => (item.id === t.id ? { ...item, enabled: !t.enabled } : item)),
+        prev.map((item) => (item.id === t.id ? updated : item)),
       );
     } catch {
       toast.error('Failed to toggle template');
@@ -347,6 +355,7 @@ export function BoardCronTemplatesPanel({ boardId, columns, onClose }: BoardCron
                     <div className={styles.templateMeta}>
                       {t.cron} &middot; {col?.name ?? 'Unknown column'}
                     </div>
+                    <div className={styles.templateNextRun}>{describeTemplateNextRun(t)}</div>
                   </div>
                   <div className={styles.templateActions}>
                     <button

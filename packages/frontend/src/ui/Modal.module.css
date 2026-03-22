@@ -22,7 +22,7 @@
   padding: var(--space-4);
   overflow-y: auto;
   overscroll-behavior: contain;
-  z-index: 200;
+  z-index: 2000;
   animation: modalOverlayIn 0.15s ease-out;
 }
 

@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { 
   ArrowRight, 
   ExternalLink, 
@@ -83,6 +83,16 @@ export function CardContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const [showAssigneeMenu, setShowAssigneeMenu] = useState(false);
   const assigneeButtonRef = useRef<HTMLDivElement>(null);
+  const otherColumns = allColumns.filter((col) => col.id !== currentColumnId);
+  const [positionedStyle, setPositionedStyle] = useState<{
+    left: number;
+    top: number;
+    maxHeight: number;
+  }>({
+    left: x,
+    top: y,
+    maxHeight: Math.max(160, window.innerHeight - 16),
+  });
 
   // Close on outside click
   useEffect(() => {
@@ -104,28 +114,44 @@ export function CardContextMenu({
     return () => document.removeEventListener('keydown', handleEscape);
   }, [onClose]);
 
-  // Position menu to stay within viewport
-  const positionedStyle = useMemo(() => {
-    const menuWidth = 220;
-    const menuHeight = showAssigneeMenu ? 400 : 300;
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+
     const padding = 8;
-    
-    let left = x;
-    let top = y;
-    
-    if (x + menuWidth > window.innerWidth - padding) {
-      left = window.innerWidth - menuWidth - padding;
-    }
-    
-    if (top + menuHeight > window.innerHeight - padding) {
-      top = window.innerHeight - menuHeight - padding;
-    }
-    
-    return {
-      left: Math.max(padding, left),
-      top: Math.max(padding, top),
-    };
-  }, [x, y, showAssigneeMenu]);
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const menuRect = menu.getBoundingClientRect();
+
+    const availableBelow = Math.max(160, viewportHeight - y - padding);
+    const availableAbove = Math.max(160, y - padding);
+    const preferBelow = availableBelow >= menuRect.height || availableBelow >= availableAbove;
+    const maxHeight = Math.max(
+      160,
+      Math.min(
+        preferBelow ? availableBelow : availableAbove,
+        viewportHeight - padding * 2,
+      ),
+    );
+
+    const measuredHeight = Math.min(menuRect.height, maxHeight);
+    const measuredWidth = menuRect.width;
+
+    const left = Math.min(
+      Math.max(padding, x),
+      Math.max(padding, viewportWidth - measuredWidth - padding),
+    );
+    const top = preferBelow
+      ? Math.min(y, viewportHeight - measuredHeight - padding)
+      : Math.max(padding, y - measuredHeight);
+
+    setPositionedStyle((prev) => {
+      if (prev.left === left && prev.top === top && prev.maxHeight === maxHeight) {
+        return prev;
+      }
+      return { left, top, maxHeight };
+    });
+  }, [x, y, showAssigneeMenu, showTagsMenu, allTags.length, agents.length, users.length, otherColumns.length]);
 
   const handleCopyCardId = () => {
     navigator.clipboard.writeText(cardId).then(() => {
@@ -160,8 +186,6 @@ export function CardContextMenu({
   const handleToggleTag = async (tagId: string) => {
     await onToggleTag(cardId, tagId);
   };
-
-  const otherColumns = allColumns.filter((col) => col.id !== currentColumnId);
 
   return (
     <div

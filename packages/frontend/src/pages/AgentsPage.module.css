@@ -716,6 +716,20 @@
   animation: queuePulse 2s ease-in-out infinite;
 }
 
+.convFailedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+  color: var(--color-error);
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 /* Conversation status dots */
 .convStreamingDot,
 .convUnreadDot {
@@ -982,6 +996,47 @@
   justify-content: flex-end;
 }
 
+.fallbackNotice {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  margin-top: var(--space-2);
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--color-warning, #b8860b);
+  background: color-mix(in srgb, var(--color-warning, #b8860b) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning, #b8860b) 20%, transparent);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+.fallbackNotice svg {
+  flex-shrink: 0;
+}
+
+.messageExecutionState {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--color-surface) 88%, var(--color-border) 12%);
+  border: 1px solid var(--color-border);
+}
+
+.messageExecutionStateProcessing {
+  color: var(--color-text);
+}
+
+.messageExecutionStateQueued {
+  color: var(--color-text-secondary);
+}
+
 .messageMonitorBtn,
 .copyBtn {
   display: flex;
@@ -1059,6 +1114,11 @@
 
 .branchNavUser {
   justify-content: flex-end;
+}
+
+.branchNavAfterBubble {
+  margin-top: var(--space-1);
+  margin-bottom: 0;
 }
 
 .branchNavBtn {
@@ -1248,6 +1308,11 @@
   color: #ef4444;
 }
 
+.stagedImageRemove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .stagedFileChip {
   min-width: 0;
   max-width: 220px;
@@ -1297,6 +1362,11 @@
   justify-content: center;
 }
 
+.stagedFileRemove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── Reply box ── */
 .replyBox {
   border-top: 1px solid var(--color-border);
@@ -1342,6 +1412,11 @@
 .composerEditCancel:hover {
   color: var(--color-text);
   border-color: var(--color-text-tertiary);
+}
+
+.composerEditCancel:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .replyRow {
@@ -1510,6 +1585,107 @@
 .stopRunBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── Inline error / stopped notices ── */
+.errorNotice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-top: 4px;
+}
+
+.errorNoticeIcon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  color: var(--color-error);
+}
+
+.stoppedNotice .errorNoticeIcon {
+  color: var(--color-warning);
+}
+
+.errorNoticeBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.errorNoticeTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.errorNoticeDetail {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.errorNoticePrompt {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.errorNoticeActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.errorRetryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-error);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background var(--transition-normal);
+}
+
+.errorRetryBtn:hover {
+  background: color-mix(in srgb, var(--color-error) 8%, transparent);
+}
+
+.errorDismissBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: none;
+  border: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: color var(--transition-normal), background var(--transition-normal);
+}
+
+.errorDismissBtn:hover {
+  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
 /* ── Queue panel ── */
@@ -2403,6 +2579,306 @@
 .settingsEmpty {
   font-size: 13px;
   color: var(--color-text-tertiary);
+}
+
+/* ── Env Vars: Section Header ── */
+
+.envVarSectionHeader {
+  margin-bottom: var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.envVarSectionHeaderEmpty {
+  margin-bottom: 0;
+}
+
+.envVarSectionIntro {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.envVarSectionIntro .settingsSectionTitle {
+  margin-bottom: 0;
+}
+
+.envVarSectionBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.envVarSectionBadgeMuted {
+  color: var(--color-text-tertiary);
+}
+
+/* ── Env Vars: Empty State ── */
+
+.envVarEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.envVarEmptyIcon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+}
+
+.envVarEmptyTitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.envVarEmptyDesc {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  max-width: 280px;
+  line-height: 1.5;
+}
+
+/* ── Env Vars: Composer / Form ── */
+
+.envVarComposer {
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.envVarComposerGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.envVarFieldError {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+.envVarFieldHint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.envVarComposerActions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+/* ── Env Vars: List ── */
+
+.envVarList {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+/* ── Env Vars: Row (card) ── */
+
+.envVarRow {
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-card);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.envVarRow:hover {
+  background: var(--color-surface);
+}
+
+.envVarRow + .envVarRow {
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.envVarRowInactive .envVarRowInfo {
+  opacity: 0.45;
+}
+
+.envVarRowEditing {
+  background: color-mix(in srgb, var(--color-primary) 4%, var(--color-card));
+}
+
+/* Left side: key + meta */
+.envVarRowInfo {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.envVarRowHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.envVarKey {
+  font-family: var(--font-mono, 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  background: var(--color-border-subtle);
+  border: 1px solid var(--color-border);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.01em;
+}
+
+.envVarPreview {
+  font-family: var(--font-mono, 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace);
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.03em;
+}
+
+.envVarStatusBadge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.envVarStatusActive {
+  color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+}
+
+.envVarStatusInactive {
+  color: var(--color-text-tertiary);
+  background: color-mix(in srgb, var(--color-text-tertiary) 12%, transparent);
+}
+
+.envVarDesc {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.envVarMeta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Right side: toggle + actions */
+.envVarRowControls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+/* ── Toggle Switch ── */
+
+.toggleSwitch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.toggleSwitch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggleTrack {
+  position: absolute;
+  inset: 0;
+  background: var(--color-border);
+  border-radius: 9px;
+  transition: background 0.2s ease;
+}
+
+.toggleSwitch input:checked + .toggleTrack {
+  background: var(--color-success);
+}
+
+.toggleKnob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+}
+
+.toggleSwitch input:checked ~ .toggleKnob {
+  transform: translateX(14px);
+}
+
+/* ── Env Var Action Buttons ── */
+
+.envVarActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.envVarDeleteAction {
+  color: var(--color-error);
+}
+
+.envVarDeleteAction:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  color: var(--color-error);
 }
 
 .statusDot {
@@ -3567,6 +4043,12 @@ button.filesColName:hover .filesFileName {
   color: var(--color-text-tertiary);
 }
 
+.cronJobNextRun {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 2px;
+}
+
 .cronJobPrompt {
   font-size: 13px;
   color: var(--color-text-secondary);
@@ -3920,6 +4402,20 @@ button.filesColName:hover .filesFileName {
   }
 
   .settingsActions {
+    flex-wrap: wrap;
+  }
+
+  .envVarComposerGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .envVarSectionHeader,
+  .envVarComposerActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .envVarRow {
     flex-wrap: wrap;
   }
 

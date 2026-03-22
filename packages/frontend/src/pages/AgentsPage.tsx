@@ -3,6 +3,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type Dispatch,
   type DragEvent as ReactDragEvent,
+  Fragment,
   type FormEvent,
   type KeyboardEvent,
   memo,
@@ -39,6 +40,7 @@ import {
   HardDrive,
   Copy,
   Check,
+  Shield,
   ToggleLeft,
   ToggleRight,
   Layers,
@@ -56,7 +58,10 @@ import {
   ArrowLeft,
   ArrowRight,
   FileText,
+  RotateCcw,
+  OctagonX,
 } from 'lucide-react';
+import { formatDate } from 'shared';
 import {
   Button,
   Badge,
@@ -69,6 +74,11 @@ import {
   Tooltip,
 } from '../ui';
 import { api, apiUpload, ApiError } from '../lib/api';
+import {
+  AGENT_MODEL_PROVIDERS as MODELS,
+  getAgentModelDefaultId,
+  getAgentModelOptions,
+} from '../lib/agent-models';
 import { toast } from '../stores/toast';
 import {
   getImagesFromClipboardData,
@@ -92,6 +102,12 @@ import {
 import { useWorkspace } from '../stores/WorkspaceContext';
 import styles from './AgentsPage.module.css';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import {
+  buildAgentConversationViewModel,
+  getBranchTargetIdByOffset,
+  queueItemsLabel,
+  toQueueCount,
+} from './agent-chat-view-model';
 
 /* ── Types ── */
 
@@ -128,6 +144,7 @@ interface CronJob {
   cron: string;
   prompt: string;
   enabled: boolean;
+  nextRunAt?: string | null;
 }
 
 interface AgentGroup {
@@ -159,6 +176,27 @@ interface Agent {
   avatarBgColor: string;
   avatarLogoColor: string;
   createdAt: string;
+}
+
+interface AgentEnvVar {
+  id: string;
+  agentId: string;
+  key: string;
+  valuePreview: string;
+  description: string | null;
+  isActive: boolean;
+  createdById: string;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface AgentEnvVarFormState {
+  id: string | null;
+  key: string;
+  value: string;
+  description: string;
+  isActive: boolean;
 }
 
 interface AgentsResponse {
@@ -194,8 +232,14 @@ interface ChatConversation {
   isUnread: boolean;
   isBusy?: boolean;
   queuedCount?: number;
+  hasFailed?: boolean;
   updatedAt: string;
   createdAt: string;
+}
+
+interface ConversationBootstrapRequest {
+  agentId: string;
+  conversationId: string | null;
 }
 
 interface ChatAttachment {
@@ -231,10 +275,20 @@ interface QueueItem {
   conversationId: string;
   mode?: 'append_prompt' | 'respond_to_message';
   prompt: string;
-  status: 'queued' | 'processing' | 'completed' | 'failed';
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
   attempts: number;
   createdAt: string;
+  updatedAt?: string;
   targetMessageId?: string | null;
+  queuedMessageId?: string | null;
+  responseMessageId?: string | null;
+  errorMessage?: string | null;
+  nextAttemptAt?: string | null;
+  completedAt?: string | null;
+  runId?: string | null;
+  lastRunId?: string | null;
+  usedFallback?: boolean;
+  fallbackModel?: string | null;
 }
 
 interface AgentRunSummary {
@@ -248,10 +302,19 @@ interface AgentRunSummary {
   errorMessage: string | null;
 }
 
+interface EditMessageResponse {
+  message: ChatMessage;
+  entries: ChatMessage[];
+  queueItem: QueueItem;
+}
+
 interface AgentMessageMetadata {
   runId?: string | null;
   agentChatUpdate?: boolean;
   isFinal?: boolean;
+  queuedFailure?: boolean;
+  fallbackRetry?: boolean;
+  fallbackModel?: string | null;
 }
 
 interface StagedImage {
@@ -270,13 +333,26 @@ interface ManagedExistingImage {
   fileName: string;
 }
 
+interface EditingMessageState {
+  agentId: string;
+  conversationId: string;
+  id: string;
+  initialValue: string;
+  value: string;
+  existingImages: ManagedExistingImage[];
+  isSubmitting: boolean;
+}
+
 interface ReplyComposerProps {
   streaming: boolean;
   editingMessage?: {
+    agentId: string;
+    conversationId: string;
     id: string;
     initialValue: string;
     value: string;
     existingImages: ManagedExistingImage[];
+    isSubmitting: boolean;
     onChange: (value: string) => void;
     onCancel: () => void;
     onSubmit: (files: File[], keepStoragePaths: string[]) => Promise<void>;
@@ -288,7 +364,9 @@ interface ReplyComposerProps {
 const MAX_STAGED_ATTACHMENTS = 10;
 const AGENT_CHAT_DRAFT_STORAGE_KEY = 'openwork_agent_chat_global_draft';
 
-function getChatMessageImages(message: Pick<ChatMessage, 'attachments'>): ManagedExistingImage[] {
+export function getChatMessageImages(
+  message: Pick<ChatMessage, 'attachments'>,
+): ManagedExistingImage[] {
   return (
     message.attachments
       ?.filter((attachment) => attachment.type === 'image')
@@ -299,7 +377,7 @@ function getChatMessageImages(message: Pick<ChatMessage, 'attachments'>): Manage
   );
 }
 
-function isEditableChatMessage(message: ChatMessage): boolean {
+export function isEditableChatMessage(message: ChatMessage): boolean {
   if (message.direction !== 'outbound') return false;
   const type = message.type ?? 'text';
   return type === 'text' || type === 'image';
@@ -355,7 +433,7 @@ function formatBytes(value: number): string {
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
 }
 
-const ReplyComposer = memo(function ReplyComposer({
+export const ReplyComposer = memo(function ReplyComposer({
   streaming,
   editingMessage = null,
   onSendAttachments,
@@ -371,16 +449,13 @@ const ReplyComposer = memo(function ReplyComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isEditing = editingMessage !== null;
+  const editingSubmitting = isEditing && editingMessage.isSubmitting;
   const composerValue = isEditing ? editingMessage.value : input;
   const draftStagedImages = draftStagedAttachments.filter(
-    (
-      attachment,
-    ): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
+    (attachment): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
       attachment.kind === 'image' && Boolean(attachment.previewUrl),
   );
-  const stagedImages = isEditing
-    ? editStagedImages
-    : draftStagedImages;
+  const stagedImages = isEditing ? editStagedImages : draftStagedImages;
   const existingImages = isEditing ? retainedEditImages : [];
   const totalAttachmentCount = isEditing
     ? stagedImages.length + existingImages.length
@@ -529,19 +604,24 @@ const ReplyComposer = memo(function ReplyComposer({
   }, []);
 
   const handleSend = useCallback(async () => {
-    if (uploading) return;
+    if (uploading || editingSubmitting) return;
 
     if (isEditing) {
       const nextValue = editingMessage.value.trim();
       const hasImages = editStagedImages.length > 0;
       const keptStoragePaths = retainedEditImages.map((image) => image.storagePath);
       if (!nextValue && !hasImages && keptStoragePaths.length === 0) return;
-      await editingMessage.onSubmit(
-        editStagedImages.map((img) => img.file),
-        keptStoragePaths,
-      );
-      clearEditStagedImages();
-      inputRef.current?.focus();
+      try {
+        await editingMessage.onSubmit(
+          editStagedImages.map((img) => img.file),
+          keptStoragePaths,
+        );
+        clearEditStagedImages();
+      } catch {
+        // Parent state already surfaces the failure; keep the draft intact for retry.
+      } finally {
+        inputRef.current?.focus();
+      }
       return;
     }
 
@@ -560,6 +640,8 @@ const ReplyComposer = memo(function ReplyComposer({
         clearDraftStagedAttachments();
         setInput('');
         persistAgentChatDraft('');
+      } catch {
+        // Parent state already surfaces the failure.
       } finally {
         setUploading(false);
         inputRef.current?.focus();
@@ -567,14 +649,20 @@ const ReplyComposer = memo(function ReplyComposer({
       return;
     }
 
-    await onSendText(prompt);
-    setInput('');
-    persistAgentChatDraft('');
-    inputRef.current?.focus();
+    try {
+      await onSendText(prompt);
+      setInput('');
+      persistAgentChatDraft('');
+    } catch {
+      // Parent state already surfaces the failure.
+    } finally {
+      inputRef.current?.focus();
+    }
   }, [
     clearDraftStagedAttachments,
     clearEditStagedImages,
     draftStagedAttachments,
+    editingSubmitting,
     editStagedImages,
     editingMessage,
     input,
@@ -654,9 +742,10 @@ const ReplyComposer = memo(function ReplyComposer({
   );
 
   const handleEditCancel = useCallback(() => {
+    if (editingSubmitting) return;
     clearEditStagedImages();
     editingMessage?.onCancel();
-  }, [clearEditStagedImages, editingMessage]);
+  }, [clearEditStagedImages, editingMessage, editingSubmitting]);
 
   return (
     <div
@@ -665,19 +754,29 @@ const ReplyComposer = memo(function ReplyComposer({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {uploading && <div className={styles.uploadingIndicator}>Uploading attachments…</div>}
+      {(uploading || editingSubmitting) && (
+        <div className={styles.uploadingIndicator}>
+          {editingSubmitting ? 'Saving edit…' : 'Uploading attachments…'}
+        </div>
+      )}
       {isEditing && (
         <div className={styles.composerEditBar}>
           <div className={styles.composerEditMeta}>
             <Pencil size={13} />
             Editing message
           </div>
-          <button className={styles.composerEditCancel} onClick={handleEditCancel}>
+          <button
+            className={styles.composerEditCancel}
+            onClick={handleEditCancel}
+            disabled={editingSubmitting}
+          >
             Cancel
           </button>
         </div>
       )}
-      {(existingImages.length > 0 || (!isEditing && draftStagedAttachments.length > 0) || (isEditing && stagedImages.length > 0)) && (
+      {(existingImages.length > 0 ||
+        (!isEditing && draftStagedAttachments.length > 0) ||
+        (isEditing && stagedImages.length > 0)) && (
         <div className={styles.stagedImagesRow}>
           {existingImages.map((img) => (
             <div key={img.storagePath} className={styles.stagedImagePreview}>
@@ -691,6 +790,7 @@ const ReplyComposer = memo(function ReplyComposer({
                 className={styles.stagedImageRemove}
                 onClick={() => removeExistingImage(img.storagePath)}
                 aria-label="Remove image"
+                disabled={editingSubmitting}
               >
                 <X size={12} />
               </button>
@@ -704,6 +804,7 @@ const ReplyComposer = memo(function ReplyComposer({
                     className={styles.stagedImageRemove}
                     onClick={() => removeStagedImage(i)}
                     aria-label="Remove image"
+                    disabled={editingSubmitting}
                   >
                     <X size={12} />
                   </button>
@@ -721,6 +822,7 @@ const ReplyComposer = memo(function ReplyComposer({
                       className={styles.stagedImageRemove}
                       onClick={() => removeDraftAttachment(i)}
                       aria-label="Remove attachment"
+                      disabled={uploading}
                     >
                       <X size={12} />
                     </button>
@@ -738,6 +840,7 @@ const ReplyComposer = memo(function ReplyComposer({
                       className={styles.stagedFileRemove}
                       onClick={() => removeDraftAttachment(i)}
                       aria-label="Remove attachment"
+                      disabled={uploading}
                     >
                       <X size={12} />
                     </button>
@@ -771,6 +874,7 @@ const ReplyComposer = memo(function ReplyComposer({
               onClick={() => imageInputRef.current?.click()}
               disabled={
                 uploading ||
+                editingSubmitting ||
                 (!isEditing && streaming) ||
                 totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
               }
@@ -787,7 +891,12 @@ const ReplyComposer = memo(function ReplyComposer({
               <button
                 className={styles.attachBtn}
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || streaming || totalAttachmentCount >= MAX_STAGED_ATTACHMENTS}
+                disabled={
+                  uploading ||
+                  editingSubmitting ||
+                  streaming ||
+                  totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+                }
                 aria-label="Attach files"
                 title={
                   totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
@@ -819,14 +928,17 @@ const ReplyComposer = memo(function ReplyComposer({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           rows={1}
-          disabled={uploading}
+          disabled={uploading || editingSubmitting}
         />
         <button
           className={styles.sendBtn}
           onClick={() => void handleSend()}
           disabled={
             uploading ||
-            (isEditing ? !canSubmitEdit : !composerValue.trim() && draftStagedAttachments.length === 0)
+            editingSubmitting ||
+            (isEditing
+              ? !canSubmitEdit
+              : !composerValue.trim() && draftStagedAttachments.length === 0)
           }
           aria-label={isEditing ? 'Save edited message' : 'Send message'}
           title={isEditing ? 'Save edited message' : 'Send message'}
@@ -924,11 +1036,7 @@ async function downloadStorageFile(storagePath: string, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-function ChatFileAttachment({
-  attachment,
-}: {
-  attachment: ChatAttachment;
-}) {
+function ChatFileAttachment({ attachment }: { attachment: ChatAttachment }) {
   const [downloading, setDownloading] = useState(false);
 
   const handleDownload = useCallback(async () => {
@@ -972,41 +1080,91 @@ const STATUS_LABEL: Record<Agent['status'], string> = {
   error: 'Error',
 };
 
-const MODELS = [
-  {
-    id: 'claude',
-    name: 'Claude',
-    vendor: 'Anthropic',
-    description: 'Strong reasoning, safety-focused. Best for complex workflows.',
-    modelIds: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  },
-  {
-    id: 'codex',
-    name: 'Codex',
-    vendor: 'OpenAI',
-    description: 'Code-first agent model. Good for dev-oriented tasks.',
-    modelIds: [
-      'gpt-5.4',
-      'gpt-5.3-codex',
-      'gpt-5.3-codex-spark',
-      'gpt-5.2-codex',
-      'gpt-5.2',
-      'gpt-5.1-codex-max',
-      'gpt-5.1',
-      'gpt-5.1-codex',
-      'gpt-5-codex',
-      'gpt-5-codex-mini',
-      'gpt-5',
-    ],
-  },
-  {
-    id: 'qwen',
-    name: 'Qwen',
-    vendor: 'Alibaba',
-    description: 'Open-weight model. Good for self-hosted deployments.',
-    modelIds: ['qwen3.5-plus', 'qwen3-coder-plus', 'qwen3-max-2026-01-23'],
-  },
-] as const;
+function envVarTimeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+function createEmptyAgentEnvVarForm(): AgentEnvVarFormState {
+  return {
+    id: null,
+    key: '',
+    value: '',
+    description: '',
+    isActive: true,
+  };
+}
+
+const AGENT_ENV_VAR_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
+const RESERVED_AGENT_ENV_VAR_KEYS = new Set([
+  'ANTHROPIC_API_KEY',
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+  'HOME',
+  'NODE_ENV',
+  'OPENAI_API_KEY',
+  'PATH',
+  'PROJECTS_DIR',
+  'PROJECT_PORT',
+  'PWD',
+  'SHELL',
+  'WORKSPACE_API_KEY',
+  'WORKSPACE_API_URL',
+]);
+
+function validateAgentEnvVarForm(form: AgentEnvVarFormState): Record<string, string> {
+  const errors: Record<string, string> = {};
+  const normalizedKey = form.key.trim().toUpperCase();
+
+  if (!normalizedKey) {
+    errors.key = 'Env var name is required';
+  } else if (!AGENT_ENV_VAR_KEY_PATTERN.test(normalizedKey)) {
+    errors.key = 'Use letters, numbers, and underscores only, starting with a letter';
+  } else if (RESERVED_AGENT_ENV_VAR_KEYS.has(normalizedKey)) {
+    errors.key = `"${normalizedKey}" is reserved by OpenWork`;
+  }
+
+  if (!form.value && !form.id) {
+    errors.value = 'Value is required';
+  }
+
+  return errors;
+}
+
+function mapAgentEnvVarApiErrorToFormErrors(
+  error: unknown,
+  hasExistingValue: boolean,
+): Record<string, string> | null {
+  if (!(error instanceof ApiError) || !error.message) return null;
+
+  if (error.message.includes('key must match')) {
+    return { key: 'Use letters, numbers, and underscores only, starting with a letter' };
+  }
+
+  if (error.message.includes('already exists') || error.message.includes('is reserved')) {
+    return { key: error.message };
+  }
+
+  if (error.message.includes('value is required')) {
+    return { value: 'Value is required' };
+  }
+
+  if (error.message.includes('value cannot be empty')) {
+    return {
+      value: hasExistingValue ? 'Replacement value cannot be empty' : 'Value is required',
+    };
+  }
+
+  return null;
+}
 
 type ModelId = (typeof MODELS)[number]['id'];
 
@@ -1084,9 +1242,44 @@ function getSkipPermissionsFlag(model: string): string {
   const normalized = model.toLowerCase();
   if (normalized === 'claude') return '--dangerously-skip-permissions';
   if (normalized === 'codex') return '--dangerously-bypass-approvals-and-sandbox';
+  if (normalized === 'cursor') return '--force --trust';
+  if (normalized === 'opencode') return 'allow-by-default';
   if (normalized === 'qwen') return '--approval-mode yolo';
   return 'not supported';
 }
+
+function supportsThinkingLevel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized === 'claude' || normalized === 'codex' || normalized === 'opencode';
+}
+
+function getModelVariantHint(model: string): string {
+  const normalized = model.toLowerCase();
+  if (normalized === 'cursor') {
+    return 'Curated from the installed Cursor CLI model list on this server';
+  }
+  if (normalized === 'opencode') {
+    return 'Uses provider/model IDs. Run opencode models on the server for the full list';
+  }
+  return 'Override the default model used by the CLI';
+}
+
+function getCliInfoForModel(
+  cliStatus: CliInfo[],
+  model: string | null | undefined,
+): CliInfo | undefined {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return cliStatus.find((entry) => entry.id === normalized);
+}
+
+function getCliUnavailableMessage(cliInfo: CliInfo): string {
+  return (
+    `${cliInfo.name} CLI is not installed or not available on this server ` +
+    `(expected command: ${cliInfo.command}). Install it from ${cliInfo.downloadUrl}.`
+  );
+}
+
 function describeCron(expr: string): string {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return expr;
@@ -1114,14 +1307,10 @@ function describeCron(expr: string): string {
   return expr;
 }
 
-function toQueueCount(value: unknown): number {
-  const parsed = Number(value ?? 0);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return Math.floor(parsed);
-}
-
-function queueItemsLabel(count: number): string {
-  return `${count} message${count === 1 ? '' : 's'} queued`;
+function describeCronNextRun(job: Pick<CronJob, 'enabled' | 'nextRunAt'>): string {
+  if (!job.enabled) return 'Next trigger disabled';
+  if (!job.nextRunAt) return 'Next trigger unavailable';
+  return `Next trigger ${formatDate(job.nextRunAt)}`;
 }
 
 interface AgentSidebarItemProps {
@@ -1268,6 +1457,7 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
               pendingConversationKeys.has(agentConversationKey(agent.id, conversation.id));
             const isUnread = conversation.isUnread;
             const queuedCount = toQueueCount(conversation.queuedCount);
+            const hasFailed = Boolean(conversation.hasFailed);
             const streamingTitle =
               queuedCount > 0
                 ? `Queued in backend: ${queueItemsLabel(queuedCount)}`
@@ -1293,6 +1483,12 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
                   <span className={styles.convQueueBadge} title={queueItemsLabel(queuedCount)}>
                     <Clock size={9} />
                     {queuedCount}
+                  </span>
+                )}
+                {hasFailed && (
+                  <span className={styles.convFailedBadge} title="Latest active branch failed">
+                    <AlertTriangle size={10} />
+                    Failed
                   </span>
                 )}
                 <span className={styles.convItemTime}>
@@ -1353,6 +1549,7 @@ function areChatConversationListsEqual(a: ChatConversation[], b: ChatConversatio
       a[i].isUnread !== b[i].isUnread ||
       Boolean(a[i].isBusy) !== Boolean(b[i].isBusy) ||
       Number(a[i].queuedCount ?? 0) !== Number(b[i].queuedCount ?? 0) ||
+      Boolean(a[i].hasFailed) !== Boolean(b[i].hasFailed) ||
       a[i].updatedAt !== b[i].updatedAt
     ) {
       return false;
@@ -1365,7 +1562,36 @@ function agentConversationKey(agentId: string, conversationId: string): string {
   return `${agentId}:${conversationId}`;
 }
 
+function mergeConversationIntoList(
+  conversations: ChatConversation[],
+  conversation: ChatConversation | null,
+): ChatConversation[] {
+  if (!conversation) return conversations;
+  if (conversations.some((entry) => entry.id === conversation.id)) return conversations;
+  return [conversation, ...conversations];
+}
+
+function readConversationBootstrapRequest(
+  searchParams: URLSearchParams,
+): ConversationBootstrapRequest | null {
+  const agentId =
+    searchParams.get('agentId') ?? searchParams.get('id') ?? searchParams.get('settingsAgentId');
+  if (!agentId) return null;
+  return {
+    agentId,
+    conversationId: searchParams.get('conversationId'),
+  };
+}
+
+function areConversationBootstrapRequestsEqual(
+  a: ConversationBootstrapRequest | null,
+  b: ConversationBootstrapRequest | null,
+): boolean {
+  return a?.agentId === b?.agentId && a?.conversationId === b?.conversationId;
+}
+
 const RUN_HANDOFF_MS = 6000;
+const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -1642,10 +1868,13 @@ export function AgentsPage() {
   const { activeWorkspaceId } = useWorkspace();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const requestedAgentId =
-    searchParams.get('agentId') ?? searchParams.get('id') ?? searchParams.get('settingsAgentId');
-  const requestedConversationId = searchParams.get('conversationId');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [conversationBootstrapRequest, setConversationBootstrapRequest] =
+    useState<ConversationBootstrapRequest | null>(() =>
+      readConversationBootstrapRequest(searchParams),
+    );
+  const requestedAgentId = conversationBootstrapRequest?.agentId ?? null;
+  const requestedConversationId = conversationBootstrapRequest?.conversationId ?? null;
   // ── Agent list state ──
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1689,6 +1918,21 @@ export function AgentsPage() {
   const chatLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    const nextRequest = readConversationBootstrapRequest(searchParams);
+    if (!nextRequest) {
+      setConversationBootstrapRequest((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const matchesCurrentSelection =
+      activeAgentIdRef.current === nextRequest.agentId &&
+      activeConvIdRef.current === nextRequest.conversationId;
+    setConversationBootstrapRequest((prev) => {
+      if (matchesCurrentSelection) return null;
+      return areConversationBootstrapRequestsEqual(prev, nextRequest) ? prev : nextRequest;
+    });
+  }, [searchParams]);
+
+  useEffect(() => {
     if (chatLoading) {
       chatLoadingTimerRef.current = setTimeout(() => setShowChatLoading(true), 1500);
     } else {
@@ -1701,10 +1945,7 @@ export function AgentsPage() {
     };
   }, [chatLoading]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editingMessageInitialContent, setEditingMessageInitialContent] = useState('');
-  const [editingMessageContent, setEditingMessageContent] = useState('');
-  const [editingMessageImages, setEditingMessageImages] = useState<ManagedExistingImage[]>([]);
+  const [editingMessage, setEditingMessage] = useState<EditingMessageState | null>(null);
   const [pendingConversationKeys, setPendingConversationKeys] = useState<Set<string>>(new Set());
   const [runHandoffKeys, setRunHandoffKeys] = useState<Set<string>>(new Set());
   const [stoppingRun, setStoppingRun] = useState(false);
@@ -1716,11 +1957,11 @@ export function AgentsPage() {
   const isFirstMessageRef = useRef(false);
   const activeAgentIdRef = useRef<string | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
+  const convsByAgentRef = useRef<Record<string, ChatConversation[]>>({});
   const pendingConversationKeysRef = useRef<Set<string>>(new Set());
   const pendingConversationCountRef = useRef<Map<string, number>>(new Map());
   const runHandoffTimersRef = useRef<Map<string, number>>(new Map());
   const runHandoffStartedAtRef = useRef<Map<string, number>>(new Map());
-
   // ── Conversation indicators ──
   const messagesRef = useRef<HTMLDivElement>(null);
 
@@ -1842,6 +2083,14 @@ export function AgentsPage() {
   const [editingName, setEditingName] = useState(false);
   const [editNameValue, setEditNameValue] = useState('');
   const [editingAvatar, setEditingAvatar] = useState(false);
+  const [agentEnvVars, setAgentEnvVars] = useState<AgentEnvVar[]>([]);
+  const [agentEnvVarsLoading, setAgentEnvVarsLoading] = useState(false);
+  const [agentEnvVarSaving, setAgentEnvVarSaving] = useState(false);
+  const [agentEnvVarFormOpen, setAgentEnvVarFormOpen] = useState(false);
+  const [agentEnvVarFormErrors, setAgentEnvVarFormErrors] = useState<Record<string, string>>({});
+  const [agentEnvVarForm, setAgentEnvVarForm] = useState<AgentEnvVarFormState>(() =>
+    createEmptyAgentEnvVarForm(),
+  );
   const editNameRef = useRef<HTMLInputElement>(null);
   const avatarPickerRef = useRef<HTMLDivElement>(null);
 
@@ -1888,6 +2137,7 @@ export function AgentsPage() {
   agentsRef.current = agents;
   activeAgentIdRef.current = activeAgentId;
   activeConvIdRef.current = activeConvId;
+  convsByAgentRef.current = convsByAgent;
   pendingConversationKeysRef.current = pendingConversationKeys;
 
   const setActiveConversation = useCallback(
@@ -1900,10 +2150,7 @@ export function AgentsPage() {
       setQueuePanelOpen(false);
       setEditingQueueItemId(null);
       setEditingQueuePrompt('');
-      setEditingMessageId(null);
-      setEditingMessageInitialContent('');
-      setEditingMessageContent('');
-      setEditingMessageImages([]);
+      setEditingMessage(null);
       // Expand the active agent so the selected conversation is visible in the sidebar
       if (agentId) {
         setCollapsedAgents((prev) => {
@@ -1920,6 +2167,36 @@ export function AgentsPage() {
       }
     },
     [],
+  );
+
+  const syncActiveConversationUrl = useCallback(
+    () => {
+      if (conversationBootstrapRequest) return;
+
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('id');
+      nextParams.delete('settingsAgentId');
+      if (activeAgentId) {
+        nextParams.set('agentId', activeAgentId);
+      } else {
+        nextParams.delete('agentId');
+      }
+      if (activeConvId) {
+        nextParams.set('conversationId', activeConvId);
+      } else {
+        nextParams.delete('conversationId');
+      }
+
+      const currentParams = new URLSearchParams(searchParams);
+      currentParams.delete('id');
+      currentParams.delete('settingsAgentId');
+      const currentQuery = currentParams.toString();
+      const nextQuery = nextParams.toString();
+      if (currentQuery === nextQuery) return;
+
+      setSearchParams(nextParams, { replace: true });
+    },
+    [activeAgentId, activeConvId, conversationBootstrapRequest, searchParams, setSearchParams],
   );
 
   const setConversationPending = useCallback(
@@ -2026,45 +2303,60 @@ export function AgentsPage() {
       : false;
   const activeConversationBusy = Boolean(activeConversation?.isBusy);
   const activeConversationQueueCount = toQueueCount(activeConversation?.queuedCount);
+  const activeConversationRunBusy = activeConversationRun?.status === 'running';
   const streaming =
     activeConversationPending ||
     activeConversationBusy ||
+    activeConversationRunBusy ||
     activeConversationHandoff ||
     activeConversationQueueCount > 0;
   const activeConversationKey =
     activeAgentId && activeConvId ? agentConversationKey(activeAgentId, activeConvId) : null;
-  const activeLeafMessageId = messages.length > 0 ? messages[messages.length - 1].id : null;
-  const queuedQueueItems = useMemo(
-    () => queueItems.filter((item) => item.status === 'queued'),
-    [queueItems],
+  const {
+    queuedQueueItems,
+    effectivePendingBranchExecutionsByMessageId,
+    errorsByMessageId,
+    orphanErrorItems,
+    showStreamingBubble,
+  } = useMemo(
+    () =>
+      buildAgentConversationViewModel({
+        messages,
+        queueItems,
+        activeConversationRun,
+        activeAgentId,
+        activeConvId,
+        activeConversationKey,
+        optimisticResponseParentIds,
+        streaming,
+      }),
+    [
+      activeAgentId,
+      activeConvId,
+      activeConversationKey,
+      activeConversationRun,
+      messages,
+      optimisticResponseParentIds,
+      queueItems,
+      streaming,
+    ],
   );
-  const activeProcessingTargetMessageId = useMemo(() => {
-    if (activeConversationRun?.status === 'running' && activeConversationRun.responseParentId) {
-      return activeConversationRun.responseParentId;
-    }
-
-    const processingQueueItem = queueItems.find(
-      (item) =>
-        item.status === 'processing' && item.mode === 'respond_to_message' && item.targetMessageId,
+  const isNearMessagesBottom = useCallback((element: HTMLDivElement) => {
+    return (
+      element.scrollHeight - element.scrollTop - element.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX
     );
-    if (processingQueueItem?.targetMessageId) {
-      return processingQueueItem.targetMessageId;
-    }
-
-    const queuedBranchItem = queueItems.find(
-      (item) =>
-        item.status === 'queued' && item.mode === 'respond_to_message' && item.targetMessageId,
-    );
-    if (queuedBranchItem?.targetMessageId) {
-      return queuedBranchItem.targetMessageId;
-    }
-
-    if (!activeConversationKey) return null;
-    return optimisticResponseParentIds[activeConversationKey] ?? null;
-  }, [activeConversationKey, activeConversationRun, optimisticResponseParentIds, queueItems]);
-  const showStreamingBubble =
-    streaming &&
-    (!activeProcessingTargetMessageId || activeProcessingTargetMessageId === activeLeafMessageId);
+  }, []);
+  const shouldStickToBottomRef = useRef(true);
+  const forceScrollToBottomRef = useRef(false);
+  const requestAutoScrollToBottom = useCallback(() => {
+    forceScrollToBottomRef.current = true;
+    shouldStickToBottomRef.current = true;
+  }, []);
+  const handleMessagesScroll = useCallback(() => {
+    const element = messagesRef.current;
+    if (!element) return;
+    shouldStickToBottomRef.current = isNearMessagesBottom(element);
+  }, [isNearMessagesBottom]);
 
   const isActiveConversation = useCallback(
     (agentId: string, conversationId: string) =>
@@ -2108,6 +2400,30 @@ export function AgentsPage() {
     }
   }, [activeWorkspaceId]);
 
+  const fetchCliStatus = useCallback(async () => {
+    try {
+      const data = await api<{ clis: CliInfo[] }>('/agents/cli-status');
+      setCliStatus(data.clis);
+      return data.clis;
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const ensureAgentCliAvailable = useCallback(
+    (agentId: string) => {
+      const agent = agents.find((entry) => entry.id === agentId);
+      if (!agent) return true;
+      const cliInfo = getCliInfoForModel(cliStatus, agent.model);
+      if (!cliInfo || cliInfo.installed) return true;
+      const message = getCliUnavailableMessage(cliInfo);
+      setChatError(message);
+      toast.error(message);
+      return false;
+    },
+    [agents, cliStatus],
+  );
+
   const fetchAvatarPresets = useCallback(async () => {
     try {
       const data = await api<{ entries: AvatarPreset[] }>('/agent-avatar-presets');
@@ -2126,6 +2442,28 @@ export function AgentsPage() {
     }
   }, []);
 
+  const fetchAgentEnvVars = useCallback(async (agentId: string) => {
+    setAgentEnvVarsLoading(true);
+    try {
+      const data = await api<{ entries: AgentEnvVar[] }>(`/agents/${agentId}/env-vars`);
+      setAgentEnvVars(data.entries);
+      return data.entries;
+    } catch {
+      setAgentEnvVars([]);
+      return [];
+    } finally {
+      setAgentEnvVarsLoading(false);
+    }
+  }, []);
+
+  const fetchConversationById = useCallback(async (agentId: string, conversationId: string) => {
+    try {
+      return await api<ChatConversation>(`/agents/${agentId}/chat/conversations/${conversationId}`);
+    } catch {
+      return null;
+    }
+  }, []);
+
   /* ── Fetch conversations for an agent ── */
   const fetchConversations = useCallback(
     async (agentId: string) => {
@@ -2133,13 +2471,24 @@ export function AgentsPage() {
         const data = await api<{ entries: ChatConversation[]; total: number }>(
           `/agents/${agentId}/chat/conversations`,
         );
-        for (const conversation of data.entries) {
+        const preservedConversation =
+          activeAgentIdRef.current === agentId && activeConvIdRef.current
+            ? ((convsByAgentRef.current[agentId] || []).find(
+                (conv) => conv.id === activeConvIdRef.current,
+              ) ?? null)
+            : null;
+        const nextEntries = mergeConversationIntoList(data.entries, preservedConversation);
+        for (const conversation of nextEntries) {
           if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
             clearRunHandoff(agentId, conversation.id);
           }
         }
-        setConvsByAgent((prev) => ({ ...prev, [agentId]: data.entries }));
-        return data.entries;
+        setConvsByAgent((prev) => {
+          const existing = prev[agentId] || [];
+          if (areChatConversationListsEqual(existing, nextEntries)) return prev;
+          return { ...prev, [agentId]: nextEntries };
+        });
+        return nextEntries;
       } catch {
         return [];
       }
@@ -2171,14 +2520,19 @@ export function AgentsPage() {
       for (const entry of fetched) {
         if (!entry) continue;
         const [agentId, incoming] = entry;
-        for (const conversation of incoming) {
+        const preservedConversation =
+          activeAgentIdRef.current === agentId && activeConvIdRef.current
+            ? ((prev[agentId] || []).find((conv) => conv.id === activeConvIdRef.current) ?? null)
+            : null;
+        const nextEntries = mergeConversationIntoList(incoming, preservedConversation);
+        for (const conversation of nextEntries) {
           if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
             clearRunHandoff(agentId, conversation.id);
           }
         }
         const existing = prev[agentId] || [];
-        if (areChatConversationListsEqual(existing, incoming)) continue;
-        next[agentId] = incoming;
+        if (areChatConversationListsEqual(existing, nextEntries)) continue;
+        next[agentId] = nextEntries;
         changed = true;
       }
 
@@ -2189,16 +2543,57 @@ export function AgentsPage() {
   /* ── Fetch messages ── */
   const messagesRef2 = useRef<ChatMessage[]>([]);
   messagesRef2.current = messages;
+  const queueItemsRef = useRef<QueueItem[]>([]);
+  queueItemsRef.current = queueItems;
+  const activeMessagesRequestTokenRef = useRef(0);
+  const activeQueueRequestTokenRef = useRef(0);
+
+  const setActiveConversationMessages = useCallback(
+    (
+      agentId: string,
+      conversationId: string,
+      nextMessages: ChatMessage[] | ((currentMessages: ChatMessage[]) => ChatMessage[]),
+    ) => {
+      if (!isActiveConversation(agentId, conversationId)) return;
+      activeMessagesRequestTokenRef.current += 1;
+      const resolvedMessages =
+        typeof nextMessages === 'function' ? nextMessages(messagesRef2.current) : nextMessages;
+      messagesRef2.current = resolvedMessages;
+      setMessages(resolvedMessages);
+      isFirstMessageRef.current = resolvedMessages.length === 0;
+    },
+    [isActiveConversation],
+  );
+
+  const setActiveConversationQueueItems = useCallback(
+    (
+      agentId: string,
+      conversationId: string,
+      nextQueueItems: QueueItem[] | ((currentQueueItems: QueueItem[]) => QueueItem[]),
+    ) => {
+      if (!isActiveConversation(agentId, conversationId)) return;
+      activeQueueRequestTokenRef.current += 1;
+      const resolvedQueueItems =
+        typeof nextQueueItems === 'function'
+          ? nextQueueItems(queueItemsRef.current)
+          : nextQueueItems;
+      queueItemsRef.current = resolvedQueueItems;
+      setQueueItems(resolvedQueueItems);
+    },
+    [isActiveConversation],
+  );
 
   const fetchMessages = useCallback(
     async (agentId: string, conversationId: string, options?: { silent?: boolean }) => {
       const silent = options?.silent === true;
+      const requestToken = ++activeMessagesRequestTokenRef.current;
       if (!silent) setChatLoading(true);
       try {
         const data = await api<{ entries: ChatMessage[] }>(
           `/agents/${agentId}/chat/messages?conversationId=${conversationId}`,
         );
         if (!isActiveConversation(agentId, conversationId)) return;
+        if (requestToken !== activeMessagesRequestTokenRef.current) return;
         const handoffStartedAt =
           runHandoffStartedAtRef.current.get(agentConversationKey(agentId, conversationId)) ?? null;
         if (
@@ -2233,8 +2628,7 @@ export function AgentsPage() {
         ) {
           return;
         }
-        setMessages(data.entries);
-        isFirstMessageRef.current = data.entries.length === 0;
+        setActiveConversationMessages(agentId, conversationId, data.entries);
       } catch {
         if (!isActiveConversation(agentId, conversationId)) return;
         setChatError('Failed to load messages');
@@ -2242,7 +2636,7 @@ export function AgentsPage() {
         if (!silent) setChatLoading(false);
       }
     },
-    [clearRunHandoff, isActiveConversation],
+    [clearRunHandoff, isActiveConversation, setActiveConversationMessages],
   );
 
   const markConversationRead = useCallback(async (agentId: string, conversationId: string) => {
@@ -2271,17 +2665,19 @@ export function AgentsPage() {
   /* ── Queue item handlers ── */
   const fetchQueueItems = useCallback(
     async (agentId: string, conversationId: string) => {
+      const requestToken = ++activeQueueRequestTokenRef.current;
       try {
         const data = await api<{ entries: QueueItem[] }>(
           `/agents/${agentId}/chat/conversations/${conversationId}/queue`,
         );
         if (!isActiveConversation(agentId, conversationId)) return;
-        setQueueItems(data.entries);
+        if (requestToken !== activeQueueRequestTokenRef.current) return;
+        setActiveConversationQueueItems(agentId, conversationId, data.entries);
       } catch {
         // silently fail
       }
     },
-    [isActiveConversation],
+    [isActiveConversation, setActiveConversationQueueItems],
   );
 
   const fetchConversationRun = useCallback(
@@ -2352,12 +2748,46 @@ export function AgentsPage() {
   }
 
   async function handleClearQueue() {
+    if (!activeAgentId || !activeConvId || queuedQueueItems.length === 0) return;
+    try {
+      await Promise.all(
+        queuedQueueItems.map((item) =>
+          api(`/agents/${activeAgentId}/chat/queue/${item.id}`, {
+            method: 'DELETE',
+            body: JSON.stringify({ conversationId: activeConvId }),
+          }),
+        ),
+      );
+      setActiveConversationQueueItems(activeAgentId, activeConvId, (prev) =>
+        prev.filter((item) => !queuedQueueItems.some((queuedItem) => queuedItem.id === item.id)),
+      );
+      await fetchConversations(activeAgentId);
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function handleRetryQueueItem(itemId: string) {
     if (!activeAgentId || !activeConvId) return;
     try {
-      await api(`/agents/${activeAgentId}/chat/conversations/${activeConvId}/queue`, {
-        method: 'DELETE',
+      await api(`/agents/${activeAgentId}/chat/queue/${itemId}/retry`, {
+        method: 'POST',
+        body: JSON.stringify({ conversationId: activeConvId }),
       });
-      setQueueItems([]);
+      await syncActiveConversation(activeAgentId, activeConvId);
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function handleDismissQueueItem(itemId: string) {
+    if (!activeAgentId || !activeConvId) return;
+    try {
+      await api(`/agents/${activeAgentId}/chat/queue/${itemId}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ conversationId: activeConvId }),
+      });
+      await syncActiveConversation(activeAgentId, activeConvId);
     } catch {
       // silently fail
     }
@@ -2370,6 +2800,7 @@ export function AgentsPage() {
       fetchGroups();
       fetchAvatarPresets();
       fetchColorPresets();
+      fetchCliStatus();
       const entries = await fetchAgents();
       if (cancelled || entries.length === 0) return;
 
@@ -2388,30 +2819,75 @@ export function AgentsPage() {
         }),
       );
       if (cancelled) return;
-      setConvsByAgent(allConvs);
+
+      const currentAgentId = activeAgentIdRef.current;
+      const currentConvId = activeConvIdRef.current;
+      if (currentAgentId) {
+        const preservedConversation =
+          currentConvId == null
+            ? null
+            : ((allConvs[currentAgentId] || []).find((conv) => conv.id === currentConvId) ??
+              (convsByAgentRef.current[currentAgentId] || []).find(
+                (conv) => conv.id === currentConvId,
+              ) ??
+              null);
+        if (preservedConversation) {
+          allConvs[currentAgentId] = mergeConversationIntoList(
+            allConvs[currentAgentId] || [],
+            preservedConversation,
+          );
+        }
+      }
 
       if (requestedAgentId) {
         const requestedAgent = entries.find((agent) => agent.id === requestedAgentId);
         if (requestedAgent) {
           const requestedConvs = allConvs[requestedAgentId] || [];
-          const requestedConvExists = requestedConversationId
-            ? requestedConvs.some((conv) => conv.id === requestedConversationId)
-            : false;
-          const targetConvId = requestedConvExists
-            ? requestedConversationId
-            : (requestedConvs[0]?.id ?? null);
+          const requestedConversation =
+            requestedConversationId == null
+              ? null
+              : (requestedConvs.find((conv) => conv.id === requestedConversationId) ??
+                (await fetchConversationById(requestedAgentId, requestedConversationId)));
+          const requestedAgentConvs = mergeConversationIntoList(
+            requestedConvs,
+            requestedConversation,
+          );
+          allConvs[requestedAgentId] = requestedAgentConvs;
+          setConvsByAgent(allConvs);
+          const targetConvId = requestedConversation?.id ?? requestedAgentConvs[0]?.id ?? null;
+          const shouldResetSelection =
+            currentAgentId !== requestedAgentId || currentConvId !== targetConvId;
 
-          setActiveConversation(requestedAgentId, null);
           if (targetConvId) {
-            setActiveConversation(requestedAgentId, targetConvId);
-            setMessages([]);
+            if (shouldResetSelection) {
+              setActiveConversation(requestedAgentId, targetConvId);
+              setMessages([]);
+            }
             setChatError(null);
-            await fetchMessages(requestedAgentId, targetConvId);
+            await syncActiveConversation(requestedAgentId, targetConvId);
           } else {
-            setActiveConversation(requestedAgentId, null);
-            setMessages([]);
+            if (shouldResetSelection) {
+              setActiveConversation(requestedAgentId, null);
+              setMessages([]);
+            }
             isFirstMessageRef.current = true;
           }
+          setConversationBootstrapRequest(null);
+          return;
+        }
+
+        setConversationBootstrapRequest(null);
+      }
+
+      setConvsByAgent(allConvs);
+
+      if (currentAgentId) {
+        const activeAgentExists = entries.some((agent) => agent.id === currentAgentId);
+        const activeConversationExists =
+          currentConvId == null ||
+          (allConvs[currentAgentId] || []).some((conv) => conv.id === currentConvId);
+
+        if (activeAgentExists && activeConversationExists) {
           return;
         }
       }
@@ -2422,7 +2898,7 @@ export function AgentsPage() {
         setActiveConversation(agent.id, busyConv.id);
         setMessages([]);
         setChatError(null);
-        await fetchMessages(agent.id, busyConv.id);
+        await syncActiveConversation(agent.id, busyConv.id);
         return;
       }
 
@@ -2433,7 +2909,7 @@ export function AgentsPage() {
         setActiveConversation(firstAgent.id, firstConvs[0].id);
         setMessages([]);
         setChatError(null);
-        await fetchMessages(firstAgent.id, firstConvs[0].id);
+        await syncActiveConversation(firstAgent.id, firstConvs[0].id);
       } else {
         setActiveConversation(firstAgent.id, null);
         setMessages([]);
@@ -2448,12 +2924,18 @@ export function AgentsPage() {
     fetchAgents,
     fetchAvatarPresets,
     fetchColorPresets,
+    fetchCliStatus,
+    fetchConversationById,
     fetchGroups,
-    fetchMessages,
+    syncActiveConversation,
     requestedAgentId,
     requestedConversationId,
     setActiveConversation,
   ]);
+
+  useEffect(() => {
+    syncActiveConversationUrl();
+  }, [activeAgentId, activeConvId, syncActiveConversationUrl]);
 
   useEffect(() => {
     if (agents.length === 0) return;
@@ -2529,12 +3011,29 @@ export function AgentsPage() {
   const scrollToBottom = useCallback(() => {
     if (messagesRef.current) {
       messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+      shouldStickToBottomRef.current = true;
     }
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, streaming, scrollToBottom]);
+    requestAutoScrollToBottom();
+  }, [activeConversationKey, requestAutoScrollToBottom]);
+
+  useEffect(() => {
+    if (!messagesRef.current) {
+      return;
+    }
+    if (!forceScrollToBottomRef.current && !shouldStickToBottomRef.current) {
+      return;
+    }
+    const rafId = window.requestAnimationFrame(() => {
+      scrollToBottom();
+      forceScrollToBottomRef.current = false;
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [messages, queueItems, scrollToBottom, streaming]);
 
   useEffect(() => {
     if (!activeAgentId || !activeConvId) return;
@@ -2548,17 +3047,30 @@ export function AgentsPage() {
       setCronFormOpen(false);
       setCronFormCron('');
       setCronFormPrompt('');
+      void fetchAgentEnvVars(settingsAgent.id);
+      setAgentEnvVarFormErrors({});
+    } else {
+      setAgentEnvVars([]);
+      setAgentEnvVarFormErrors({});
+      setAgentEnvVarFormOpen(false);
+      setAgentEnvVarForm(createEmptyAgentEnvVarForm());
     }
-  }, [settingsAgent?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchAgentEnvVars, settingsAgent?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Cron job handlers ── */
 
   async function saveCronJobs(agentId: string, jobs: CronJob[]) {
     setCronSaving(true);
     try {
+      const payload = jobs.map(({ id, cron, prompt, enabled }) => ({
+        id,
+        cron,
+        prompt,
+        enabled,
+      }));
       const updated = await api<Agent>(`/agents/${agentId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ cronJobs: jobs }),
+        body: JSON.stringify({ cronJobs: payload }),
       });
       setAgents((prev) => prev.map((a) => (a.id === agentId ? updated : a)));
       if (settingsAgent?.id === agentId) setSettingsAgent(updated);
@@ -2615,13 +3127,13 @@ export function AgentsPage() {
       setMessages([]);
       setChatError(null);
       void markConversationRead(agentId, convId);
-      await fetchMessages(agentId, convId);
+      await syncActiveConversation(agentId, convId);
     },
     [
       activeAgentId,
       activeConvId,
       autoCollapse,
-      fetchMessages,
+      syncActiveConversation,
       markConversationRead,
       setActiveConversation,
     ],
@@ -2807,6 +3319,7 @@ export function AgentsPage() {
       await Promise.all([
         fetchMessages(activeAgentId, activeConvId),
         fetchConversations(activeAgentId),
+        fetchQueueItems(activeAgentId, activeConvId),
       ]);
     } catch {
       toast.error('Failed to stop run');
@@ -2818,9 +3331,11 @@ export function AgentsPage() {
   const sendAttachmentMessage = useCallback(
     async (caption: string, files: File[]) => {
       if (!activeAgentId || !activeConvId || files.length === 0) return;
+      if (!ensureAgentCliAvailable(activeAgentId)) return;
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
       setChatError(null);
+      requestAutoScrollToBottom();
 
       const wasFirst = isFirstMessageRef.current;
       isFirstMessageRef.current = false;
@@ -2835,9 +3350,65 @@ export function AgentsPage() {
         }
         const imgMsg = await apiUpload<ChatMessage>(`/agents/${sentAgentId}/chat/upload`, fd);
         if (isActiveConversation(sentAgentId, sentConvId)) {
-          setMessages((prev) => [...prev, imgMsg]);
+          setActiveConversationMessages(sentAgentId, sentConvId, (prev) => [...prev, imgMsg]);
         }
         setOptimisticResponseParent(sentAgentId, sentConvId, imgMsg.id);
+
+        const optimisticQueueItem: QueueItem = {
+          id: `temp-respond-${Date.now()}`,
+          agentId: sentAgentId,
+          conversationId: sentConvId,
+          mode: 'respond_to_message',
+          prompt: caption,
+          status: 'queued',
+          attempts: 0,
+          createdAt: new Date().toISOString(),
+          targetMessageId: imgMsg.id,
+        };
+        setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) => [
+          ...prev,
+          optimisticQueueItem,
+        ]);
+
+        beginRunHandoff(sentAgentId, sentConvId);
+        setConversationPending(sentAgentId, sentConvId, true);
+        try {
+          const queueResponse = await api<QueuePromptResponse>(
+            `/agents/${sentAgentId}/chat/respond`,
+            {
+              method: 'POST',
+              body: JSON.stringify({ conversationId: sentConvId }),
+            },
+          );
+          const immediateQueuedCount = toQueueCount(queueResponse.queuedCount);
+          setConvsByAgent((prev) => {
+            const convs = prev[sentAgentId];
+            if (!convs || convs.length === 0) return prev;
+            let changed = false;
+            const nextConvs = convs.map((conv) => {
+              if (conv.id !== sentConvId) return conv;
+              if (conv.isBusy && toQueueCount(conv.queuedCount) === immediateQueuedCount)
+                return conv;
+              changed = true;
+              return { ...conv, isBusy: true, queuedCount: immediateQueuedCount };
+            });
+            if (!changed) return prev;
+            return { ...prev, [sentAgentId]: nextConvs };
+          });
+          await Promise.all([
+            fetchQueueItems(sentAgentId, sentConvId),
+            fetchConversations(sentAgentId),
+          ]);
+        } catch (err) {
+          clearRunHandoff(sentAgentId, sentConvId);
+          setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) =>
+            prev.filter((item) => item.id !== optimisticQueueItem.id),
+          );
+          setChatError(err instanceof Error ? err.message : 'Failed to queue agent response');
+          throw err;
+        } finally {
+          setConversationPending(sentAgentId, sentConvId, false);
+        }
       } catch (err) {
         setChatError(err instanceof Error ? err.message : 'Failed to upload attachments');
         throw err;
@@ -2846,35 +3417,19 @@ export function AgentsPage() {
       if (wasFirst) {
         void fetchConversations(sentAgentId);
       }
-
-      beginRunHandoff(sentAgentId, sentConvId);
-      setConversationPending(sentAgentId, sentConvId, true);
-      void (async () => {
-        try {
-          await api(`/agents/${sentAgentId}/chat/respond`, {
-            method: 'POST',
-            body: JSON.stringify({ conversationId: sentConvId }),
-          });
-          await Promise.all([
-            fetchMessages(sentAgentId, sentConvId),
-            fetchConversations(sentAgentId),
-          ]);
-        } catch (err) {
-          clearRunHandoff(sentAgentId, sentConvId);
-          setChatError(err instanceof Error ? err.message : 'Failed to get agent response');
-        } finally {
-          setConversationPending(sentAgentId, sentConvId, false);
-        }
-      })();
     },
     [
       activeAgentId,
       activeConvId,
       beginRunHandoff,
       clearRunHandoff,
+      ensureAgentCliAvailable,
       fetchConversations,
-      fetchMessages,
+      fetchQueueItems,
       isActiveConversation,
+      requestAutoScrollToBottom,
+      setActiveConversationMessages,
+      setActiveConversationQueueItems,
       setOptimisticResponseParent,
       setConversationPending,
     ],
@@ -2883,10 +3438,12 @@ export function AgentsPage() {
   const sendTextMessage = useCallback(
     async (prompt: string) => {
       if (!prompt || !activeAgentId || !activeConvId) return;
+      if (!ensureAgentCliAvailable(activeAgentId)) return;
 
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
       setChatError(null);
+      requestAutoScrollToBottom();
 
       const optimisticQueueItem: QueueItem = {
         id: `temp-${Date.now()}`,
@@ -2897,7 +3454,10 @@ export function AgentsPage() {
         attempts: 0,
         createdAt: new Date().toISOString(),
       };
-      setQueueItems((prev) => [...prev, optimisticQueueItem]);
+      setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) => [
+        ...prev,
+        optimisticQueueItem,
+      ]);
 
       // If the conversation is already busy/streaming, we're just adding to the
       // queue — no need to toggle pending state or force-refetch (the 1.5s poll
@@ -2949,7 +3509,9 @@ export function AgentsPage() {
       } catch (err) {
         // Remove optimistic queue item on failure
         clearRunHandoff(sentAgentId, sentConvId);
-        setQueueItems((prev) => prev.filter((item) => item.id !== optimisticQueueItem.id));
+        setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) =>
+          prev.filter((item) => item.id !== optimisticQueueItem.id),
+        );
         setChatError(err instanceof Error ? err.message : 'Failed to send message');
         throw err;
       } finally {
@@ -2963,9 +3525,12 @@ export function AgentsPage() {
       activeConvId,
       beginRunHandoff,
       clearRunHandoff,
+      ensureAgentCliAvailable,
       fetchConversations,
       fetchMessages,
       fetchQueueItems,
+      requestAutoScrollToBottom,
+      setActiveConversationQueueItems,
       setConversationPending,
       streaming,
     ],
@@ -2982,50 +3547,65 @@ export function AgentsPage() {
         },
       );
       cancelEditingMessage();
-      setMessages(data.entries);
+      setActiveConversationMessages(activeAgentId, activeConvId, data.entries);
     } catch {
       toast.error('Failed to switch branch');
     }
   }
 
   function startEditingMessage(msg: ChatMessage) {
-    if (!isEditableChatMessage(msg)) return;
-    setEditingMessageId(msg.id);
-    setEditingMessageInitialContent(msg.content);
-    setEditingMessageContent(msg.content);
-    setEditingMessageImages(getChatMessageImages(msg));
+    if (editingMessage?.isSubmitting) return;
+    if (!isEditableChatMessage(msg) || !activeAgentId || !activeConvId) return;
+    setEditingMessage({
+      agentId: activeAgentId,
+      conversationId: activeConvId,
+      id: msg.id,
+      initialValue: msg.content,
+      value: msg.content,
+      existingImages: getChatMessageImages(msg),
+      isSubmitting: false,
+    });
   }
 
   function cancelEditingMessage() {
-    setEditingMessageId(null);
-    setEditingMessageInitialContent('');
-    setEditingMessageContent('');
-    setEditingMessageImages([]);
+    setEditingMessage(null);
   }
 
   async function submitEditedMessage(files: File[], keepStoragePaths: string[]) {
-    if (!editingMessageId || !activeAgentId || !activeConvId) return;
+    if (!editingMessage || editingMessage.isSubmitting) return;
+    if (!ensureAgentCliAvailable(editingMessage.agentId)) return;
 
-    const trimmedContent = editingMessageContent.trim();
+    const trimmedContent = editingMessage.value.trim();
     if (!trimmedContent && files.length === 0 && keepStoragePaths.length === 0) return;
 
-    const sentAgentId = activeAgentId;
-    const sentConvId = activeConvId;
+    const { agentId: sentAgentId, conversationId: sentConvId, id: messageId } = editingMessage;
     const content = trimmedContent;
+    const requestId = `edit-${Date.now()}-${generateId()}`;
+    const headers = {
+      'Idempotency-Key': `agent-chat-edit:${sentAgentId}:${sentConvId}:${messageId}:${requestId}`,
+    };
 
-    setEditingMessageId(null);
-    setEditingMessageInitialContent('');
-    setEditingMessageContent('');
-    setEditingMessageImages([]);
+    setEditingMessage((prev) => {
+      if (!prev) return prev;
+      if (
+        prev.agentId !== sentAgentId ||
+        prev.conversationId !== sentConvId ||
+        prev.id !== messageId
+      ) {
+        return prev;
+      }
+      return { ...prev, isSubmitting: true };
+    });
     setChatError(null);
+    requestAutoScrollToBottom();
 
     beginRunHandoff(sentAgentId, sentConvId);
     setConversationPending(sentAgentId, sentConvId, true);
     try {
-      let editedMessage: ChatMessage | null = null;
+      let response: EditMessageResponse;
       if (files.length > 0) {
         const fd = new FormData();
-        fd.append('messageId', editingMessageId);
+        fd.append('messageId', messageId);
         if (content) fd.append('content', content);
         for (const storagePath of keepStoragePaths) {
           fd.append('keepStoragePaths', storagePath);
@@ -3034,39 +3614,69 @@ export function AgentsPage() {
           const prepared = await prepareImageForUpload(file);
           fd.append('files', prepared, prepared.name);
         }
-        const response = await apiUpload<{ message: ChatMessage }>(
+        response = await apiUpload<EditMessageResponse>(
           `/agents/${sentAgentId}/chat/conversations/${sentConvId}/edit-message-upload`,
           fd,
+          { headers },
         );
-        editedMessage = response.message;
       } else {
-        const response = await api<{ message: ChatMessage }>(
+        response = await api<EditMessageResponse>(
           `/agents/${sentAgentId}/chat/conversations/${sentConvId}/edit-message`,
           {
             method: 'POST',
-            body: JSON.stringify({ messageId: editingMessageId, content, keepStoragePaths }),
+            headers,
+            body: JSON.stringify({ messageId, content, keepStoragePaths }),
           },
         );
-        editedMessage = response.message;
       }
-      if (editedMessage) {
-        setOptimisticResponseParent(sentAgentId, sentConvId, editedMessage.id);
+      if (response.message) {
+        setOptimisticResponseParent(sentAgentId, sentConvId, response.message.id);
       }
-      await Promise.all([fetchMessages(sentAgentId, sentConvId), fetchConversations(sentAgentId)]);
+      if (isActiveConversation(sentAgentId, sentConvId)) {
+        setActiveConversationMessages(sentAgentId, sentConvId, response.entries);
+      }
+      setEditingMessage((prev) => {
+        if (!prev) return prev;
+        if (
+          prev.agentId !== sentAgentId ||
+          prev.conversationId !== sentConvId ||
+          prev.id !== messageId
+        ) {
+          return prev;
+        }
+        return null;
+      });
+      await Promise.all([
+        fetchConversations(sentAgentId),
+        fetchQueueItems(sentAgentId, sentConvId),
+        fetchConversationRun(sentAgentId, sentConvId),
+      ]);
     } catch (err) {
       clearRunHandoff(sentAgentId, sentConvId);
       setChatError(err instanceof Error ? err.message : 'Failed to edit message');
+      throw err;
     } finally {
+      setEditingMessage((prev) => {
+        if (!prev) return prev;
+        if (
+          prev.agentId !== sentAgentId ||
+          prev.conversationId !== sentConvId ||
+          prev.id !== messageId
+        ) {
+          return prev;
+        }
+        return { ...prev, isSubmitting: false };
+      });
       setConversationPending(sentAgentId, sentConvId, false);
     }
   }
 
-  async function handleSwitchBranchByOffset(msg: ChatMessage, offset: number) {
-    const idx = msg.siblingIndex ?? 0;
-    const ids = msg.siblingIds ?? [];
-    const targetIdx = idx + offset;
-    if (targetIdx < 0 || targetIdx >= ids.length) return;
-    const targetId = ids[targetIdx];
+  async function handleSwitchBranchByOffset(
+    ids: string[] | undefined,
+    index: number | undefined,
+    offset: number,
+  ) {
+    const targetId = getBranchTargetIdByOffset(ids, index, offset);
     if (targetId) void handleSwitchBranch(targetId);
   }
 
@@ -3074,7 +3684,7 @@ export function AgentsPage() {
 
   /* ── Agent CRUD ── */
   const selectedModel = MODELS.find((m) => m.id === form.model);
-  const selectedCli = cliStatus.find((c) => c.id === form.model);
+  const selectedCli = getCliInfoForModel(cliStatus, form.model);
   const selectedPreset = presets.find((preset) => preset.id === form.preset);
   const cliMissing = selectedCli ? !selectedCli.installed : false;
   const selectedKey = apiKeys.find((k) => k.id === form.apiKeyId);
@@ -3122,14 +3732,7 @@ export function AgentsPage() {
         /* empty */
       }
     })();
-    (async () => {
-      try {
-        const data = await api<{ clis: CliInfo[] }>('/agents/cli-status');
-        setCliStatus(data.clis);
-      } catch {
-        /* empty */
-      }
-    })();
+    void fetchCliStatus();
   }
 
   function closeCreate() {
@@ -3346,10 +3949,10 @@ export function AgentsPage() {
     value: string,
   ) {
     const body: Record<string, unknown> = { [field]: value || null };
-    // Clear modelId when switching provider; clear thinkingLevel for qwen (no CLI flag)
+    // Clear modelId when switching provider; clear thinkingLevel for CLIs that don't support it.
     if (field === 'model') {
-      body.modelId = null;
-      if (value === 'qwen') {
+      body.modelId = getAgentModelDefaultId(value) || null;
+      if (!supportsThinkingLevel(value)) {
         body.thinkingLevel = null;
       }
     }
@@ -3360,8 +3963,8 @@ export function AgentsPage() {
       });
       setAgents((prev) => prev.map((a) => (a.id === agentId ? updated : a)));
       if (settingsAgent?.id === agentId) setSettingsAgent(updated);
-    } catch {
-      /* silently fail */
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : 'Failed to update agent');
     }
   }
 
@@ -3419,6 +4022,7 @@ export function AgentsPage() {
     e.preventDefault();
     const errors: Record<string, string> = {};
     if (!form.name.trim()) errors.name = 'Name is required';
+    if (cliMissing && selectedCli) errors.model = getCliUnavailableMessage(selectedCli);
     for (const parameter of selectedPreset?.parameters ?? []) {
       const value = form.presetParameters[parameter.key]?.trim() ?? '';
       if (parameter.required && !value) {
@@ -3557,6 +4161,124 @@ export function AgentsPage() {
     }
   }
 
+  function handleOpenAgentEnvVarCreate() {
+    setAgentEnvVarForm(createEmptyAgentEnvVarForm());
+    setAgentEnvVarFormErrors({});
+    setAgentEnvVarFormOpen(true);
+  }
+
+  function handleCloseAgentEnvVarForm() {
+    setAgentEnvVarFormOpen(false);
+    setAgentEnvVarForm(createEmptyAgentEnvVarForm());
+    setAgentEnvVarFormErrors({});
+  }
+
+  function handleEditAgentEnvVar(envVar: AgentEnvVar) {
+    setAgentEnvVarForm({
+      id: envVar.id,
+      key: envVar.key,
+      value: '',
+      description: envVar.description ?? '',
+      isActive: envVar.isActive,
+    });
+    setAgentEnvVarFormErrors({});
+    setAgentEnvVarFormOpen(true);
+  }
+
+  async function handleSubmitAgentEnvVar() {
+    if (!settingsAgent) return;
+
+    const errors = validateAgentEnvVarForm(agentEnvVarForm);
+    setAgentEnvVarFormErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    const payload: {
+      key: string;
+      value?: string;
+      description?: string;
+      isActive: boolean;
+    } = {
+      key: agentEnvVarForm.key.trim().toUpperCase(),
+      description: agentEnvVarForm.description.trim() || undefined,
+      isActive: agentEnvVarForm.isActive,
+    };
+
+    if (!agentEnvVarForm.id || agentEnvVarForm.value.length > 0) {
+      payload.value = agentEnvVarForm.value;
+    }
+
+    setAgentEnvVarSaving(true);
+    try {
+      if (agentEnvVarForm.id) {
+        await api(`/agents/${settingsAgent.id}/env-vars/${agentEnvVarForm.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await api(`/agents/${settingsAgent.id}/env-vars`, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+
+      await fetchAgentEnvVars(settingsAgent.id);
+      handleCloseAgentEnvVarForm();
+      toast.success(agentEnvVarForm.id ? 'Env var updated' : 'Env var added');
+    } catch (error) {
+      const formErrors = mapAgentEnvVarApiErrorToFormErrors(error, Boolean(agentEnvVarForm.id));
+      if (formErrors) {
+        setAgentEnvVarFormErrors(formErrors);
+      }
+      const message =
+        error instanceof ApiError && error.message ? error.message : 'Failed to save env var';
+      toast.error(message);
+    } finally {
+      setAgentEnvVarSaving(false);
+    }
+  }
+
+  async function handleDeleteAgentEnvVar(envVar: AgentEnvVar) {
+    if (!settingsAgent) return;
+    const ok = await confirm({
+      title: 'Delete environment variable',
+      message: `Remove "${envVar.key}" from this agent? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    try {
+      await api(`/agents/${settingsAgent.id}/env-vars/${envVar.id}`, {
+        method: 'DELETE',
+      });
+      await fetchAgentEnvVars(settingsAgent.id);
+      if (agentEnvVarForm.id === envVar.id) {
+        handleCloseAgentEnvVarForm();
+      }
+      toast.success('Env var deleted');
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message ? error.message : 'Failed to delete env var';
+      toast.error(message);
+    }
+  }
+
+  async function handleToggleAgentEnvVar(envVar: AgentEnvVar) {
+    if (!settingsAgent) return;
+
+    try {
+      await api(`/agents/${settingsAgent.id}/env-vars/${envVar.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: !envVar.isActive }),
+      });
+      await fetchAgentEnvVars(settingsAgent.id);
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.message ? error.message : 'Failed to update env var';
+      toast.error(message);
+    }
+  }
+
   /* ── Derived data ── */
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
   const deferredSearch = useDeferredValue(search);
@@ -3565,6 +4287,21 @@ export function AgentsPage() {
     if (!normalizedSearch) return agents;
     return agents.filter((agent) => agent.name.toLowerCase().includes(normalizedSearch));
   }, [agents, deferredSearch]);
+  const sortedAgentEnvVars = useMemo(() => {
+    const sorted = [...agentEnvVars].sort((a, b) => {
+      if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
+      const aLastUsed = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
+      const bLastUsed = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
+      if (aLastUsed !== bLastUsed) return bLastUsed - aLastUsed;
+      return a.key.localeCompare(b.key);
+    });
+    return sorted;
+  }, [agentEnvVars]);
+  const visibleAgentEnvVars = useMemo(
+    () => sortedAgentEnvVars.filter((envVar) => envVar.id !== agentEnvVarForm.id),
+    [agentEnvVarForm.id, sortedAgentEnvVars],
+  );
+  const isEnvVarEmptyState = !agentEnvVarFormOpen && visibleAgentEnvVars.length === 0;
 
   // Group agents by groupId
   const groupedAgents = useMemo(() => {
@@ -4185,7 +4922,10 @@ export function AgentsPage() {
                       <Loader size={20} className={styles.chatSpinner} />
                       <div className={styles.emptyText}>Loading messages…</div>
                     </div>
-                  ) : messages.length === 0 && !streaming && !chatLoading ? (
+                  ) : messages.length === 0 &&
+                    !streaming &&
+                    !chatLoading &&
+                    orphanErrorItems.length === 0 ? (
                     <div className={styles.emptyPanel}>
                       <MessageSquare size={36} strokeWidth={1.5} className={styles.emptyIcon} />
                       <div className={styles.emptyTitle}>Start a conversation</div>
@@ -4194,126 +4934,230 @@ export function AgentsPage() {
                       </div>
                     </div>
                   ) : (
-                    <div className={styles.messagesArea} ref={messagesRef}>
+                    <div
+                      className={styles.messagesArea}
+                      ref={messagesRef}
+                      onScroll={handleMessagesScroll}
+                    >
                       {messages.map((msg) => {
                         const messageMeta = parseAgentMessageMetadata(msg.metadata);
                         const monitorRunId =
                           msg.direction === 'inbound' ? (messageMeta?.runId ?? null) : null;
+                        const branchExecutionItems =
+                          effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? [];
+                        const processingBranchExecutionCount = branchExecutionItems.filter(
+                          (item) => item.status === 'processing',
+                        ).length;
+                        const queuedBranchExecutionCount = branchExecutionItems.filter(
+                          (item) => item.status === 'queued',
+                        ).length;
+                        const branchExecutionLabel =
+                          queuedBranchExecutionCount > 0
+                            ? queuedBranchExecutionCount === 1
+                              ? 'Edit queued to run'
+                              : `${queuedBranchExecutionCount} edits queued to run`
+                            : null;
 
                         return (
-                          <div
-                            key={msg.id}
-                            className={`${styles.messageRow} ${
-                              msg.direction === 'outbound'
-                                ? styles.messageRowUser
-                                : styles.messageRowAgent
-                            }`}
-                          >
-                            <div className={styles.messageContent}>
-                              {/* Branch navigator — shown when message has siblings */}
-                              {(msg.siblingCount ?? 1) > 1 && (
-                                <div
-                                  className={`${styles.branchNav} ${msg.direction === 'outbound' ? styles.branchNavUser : ''}`}
-                                >
-                                  <button
-                                    className={styles.branchNavBtn}
-                                    disabled={(msg.siblingIndex ?? 0) === 0}
-                                    onClick={() => void handleSwitchBranchByOffset(msg, -1)}
-                                    aria-label="Previous branch"
+                          <Fragment key={msg.id}>
+                            <div
+                              className={`${styles.messageRow} ${
+                                msg.direction === 'outbound'
+                                  ? styles.messageRowUser
+                                  : styles.messageRowAgent
+                              }`}
+                            >
+                              <div className={styles.messageContent}>
+                                {/* Branch navigator */}
+                                {(msg.siblingCount ?? 0) > 1 && (
+                                  <div
+                                    className={`${styles.branchNav} ${msg.direction === 'outbound' ? styles.branchNavUser : ''}`}
                                   >
-                                    <ArrowLeft size={12} />
-                                  </button>
-                                  <span className={styles.branchNavLabel}>
-                                    {(msg.siblingIndex ?? 0) + 1}/{msg.siblingCount}
-                                  </span>
-                                  <button
-                                    className={styles.branchNavBtn}
-                                    disabled={
-                                      (msg.siblingIndex ?? 0) >= (msg.siblingCount ?? 1) - 1
-                                    }
-                                    onClick={() => void handleSwitchBranchByOffset(msg, 1)}
-                                    aria-label="Next branch"
-                                  >
-                                    <ArrowRight size={12} />
-                                  </button>
-                                </div>
-                              )}
-                              <div
-                                className={`${styles.messageBubble} ${
-                                  msg.direction === 'outbound'
-                                    ? styles.messageBubbleUser
-                                    : styles.messageBubbleAgent
-                                } ${msg.attachments?.some((a) => a.type === 'image') ? styles.messageBubbleImage : ''}`}
-                              >
-                                {msg.attachments?.map((att, i) =>
-                                  att.type === 'image' ? (
-                                    <ChatImage
-                                      key={i}
-                                      storagePath={att.storagePath}
-                                      alt={att.fileName}
-                                    />
-                                  ) : (
-                                    <ChatFileAttachment key={i} attachment={att} />
-                                  ),
-                                )}
-                                {msg.content &&
-                                  (msg.direction === 'inbound' ? (
-                                    <MarkdownContent>{msg.content}</MarkdownContent>
-                                  ) : (
-                                    <div className={styles.messagePlainText}>{msg.content}</div>
-                                  ))}
-                              </div>
-                              <div
-                                className={`${styles.messageMeta} ${
-                                  msg.direction === 'outbound' ? styles.messageMetaUser : ''
-                                }`}
-                              >
-                                {new Date(msg.createdAt).toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })}
-                                {isEditableChatMessage(msg) && (
-                                  <button
-                                    className={styles.editMsgBtn}
-                                    onClick={() => startEditingMessage(msg)}
-                                    aria-label="Edit message"
-                                  >
-                                    <Pencil size={12} />
-                                  </button>
-                                )}
-                                {msg.direction === 'inbound' && (
-                                  <>
-                                    {monitorRunId && (
-                                      <button
-                                        className={styles.messageMonitorBtn}
-                                        onClick={() => openMonitorRun(monitorRunId)}
-                                        aria-label="Open run in monitor"
-                                        title="Open exact run in monitor"
-                                      >
-                                        <ExternalLink size={12} />
-                                        Monitor
-                                      </button>
-                                    )}
                                     <button
-                                      className={styles.copyBtn}
-                                      onClick={() => {
-                                        navigator.clipboard.writeText(msg.content);
-                                        setCopiedId(msg.id);
-                                        setTimeout(() => setCopiedId(null), 1500);
-                                      }}
-                                      aria-label="Copy message"
+                                      className={styles.branchNavBtn}
+                                      disabled={(msg.siblingIndex ?? 0) === 0}
+                                      onClick={() =>
+                                        void handleSwitchBranchByOffset(
+                                          msg.siblingIds,
+                                          msg.siblingIndex,
+                                          -1,
+                                        )
+                                      }
+                                      aria-label="Previous branch"
                                     >
-                                      {copiedId === msg.id ? (
-                                        <Check size={12} />
-                                      ) : (
-                                        <Copy size={12} />
-                                      )}
+                                      <ArrowLeft size={12} />
                                     </button>
-                                  </>
+                                    <span className={styles.branchNavLabel}>
+                                      {(msg.siblingIndex ?? 0) + 1}/{msg.siblingCount}
+                                    </span>
+                                    <button
+                                      className={styles.branchNavBtn}
+                                      disabled={
+                                        (msg.siblingIndex ?? 0) >= (msg.siblingCount ?? 1) - 1
+                                      }
+                                      onClick={() =>
+                                        void handleSwitchBranchByOffset(
+                                          msg.siblingIds,
+                                          msg.siblingIndex,
+                                          1,
+                                        )
+                                      }
+                                      aria-label="Next branch"
+                                    >
+                                      <ArrowRight size={12} />
+                                    </button>
+                                  </div>
                                 )}
+                                <div
+                                  className={`${styles.messageBubble} ${
+                                    msg.direction === 'outbound'
+                                      ? styles.messageBubbleUser
+                                      : styles.messageBubbleAgent
+                                  } ${msg.attachments?.some((a) => a.type === 'image') ? styles.messageBubbleImage : ''}`}
+                                >
+                                  {msg.attachments?.map((att, i) =>
+                                    att.type === 'image' ? (
+                                      <ChatImage
+                                        key={i}
+                                        storagePath={att.storagePath}
+                                        alt={att.fileName}
+                                      />
+                                    ) : (
+                                      <ChatFileAttachment key={i} attachment={att} />
+                                    ),
+                                  )}
+                                  {msg.content &&
+                                    (msg.direction === 'inbound' ? (
+                                      <MarkdownContent>{msg.content}</MarkdownContent>
+                                    ) : (
+                                      <div className={styles.messagePlainText}>{msg.content}</div>
+                                    ))}
+                                </div>
+                                {msg.direction === 'inbound' && messageMeta?.fallbackRetry && (
+                                  <div className={styles.fallbackNotice} role="status">
+                                    <AlertTriangle size={14} aria-hidden />
+                                    <span>
+                                      Model error — switched to{' '}
+                                      <strong>{messageMeta.fallbackModel ?? 'fallback'}</strong>
+                                    </span>
+                                  </div>
+                                )}
+                                <div
+                                  className={`${styles.messageMeta} ${
+                                    msg.direction === 'outbound' ? styles.messageMetaUser : ''
+                                  }`}
+                                >
+                                  {branchExecutionLabel && (
+                                    <span
+                                      className={`${styles.messageExecutionState} ${styles.messageExecutionStateQueued}`}
+                                    >
+                                      {branchExecutionLabel}
+                                    </span>
+                                  )}
+                                  {new Date(msg.createdAt).toLocaleTimeString([], {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                  {isEditableChatMessage(msg) && (
+                                    <button
+                                      className={styles.editMsgBtn}
+                                      onClick={() => startEditingMessage(msg)}
+                                      aria-label="Edit message"
+                                      disabled={editingMessage?.isSubmitting}
+                                    >
+                                      <Pencil size={12} />
+                                    </button>
+                                  )}
+                                  {msg.direction === 'inbound' && (
+                                    <>
+                                      {monitorRunId && (
+                                        <button
+                                          className={styles.messageMonitorBtn}
+                                          onClick={() => openMonitorRun(monitorRunId)}
+                                          aria-label="Open run in monitor"
+                                          title="Open exact run in monitor"
+                                        >
+                                          <ExternalLink size={12} />
+                                          Monitor
+                                        </button>
+                                      )}
+                                      <button
+                                        className={styles.copyBtn}
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(msg.content);
+                                          setCopiedId(msg.id);
+                                          setTimeout(() => setCopiedId(null), 1500);
+                                        }}
+                                        aria-label="Copy message"
+                                      >
+                                        {copiedId === msg.id ? (
+                                          <Check size={12} />
+                                        ) : (
+                                          <Copy size={12} />
+                                        )}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
+                            {/* Inline errors targeting this specific message */}
+                            {errorsByMessageId.get(msg.id)?.map((item) => (
+                              <div
+                                key={item.id}
+                                className={`${styles.messageRow} ${styles.messageRowAgent}`}
+                              >
+                                <div className={styles.messageContent}>
+                                  <div
+                                    className={`${styles.errorNotice} ${item.status === 'cancelled' ? styles.stoppedNotice : ''}`}
+                                  >
+                                    <div className={styles.errorNoticeIcon}>
+                                      {item.status === 'cancelled' ? (
+                                        <OctagonX size={14} />
+                                      ) : (
+                                        <AlertTriangle size={14} />
+                                      )}
+                                    </div>
+                                    <div className={styles.errorNoticeBody}>
+                                      <div className={styles.errorNoticeTitle}>
+                                        {item.status === 'cancelled' ? 'Run stopped' : 'Run failed'}
+                                      </div>
+                                      {item.status !== 'cancelled' && item.errorMessage && (
+                                        <div className={styles.errorNoticeDetail}>
+                                          {item.errorMessage}
+                                        </div>
+                                      )}
+                                      {item.status !== 'cancelled' && item.prompt && (
+                                        <div className={styles.errorNoticePrompt}>
+                                          {item.prompt.length > 100
+                                            ? item.prompt.slice(0, 100) + '…'
+                                            : item.prompt}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className={styles.errorNoticeActions}>
+                                      {item.status !== 'cancelled' && (
+                                        <button
+                                          className={styles.errorRetryBtn}
+                                          onClick={() => void handleRetryQueueItem(item.id)}
+                                        >
+                                          <RotateCcw size={12} />
+                                          Retry
+                                        </button>
+                                      )}
+                                      <button
+                                        className={styles.errorDismissBtn}
+                                        onClick={() => void handleDismissQueueItem(item.id)}
+                                        aria-label="Dismiss"
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </Fragment>
                         );
                       })}
 
@@ -4340,19 +5184,78 @@ export function AgentsPage() {
                                   Monitor
                                 </button>
                               )}
-                              <button
-                                className={styles.stopRunBtn}
-                                onClick={stopActiveRun}
-                                disabled={stoppingRun}
-                                title="Stop run"
-                              >
-                                <Square size={12} />
-                                Stop
-                              </button>
+                              {activeConversationRun && (
+                                <button
+                                  className={styles.stopRunBtn}
+                                  onClick={stopActiveRun}
+                                  disabled={stoppingRun}
+                                  title="Stop the current run"
+                                >
+                                  <Square size={12} />
+                                  Stop
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
                       )}
+
+                      {/* Orphan error items — no target message (append_prompt failures) */}
+                      {orphanErrorItems.map((item) => (
+                        <div
+                          key={item.id}
+                          className={`${styles.messageRow} ${styles.messageRowAgent}`}
+                        >
+                          <div className={styles.messageContent}>
+                            <div
+                              className={`${styles.errorNotice} ${item.status === 'cancelled' ? styles.stoppedNotice : ''}`}
+                            >
+                              <div className={styles.errorNoticeIcon}>
+                                {item.status === 'cancelled' ? (
+                                  <OctagonX size={14} />
+                                ) : (
+                                  <AlertTriangle size={14} />
+                                )}
+                              </div>
+                              <div className={styles.errorNoticeBody}>
+                                <div className={styles.errorNoticeTitle}>
+                                  {item.status === 'cancelled' ? 'Run stopped' : 'Run failed'}
+                                </div>
+                                {item.status !== 'cancelled' && item.errorMessage && (
+                                  <div className={styles.errorNoticeDetail}>
+                                    {item.errorMessage}
+                                  </div>
+                                )}
+                                {item.status !== 'cancelled' && item.prompt && (
+                                  <div className={styles.errorNoticePrompt}>
+                                    {item.prompt.length > 100
+                                      ? item.prompt.slice(0, 100) + '…'
+                                      : item.prompt}
+                                  </div>
+                                )}
+                              </div>
+                              <div className={styles.errorNoticeActions}>
+                                {item.status !== 'cancelled' && (
+                                  <button
+                                    className={styles.errorRetryBtn}
+                                    onClick={() => void handleRetryQueueItem(item.id)}
+                                  >
+                                    <RotateCcw size={12} />
+                                    Retry
+                                  </button>
+                                )}
+                                <button
+                                  className={styles.errorDismissBtn}
+                                  onClick={() => void handleDismissQueueItem(item.id)}
+                                  aria-label="Dismiss"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
 
@@ -4462,13 +5365,11 @@ export function AgentsPage() {
                   <ReplyComposer
                     streaming={streaming}
                     editingMessage={
-                      editingMessageId
+                      editingMessage
                         ? {
-                            id: editingMessageId,
-                            initialValue: editingMessageInitialContent,
-                            value: editingMessageContent,
-                            existingImages: editingMessageImages,
-                            onChange: setEditingMessageContent,
+                            ...editingMessage,
+                            onChange: (value: string) =>
+                              setEditingMessage((prev) => (prev ? { ...prev, value } : prev)),
                             onCancel: cancelEditingMessage,
                             onSubmit: submitEditedMessage,
                           }
@@ -4775,8 +5676,8 @@ export function AgentsPage() {
                           setForm((f) => ({
                             ...f,
                             model: model.id,
-                            modelId: '',
-                            thinkingLevel: model.id === 'qwen' ? '' : f.thinkingLevel,
+                            modelId: getAgentModelDefaultId(model.id),
+                            thinkingLevel: supportsThinkingLevel(model.id) ? f.thinkingLevel : '',
                           }))
                         }
                       >
@@ -4786,6 +5687,9 @@ export function AgentsPage() {
                       </div>
                     ))}
                   </div>
+                  {formErrors.model && (
+                    <div className={styles.directoryPickerError}>{formErrors.model}</div>
+                  )}
                 </div>
 
                 <div className={styles.modelOptionsRow}>
@@ -4799,17 +5703,15 @@ export function AgentsPage() {
                       onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
                     >
                       <option value="">Default</option>
-                      {MODELS.find((m) => m.id === form.model)?.modelIds.map((mid) => (
+                      {getAgentModelOptions(form.model, form.modelId).map((mid) => (
                         <option key={mid} value={mid}>
                           {mid}
                         </option>
                       ))}
                     </select>
-                    <div className={styles.fieldHint}>
-                      Override the default model used by the CLI
-                    </div>
+                    <div className={styles.fieldHint}>{getModelVariantHint(form.model)}</div>
                   </div>
-                  {(form.model === 'claude' || form.model === 'codex') && (
+                  {supportsThinkingLevel(form.model) && (
                     <div className={styles.modelOptionField}>
                       <div className={styles.fieldLabel}>
                         {form.model === 'claude' ? 'Thinking Level' : 'Reasoning Effort'}{' '}
@@ -4984,7 +5886,7 @@ export function AgentsPage() {
                 <Button type="button" variant="secondary" size="md" onClick={closeCreate}>
                   Cancel
                 </Button>
-                <Button type="submit" size="md" disabled={creating}>
+                <Button type="submit" size="md" disabled={creating || cliMissing}>
                   {creating ? 'Creating...' : 'Create Agent'}
                 </Button>
               </div>
@@ -5122,7 +6024,15 @@ export function AgentsPage() {
                         }
                       >
                         {MODELS.map((m) => (
-                          <option key={m.id} value={m.id}>
+                          <option
+                            key={m.id}
+                            value={m.id}
+                            disabled={Boolean(
+                              getCliInfoForModel(cliStatus, m.id) &&
+                              !getCliInfoForModel(cliStatus, m.id)?.installed &&
+                              settingsAgent.model !== m.id,
+                            )}
+                          >
                             {m.name}
                           </option>
                         ))}
@@ -5140,15 +6050,17 @@ export function AgentsPage() {
                         }
                       >
                         <option value="">Default</option>
-                        {MODELS.find((m) => m.id === settingsAgent.model)?.modelIds.map((mid) => (
-                          <option key={mid} value={mid}>
-                            {mid}
-                          </option>
-                        ))}
+                        {getAgentModelOptions(settingsAgent.model, settingsAgent.modelId).map(
+                          (mid) => (
+                            <option key={mid} value={mid}>
+                              {mid}
+                            </option>
+                          ),
+                        )}
                       </select>
                     </div>
                   </div>
-                  {(settingsAgent.model === 'claude' || settingsAgent.model === 'codex') && (
+                  {supportsThinkingLevel(settingsAgent.model) && (
                     <div className={styles.settingsGridItem}>
                       <div className={styles.settingsGridLabel}>
                         {settingsAgent.model === 'claude' ? 'Thinking Level' : 'Reasoning Effort'}
@@ -5232,6 +6144,211 @@ export function AgentsPage() {
                 </div>
               </div>
 
+              <div className={styles.settingsSection}>
+                <div
+                  className={[
+                    styles.envVarSectionHeader,
+                    isEnvVarEmptyState ? styles.envVarSectionHeaderEmpty : '',
+                  ].join(' ')}
+                >
+                  <div className={styles.envVarSectionIntro}>
+                    <div className={styles.settingsSectionTitle}>Environment Variables</div>
+                    <span
+                      className={[
+                        styles.envVarSectionBadge,
+                        isEnvVarEmptyState ? styles.envVarSectionBadgeMuted : '',
+                      ].join(' ')}
+                    >
+                      {visibleAgentEnvVars.length > 0
+                        ? `${visibleAgentEnvVars.length} configured`
+                        : agentEnvVarFormOpen
+                          ? 'New variable'
+                          : 'Empty'}
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={handleOpenAgentEnvVarCreate}
+                    disabled={agentEnvVarFormOpen && !agentEnvVarForm.id}
+                  >
+                    <Plus size={13} />
+                    Add
+                  </Button>
+                </div>
+
+                {agentEnvVarFormOpen && (
+                  <div className={styles.envVarComposer}>
+                    <div className={styles.envVarComposerGrid}>
+                      <div>
+                        <div className={styles.fieldLabel}>Name</div>
+                        <Input
+                          value={agentEnvVarForm.key}
+                          onChange={(e) => {
+                            setAgentEnvVarForm((current) => ({
+                              ...current,
+                              key: e.target.value.toUpperCase(),
+                            }));
+                            setAgentEnvVarFormErrors((current) => {
+                              const next = { ...current };
+                              delete next.key;
+                              return next;
+                            });
+                          }}
+                          placeholder="API_KEY"
+                          disabled={Boolean(agentEnvVarForm.id)}
+                        />
+                        {agentEnvVarFormErrors.key && (
+                          <div className={styles.envVarFieldError}>{agentEnvVarFormErrors.key}</div>
+                        )}
+                      </div>
+
+                      <div>
+                        <div className={styles.fieldLabel}>
+                          {agentEnvVarForm.id ? 'New value' : 'Value'}
+                        </div>
+                        <Input
+                          type="password"
+                          value={agentEnvVarForm.value}
+                          onChange={(e) => {
+                            setAgentEnvVarForm((current) => ({
+                              ...current,
+                              value: e.target.value,
+                            }));
+                            setAgentEnvVarFormErrors((current) => {
+                              const next = { ...current };
+                              delete next.value;
+                              return next;
+                            });
+                          }}
+                          placeholder={
+                            agentEnvVarForm.id ? 'Leave empty to keep current' : 'Secret value'
+                          }
+                        />
+                        {agentEnvVarFormErrors.value && (
+                          <div className={styles.envVarFieldError}>
+                            {agentEnvVarFormErrors.value}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className={styles.fieldLabel}>Description</div>
+                      <Input
+                        value={agentEnvVarForm.description}
+                        onChange={(e) =>
+                          setAgentEnvVarForm((current) => ({
+                            ...current,
+                            description: e.target.value,
+                          }))
+                        }
+                        placeholder="Helps the agent know when to use this variable"
+                      />
+                    </div>
+
+                    <div className={styles.envVarComposerActions}>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleCloseAgentEnvVarForm}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={handleSubmitAgentEnvVar}
+                        disabled={agentEnvVarSaving}
+                      >
+                        {agentEnvVarSaving
+                          ? 'Saving...'
+                          : agentEnvVarForm.id
+                            ? 'Save changes'
+                            : 'Add variable'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {agentEnvVarsLoading ? (
+                  <div className={styles.settingsEmpty}>Loading...</div>
+                ) : visibleAgentEnvVars.length > 0 ? (
+                  <div className={styles.envVarList}>
+                    {visibleAgentEnvVars.map((envVar) => (
+                      <div
+                        key={envVar.id}
+                        className={[
+                          styles.envVarRow,
+                          !envVar.isActive ? styles.envVarRowInactive : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                      >
+                        <div className={styles.envVarRowInfo}>
+                          <div className={styles.envVarRowHeader}>
+                            <code className={styles.envVarKey}>{envVar.key}</code>
+                            <code className={styles.envVarPreview}>{envVar.valuePreview}</code>
+                          </div>
+                          {envVar.description && (
+                            <div className={styles.envVarDesc}>{envVar.description}</div>
+                          )}
+                          {envVar.lastUsedAt && (
+                            <div className={styles.envVarMeta}>
+                              <Clock size={10} />
+                              Used {envVarTimeAgo(envVar.lastUsedAt)}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className={styles.envVarRowControls}>
+                          <Tooltip label={envVar.isActive ? 'Disable' : 'Enable'}>
+                            <label className={styles.toggleSwitch}>
+                              <input
+                                type="checkbox"
+                                checked={envVar.isActive}
+                                aria-label={
+                                  envVar.isActive ? 'Disable variable' : 'Enable variable'
+                                }
+                                onChange={() => handleToggleAgentEnvVar(envVar)}
+                              />
+                              <span className={styles.toggleTrack} />
+                              <span className={styles.toggleKnob} />
+                            </label>
+                          </Tooltip>
+
+                          <div className={styles.envVarActions}>
+                            <Tooltip label="Edit">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                aria-label="Edit variable"
+                                onClick={() => handleEditAgentEnvVar(envVar)}
+                              >
+                                <Pencil size={13} />
+                              </Button>
+                            </Tooltip>
+                            <Tooltip label="Delete">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                aria-label="Delete variable"
+                                className={styles.envVarDeleteAction}
+                                onClick={() => handleDeleteAgentEnvVar(envVar)}
+                              >
+                                <Trash2 size={13} />
+                              </Button>
+                            </Tooltip>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
               {/* Cron Jobs section */}
               <div className={styles.settingsSection}>
                 <div className={styles.settingsSectionTitle}>Cron Jobs</div>
@@ -5258,6 +6375,7 @@ export function AgentsPage() {
                             <code className={styles.settingsCode}>{job.cron}</code>
                             <span className={styles.cronJobDesc}>{describeCron(job.cron)}</span>
                           </div>
+                          <div className={styles.cronJobNextRun}>{describeCronNextRun(job)}</div>
                           <div className={styles.cronJobPrompt}>
                             {job.prompt.length > 80 ? job.prompt.slice(0, 80) + '...' : job.prompt}
                           </div>
@@ -5596,9 +6714,7 @@ export function AgentsPage() {
                             <Blocks size={16} />
                           </div>
                           <div className={styles.skillsMgrTopMeta}>
-                            <span className={styles.skillsMgrTopName}>
-                              {mgrActiveSkill.name}
-                            </span>
+                            <span className={styles.skillsMgrTopName}>{mgrActiveSkill.name}</span>
                             {mgrActiveSkill.description && (
                               <span className={styles.skillsMgrTopDesc}>
                                 {mgrActiveSkill.description}

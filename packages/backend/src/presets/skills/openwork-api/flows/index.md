@@ -37,3 +37,15 @@ Practical examples for consumers that need quick implementation guidance.
 3. Verify deliveries: `GET /api/webhooks/:id/deliveries`.
 4. Retry failed one: `POST /api/webhook-deliveries/:id/retry`.
 
+## 5) previous agent run investigation
+
+1. List candidate runs with `GET /api/agent-runs`, filtering by `agentId`,
+   `conversationId`, `status`, or `triggerType` if you know them.
+2. Open the specific run via `GET /api/agent-runs/:id` to retrieve metadata,
+   `stdout`, and `stderr`.
+3. If the question is about the conversation thread rather than the process
+   output, also use the agent chat endpoints for that agent and conversation.
+4. If platform behavior is unclear, verify persistence details in
+   `packages/backend/src/routes/agent-runs.ts`,
+   `packages/backend/src/services/agent-runs.ts`, and
+   `packages/backend/src/services/agent-chat.ts`.

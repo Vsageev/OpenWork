@@ -877,9 +877,11 @@ export function DashboardPage() {
             <div className={styles.card}>
               <div className={styles.cardHeader}>
                 <h2 className={styles.cardTitle}>Agent Activity</h2>
-                <Link to="/monitor" className={styles.viewAllLink}>
-                  View all <ArrowRight size={14} />
-                </Link>
+                <div className={styles.agentActivityLinks}>
+                  <Link to="/monitor" className={styles.viewAllLink}>
+                    View all <ArrowRight size={14} />
+                  </Link>
+                </div>
               </div>
               {recentRuns.length === 0 ? (
                 <div className={styles.emptyState}>
@@ -901,7 +903,7 @@ export function DashboardPage() {
                     return (
                       <Link
                         key={run.id}
-                        to="/monitor"
+                        to={`/monitor?${new URLSearchParams({ runId: run.id }).toString()}`}
                         className={styles.taskItem}
                       >
                         <div className={styles.runStatusIcon}>

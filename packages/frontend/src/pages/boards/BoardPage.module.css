@@ -320,6 +320,9 @@
   box-shadow: var(--shadow-lg, 0 4px 12px rgba(0, 0, 0, 0.12));
   z-index: 50;
   padding: var(--space-1) 0;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .boardActionsMenuItem {
@@ -532,6 +535,9 @@
   box-shadow: var(--shadow-lg, 0 4px 12px rgba(0, 0, 0, 0.12));
   z-index: 50;
   padding: var(--space-1) 0;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .automationMenuTitle {
@@ -619,6 +625,9 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .wipPopoverLabel {
@@ -1617,6 +1626,9 @@
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 6px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .colorSwatch {

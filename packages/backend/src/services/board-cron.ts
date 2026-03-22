@@ -3,7 +3,7 @@ import { store } from '../db/index.js';
 import { createCard, addCardTag } from './cards.js';
 import { addCardToBoard, getBoardById } from './boards.js';
 
-interface BoardCronTemplate {
+export interface BoardCronTemplate {
   id: string;
   boardId: string;
   columnId: string;
@@ -18,6 +18,10 @@ interface BoardCronTemplate {
   updatedAt: string;
 }
 
+export interface BoardCronTemplateWithNextRun extends BoardCronTemplate {
+  nextRunAt: string | null;
+}
+
 interface RunningBoardCronTask {
   task: cron.ScheduledTask;
   signature: string;
@@ -28,6 +32,39 @@ const runningTasks = new Map<string, RunningBoardCronTask>();
 
 function templateSignature(t: any): string {
   return JSON.stringify({ cron: t.cron, columnId: t.columnId, name: t.name, description: t.description, assigneeId: t.assigneeId, tagIds: t.tagIds });
+}
+
+function getTaskNextRunAt(task: cron.ScheduledTask): string | null {
+  const nextRun = task.getNextRun();
+  return nextRun ? nextRun.toISOString() : null;
+}
+
+function getBoardCronTemplateNextRunAt(template: BoardCronTemplate): string | null {
+  if (!template.enabled) return null;
+  if (!cron.validate(template.cron)) return null;
+
+  const running = runningTasks.get(template.id);
+  if (!running) return null;
+  if (running.signature !== templateSignature(template)) return null;
+
+  return getTaskNextRunAt(running.task);
+}
+
+export function withBoardCronTemplateNextRun(
+  template: BoardCronTemplate,
+): BoardCronTemplateWithNextRun {
+  return {
+    ...template,
+    nextRunAt: getBoardCronTemplateNextRunAt(template),
+  };
+}
+
+export function listBoardCronTemplatesWithNextRun(
+  boardId: string,
+): BoardCronTemplateWithNextRun[] {
+  return listBoardCronTemplates(boardId).map((template) =>
+    withBoardCronTemplateNextRun(template as BoardCronTemplate),
+  );
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────

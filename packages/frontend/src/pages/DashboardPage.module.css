@@ -826,6 +826,13 @@
   margin-bottom: var(--space-4);
 }
 
+.agentActivityLinks {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-shrink: 0;
+}
+
 .cardTitle {
   font-size: 15px;
   font-weight: 600;

@@ -1,47 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Save, ShieldAlert, Cpu } from 'lucide-react';
 import { api } from '../../lib/api';
+import {
+  AGENT_MODEL_PROVIDERS as MODELS,
+  getAgentModelDefaultId,
+  getAgentModelOptions,
+} from '../../lib/agent-models';
 import styles from './FallbackModelTab.module.css';
-
-const MODELS = [
-  {
-    id: 'claude',
-    name: 'Claude',
-    vendor: 'Anthropic',
-    description: 'Strong reasoning, safety-focused.',
-    modelIds: [
-      'claude-sonnet-4-6',
-      'claude-opus-4-6',
-      'claude-haiku-4-5-20251001',
-    ],
-  },
-  {
-    id: 'codex',
-    name: 'Codex',
-    vendor: 'OpenAI',
-    description: 'Code-first agent model.',
-    modelIds: [
-      'gpt-5.4',
-      'gpt-5.3-codex',
-      'gpt-5.3-codex-spark',
-      'gpt-5.2-codex',
-      'gpt-5.2',
-      'gpt-5.1-codex-max',
-      'gpt-5.1',
-      'gpt-5.1-codex',
-      'gpt-5-codex',
-      'gpt-5-codex-mini',
-      'gpt-5',
-    ],
-  },
-  {
-    id: 'qwen',
-    name: 'Qwen',
-    vendor: 'Alibaba',
-    description: 'Open-weight model.',
-    modelIds: ['qwen3.5-plus', 'qwen3-coder-plus', 'qwen3-max-2026-01-23'],
-  },
-] as const;
 
 type ModelId = (typeof MODELS)[number]['id'];
 
@@ -84,6 +49,16 @@ export function FallbackModelTab() {
   );
 
   const hasFallback = settings?.fallbackModel != null;
+
+  function getVariantHint(): string {
+    if (selectedModel === 'cursor') {
+      return 'Curated from the installed Cursor CLI model list on this server';
+    }
+    if (selectedModel === 'opencode') {
+      return 'Uses provider/model IDs. Run opencode models on the server for the full list';
+    }
+    return 'Specific model version to use as fallback';
+  }
 
   async function handleSave() {
     if (!activeModelDef) return;
@@ -176,7 +151,7 @@ export function FallbackModelTab() {
                 .join(' ')}
               onClick={() => {
                 setSelectedModel(model.id);
-                setSelectedModelId(model.modelIds[0]);
+                setSelectedModelId(getAgentModelDefaultId(model.id));
               }}
             >
               <div className={styles.modelName}>{model.name}</div>
@@ -193,7 +168,7 @@ export function FallbackModelTab() {
               Model variant
             </label>
             <p className={styles.fieldHint}>
-              Specific model version to use as fallback
+              {getVariantHint()}
             </p>
             <select
               id="fb-model-id"
@@ -202,7 +177,7 @@ export function FallbackModelTab() {
               onChange={(e) => setSelectedModelId(e.target.value)}
             >
               <option value="">Default</option>
-              {activeModelDef.modelIds.map((mid) => (
+              {getAgentModelOptions(selectedModel, selectedModelId).map((mid) => (
                 <option key={mid} value={mid}>
                   {mid}
                 </option>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, X } from 'lucide-react';
 import { Button, MarkdownContent, Tooltip } from '../ui';
 import { isMarkdownFile, isImagePreviewable } from '../lib/file-utils';
@@ -29,6 +29,7 @@ export function FilePreviewModal({
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const overlayPressStartedRef = useRef(false);
 
   const isMarkdown = isMarkdownFile(fileName);
   const fileExt = useMemo(() => {
@@ -150,8 +151,23 @@ export function FilePreviewModal({
     setIsEditing(true);
   }
 
+  function handleOverlayPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    overlayPressStartedRef.current = e.target === e.currentTarget;
+  }
+
+  function handleOverlayClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (e.target === e.currentTarget && overlayPressStartedRef.current) {
+      onClose();
+    }
+    overlayPressStartedRef.current = false;
+  }
+
   return (
-    <div className={styles.previewOverlay} onClick={onClose}>
+    <div
+      className={styles.previewOverlay}
+      onClick={handleOverlayClick}
+      onPointerDown={handleOverlayPointerDown}
+    >
       <div className={styles.previewPanel} onClick={(e) => e.stopPropagation()}>
         <div className={styles.previewHeader}>
           <span className={styles.previewTitle}>{fileName}</span>

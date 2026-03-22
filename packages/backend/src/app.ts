@@ -40,6 +40,7 @@ import { storageRoutes } from './routes/storage.js';
 import { userRoutes } from './routes/users.js';
 import { workspaceRoutes } from './routes/workspaces.js';
 import { agentRoutes } from './routes/agents.js';
+import { agentEnvVarRoutes } from './routes/agent-env-vars.js';
 import { skillRoutes } from './routes/skills.js';
 import { agentChatRoutes } from './routes/agent-chat.js';
 import { agentRunRoutes } from './routes/agent-runs.js';
@@ -82,6 +83,12 @@ export async function buildApp() {
           'headers.authorization',
           'headers.cookie',
           'headers["x-api-key"]',
+          'req.body.value',
+          'body.value',
+          'req.body.fields[*].value',
+          'body.fields[*].value',
+          'req.body.secret',
+          'body.secret',
         ],
         censor: '[REDACTED]',
       },
@@ -134,11 +141,11 @@ export async function buildApp() {
   await app.register(userRoutes);
   await app.register(workspaceRoutes);
   await app.register(agentRoutes);
+  await app.register(agentEnvVarRoutes);
   await app.register(skillRoutes);
   await app.register(agentChatRoutes);
   await app.register(agentRunRoutes);
   await app.register(settingsRoutes);
-
   // Serve frontend static files in production
   const staticDir = process.env.STATIC_DIR;
   if (staticDir && fs.existsSync(staticDir)) {

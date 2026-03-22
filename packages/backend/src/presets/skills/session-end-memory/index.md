@@ -13,7 +13,8 @@ and decide whether any durable memory should be written back.
 
 ## When to write memory
 
-- Write memory only when the information is likely to matter again.
+- User provided feedback/correction on you work.
+- The insight/flow is likely to matter again.
 - Prefer updating an existing local notes or memory file instead of creating
   many new files.
 - Keep memory concise and factual: stable paths, conventions, decisions,
@@ -23,10 +24,8 @@ and decide whether any durable memory should be written back.
 
 ## File choice
 
-- Prefer an existing file such as `MEMORIES.md`, `memory.md`, `notes.md`, or a
-  project-specific notes file.
-- Create a new memory file only when the information is durable enough to
-  justify another long-lived file.
+- Prefer editring an existing file when it makes sense.
+- Make sure the information is easily searchable in future sessions by choosing file naming/placement and wodr choice/search tags.
 
 ## Reporting
 

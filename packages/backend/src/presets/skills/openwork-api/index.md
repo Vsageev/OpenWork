@@ -1,8 +1,22 @@
-# OpenWork API
+---
+name: OpenWork Host Platform API
+description: Use this skill only for tasks that interact with the OpenWork platform that hosts, invokes, or manages the agent.
+---
 
-Use this documentation as the first entry point for backend API integration.
-Everything below is intentionally modular: read this page, then the linked area
-pages for endpoint-level guidance.
+# OpenWork Host Platform API
+
+Use this skill only when the task involves the OpenWork platform that hosts,
+invokes, or manages the agent.
+
+- This skill describes the host platform API and operational model.
+- It does not mean the current repository is an OpenWork codebase.
+- The project under edit is still the current workspace unless the user points
+  you somewhere else.
+
+When the task does involve OpenWork integration, use this page as the first
+entry point for backend API guidance. Everything below is intentionally
+modular: read this page, then the linked area pages for endpoint-level
+guidance.
 
 ## Entry Points
 
@@ -57,6 +71,15 @@ When authenticated via API key, requests are permission-scoped with
 - **Conversation handling**: `POST /api/conversations` →
   `POST /api/messages` (or send draft via `/api/message-drafts`).
 - **AI run in bulk**: manage board/collection → run agent endpoint → monitor run.
+- **Platform verification**: when you change OpenWork-managed resources such as
+  skills, settings, agent attachments, or runs, verify through the live HTTP
+  API the user relies on. Prefer `login` → target `GET`/mutation → target `GET`
+  again, and treat repo files or direct service calls as supporting evidence,
+  not proof of live behavior.
+- **Previous run forensics**: when the question is about what an earlier agent run
+  saw or did, start with `areas/agents.md` and inspect `/api/agent-runs`,
+  `/api/agent-runs/:id`, and `packages/backend/src/services/agent-runs.ts`
+  before concluding the logs are unavailable.
 - **Event integrations**: create webhook → inspect event logs/deliveries.
 
 For step-by-step examples: [flows/index.md](./flows/index.md).

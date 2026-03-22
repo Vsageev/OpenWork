@@ -6,7 +6,6 @@ import {
   Kanban,
   MessageSquare,
   Cpu,
-  Activity,
   Cable,
   HardDrive,
   Settings,
@@ -22,6 +21,7 @@ import {
   PanelLeftOpen,
   FileText,
   Bell,
+  Activity,
 } from 'lucide-react';
 import { useAuth } from '../stores/useAuth';
 import { useWorkspace, type Workspace } from '../stores/WorkspaceContext';

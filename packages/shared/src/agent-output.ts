@@ -107,6 +107,206 @@ function looksLikeStreamJsonEvent(event: JsonRecord): boolean {
   ].includes(event.type);
 }
 
+function getOpenCodePart(event: JsonRecord): JsonRecord | null {
+  return asRecord(event.part);
+}
+
+function looksLikeOpenCodeEvent(event: JsonRecord): boolean {
+  if (typeof event.type !== 'string') return false;
+
+  if (
+    [
+      'step_start',
+      'step_finish',
+      'text',
+      'reasoning',
+      'tool_use',
+      'tool_call',
+      'tool_result',
+    ].includes(event.type)
+  ) {
+    return true;
+  }
+
+  const part = getOpenCodePart(event);
+  const partType = typeof part?.type === 'string' ? part.type : '';
+  return [
+    'step-start',
+    'step-finish',
+    'text',
+    'reasoning',
+    'tool',
+    'tool-call',
+    'tool-result',
+  ].includes(partType);
+}
+
+function getOpenCodeMessageId(event: JsonRecord): string | null {
+  const part = getOpenCodePart(event);
+  return typeof part?.messageID === 'string' ? part.messageID : null;
+}
+
+function extractFromOpenCodeTextEvent(event: JsonRecord): string | null {
+  if (event.type !== 'text') return null;
+
+  const part = getOpenCodePart(event);
+  if (!part || typeof part.text !== 'string') return null;
+
+  const text = part.text.trim();
+  return text || null;
+}
+
+function extractFromOpenCodeReasoningEvent(event: JsonRecord): string | null {
+  if (event.type !== 'reasoning') return null;
+
+  const part = getOpenCodePart(event);
+  if (!part) return null;
+
+  const directText =
+    typeof part.text === 'string'
+      ? part.text
+      : typeof part.reasoning === 'string'
+        ? part.reasoning
+        : typeof part.content === 'string'
+          ? part.content
+          : null;
+  if (!directText) return null;
+
+  const text = directText.trim();
+  return text || null;
+}
+
+function isTopLevelThinkingEvent(event: JsonRecord): boolean {
+  return event.type === 'thinking';
+}
+
+function extractTopLevelThinkingDelta(event: JsonRecord): string | null {
+  if (!isTopLevelThinkingEvent(event) || event.subtype !== 'delta') return null;
+  if (typeof event.text !== 'string') return null;
+  return event.text;
+}
+
+function getOpenCodeToolEventParts(event: JsonRecord): {
+  toolName: string;
+  toolId?: string;
+  input?: string;
+  output?: string;
+} | null {
+  if (!['tool_use', 'tool_call', 'tool_result'].includes(String(event.type))) return null;
+
+  const part = getOpenCodePart(event);
+  if (!part) return null;
+
+  const state = asRecord(part.state);
+  const toolName =
+    typeof part.tool === 'string'
+      ? part.tool
+      : typeof part.toolName === 'string'
+        ? part.toolName
+        : null;
+  if (!toolName) return null;
+
+  const result: {
+    toolName: string;
+    toolId?: string;
+    input?: string;
+    output?: string;
+  } = { toolName };
+
+  const toolId =
+    typeof part.callID === 'string'
+      ? part.callID
+      : typeof part.toolCallId === 'string'
+        ? part.toolCallId
+        : typeof part.id === 'string'
+          ? part.id
+          : null;
+  if (toolId) result.toolId = toolId;
+
+  const input = formatCompactJson(state?.input ?? part.input);
+  if (input) result.input = input;
+
+  const output = formatScalar(state?.output ?? part.output);
+  if (output) result.output = output;
+
+  return result;
+}
+
+function formatOpenCodeUsage(tokens: unknown): string | null {
+  const rec = asRecord(tokens);
+  if (!rec) return null;
+
+  const parts: string[] = [];
+  appendLabeledValue(parts, 'Input', rec.input);
+  appendLabeledValue(parts, 'Output', rec.output);
+  appendLabeledValue(parts, 'Reasoning', rec.reasoning);
+
+  const cache = asRecord(rec.cache);
+  if (cache) {
+    appendLabeledValue(parts, 'Cache read', cache.read);
+    appendLabeledValue(parts, 'Cache write', cache.write);
+  }
+
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+function parseOpenCodeUsage(tokens: unknown): ResultBlock['usage'] | undefined {
+  const rec = asRecord(tokens);
+  if (!rec) return undefined;
+
+  const usage: ResultBlock['usage'] = {};
+  if (typeof rec.input === 'number') usage.inputTokens = rec.input;
+  if (typeof rec.output === 'number') usage.outputTokens = rec.output;
+
+  const cache = asRecord(rec.cache);
+  if (cache && typeof cache.read === 'number') usage.cacheRead = cache.read;
+
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+function buildOpenCodeStepMeta(
+  event: JsonRecord,
+  label: 'Step started' | 'Step completed',
+): MessageMetaBlock | null {
+  const part = getOpenCodePart(event);
+  if (!part) return null;
+
+  const details: Record<string, string> = {};
+  if (typeof part.messageID === 'string') details['Message'] = part.messageID;
+  if (typeof event.sessionID === 'string') details['Session'] = event.sessionID;
+  if (typeof part.reason === 'string') details['Stop reason'] = part.reason;
+  if (typeof part.cost === 'number') details['Cost'] = String(part.cost);
+
+  const usage = formatOpenCodeUsage(part.tokens);
+  if (usage) details['Usage'] = usage;
+
+  return Object.keys(details).length > 0 ? { type: 'message_meta', label, details } : null;
+}
+
+function extractOpenCodeFinalText(events: JsonRecord[]): string | null {
+  let targetMessageId: string | null = null;
+  const parts: string[] = [];
+
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const text = extractFromOpenCodeTextEvent(events[i]);
+    if (!text) continue;
+
+    const messageId = getOpenCodeMessageId(events[i]);
+    if (!targetMessageId) {
+      targetMessageId = messageId;
+    }
+
+    if (targetMessageId && messageId && messageId !== targetMessageId) {
+      continue;
+    }
+
+    parts.unshift(text);
+  }
+
+  const deduped = dedupeAdjacentParts(parts);
+  return deduped.length > 0 ? deduped.join('\n\n').trim() : null;
+}
+
 function extractFromResultEvent(event: JsonRecord): string | null {
   if (event.type !== 'result') return null;
 
@@ -243,7 +443,7 @@ function parseStructuredEvents(output: string): JsonRecord[] | null {
   if (!rawEvents || rawEvents.length === 0) return null;
 
   const parsedEvents: JsonRecord[] = [];
-  let streamEventCount = 0;
+  let structuredEventCount = 0;
 
   for (const rawEvent of rawEvents) {
     try {
@@ -251,15 +451,15 @@ function parseStructuredEvents(output: string): JsonRecord[] | null {
       const event = asRecord(parsed);
       if (!event) continue;
       parsedEvents.push(event);
-      if (looksLikeStreamJsonEvent(event)) {
-        streamEventCount += 1;
+      if (looksLikeStreamJsonEvent(event) || looksLikeOpenCodeEvent(event)) {
+        structuredEventCount += 1;
       }
     } catch {
       return null;
     }
   }
 
-  return streamEventCount > 0 ? parsedEvents : null;
+  return structuredEventCount > 0 ? parsedEvents : null;
 }
 
 function formatUsage(usage: unknown): string | null {
@@ -407,6 +607,40 @@ function renderRateLimitEvent(event: JsonRecord): string | null {
   return lines.length > 1 ? lines.join('\n') : null;
 }
 
+function renderOpenCodeToolEvent(event: JsonRecord): string | null {
+  const tool = getOpenCodeToolEventParts(event);
+  if (!tool) return null;
+
+  const sections: string[] = [];
+  const callLines = [`Tool call: ${tool.toolName}`];
+  appendLabeledValue(callLines, 'ID', tool.toolId);
+  if (tool.input) callLines.push(`Input:\n${tool.input}`);
+  sections.push(callLines.join('\n').trim());
+
+  if (tool.output) {
+    const resultLines = ['Tool result'];
+    appendLabeledValue(resultLines, 'ID', tool.toolId);
+    resultLines.push(tool.output);
+    sections.push(resultLines.join('\n').trim());
+  }
+
+  return sections.join('\n\n').trim();
+}
+
+function renderOpenCodeStepFinishEvent(event: JsonRecord): string | null {
+  if (event.type !== 'step_finish') return null;
+
+  const part = getOpenCodePart(event);
+  if (!part) return null;
+
+  const lines = ['Step finished'];
+  appendLabeledValue(lines, 'Reason', part.reason);
+  appendLabeledValue(lines, 'Cost', part.cost);
+  const usage = formatOpenCodeUsage(part.tokens);
+  if (usage) lines.push(`Usage: ${usage}`);
+  return lines.length > 1 ? lines.join('\n') : null;
+}
+
 function createStreamBlock(contentBlock: JsonRecord): StreamBlockState {
   const type = typeof contentBlock.type === 'string' ? contentBlock.type : 'content';
   const block: StreamBlockState = { type, raw: contentBlock };
@@ -526,6 +760,7 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
   const parts: string[] = [];
   const streamBlocks = new Map<number, StreamBlockState>();
   let currentMessageBlocks: OutputBlock[] = [];
+  let topLevelThinking = '';
 
   const flushBlock = (index: number) => {
     const block = streamBlocks.get(index);
@@ -537,7 +772,26 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
     streamBlocks.delete(index);
   };
 
+  const flushTopLevelThinking = () => {
+    const thinking = topLevelThinking.trim();
+    if (thinking) parts.push(`Thinking\n${thinking}`);
+    topLevelThinking = '';
+  };
+
   for (const event of events) {
+    const thinkingDelta = extractTopLevelThinkingDelta(event);
+    if (thinkingDelta !== null) {
+      topLevelThinking = appendStreamDelta(topLevelThinking, thinkingDelta);
+      continue;
+    }
+
+    if (isTopLevelThinkingEvent(event)) {
+      flushTopLevelThinking();
+      continue;
+    }
+
+    flushTopLevelThinking();
+
     if (event.type === 'system') {
       const rendered = renderSystemInitEvent(event);
       if (rendered) parts.push(rendered);
@@ -563,6 +817,30 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
 
     if (event.type === 'rate_limit_event') {
       const rendered = renderRateLimitEvent(event);
+      if (rendered) parts.push(rendered);
+      continue;
+    }
+
+    if (event.type === 'reasoning') {
+      const reasoning = extractFromOpenCodeReasoningEvent(event);
+      if (reasoning) parts.push(`Thinking\n${reasoning}`);
+      continue;
+    }
+
+    if (event.type === 'text') {
+      const text = extractFromOpenCodeTextEvent(event);
+      if (text) parts.push(`Assistant\n${text}`);
+      continue;
+    }
+
+    if (['tool_use', 'tool_call', 'tool_result'].includes(String(event.type))) {
+      const rendered = renderOpenCodeToolEvent(event);
+      if (rendered) parts.push(rendered);
+      continue;
+    }
+
+    if (event.type === 'step_finish') {
+      const rendered = renderOpenCodeStepFinishEvent(event);
       if (rendered) parts.push(rendered);
       continue;
     }
@@ -640,6 +918,7 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
   for (const index of remaining) {
     flushBlock(index);
   }
+  flushTopLevelThinking();
 
   return dedupeAdjacentParts(parts).join('\n\n').trim();
 }
@@ -910,16 +1189,45 @@ function parseUsageRecord(usage: unknown): ResultBlock['usage'] | undefined {
   if (!rec) return undefined;
   const u: ResultBlock['usage'] = {};
   if (typeof rec.input_tokens === 'number') u.inputTokens = rec.input_tokens;
+  else if (typeof rec.inputTokens === 'number') u.inputTokens = rec.inputTokens;
   if (typeof rec.output_tokens === 'number') u.outputTokens = rec.output_tokens;
+  else if (typeof rec.outputTokens === 'number') u.outputTokens = rec.outputTokens;
   if (typeof rec.cache_read_input_tokens === 'number') u.cacheRead = rec.cache_read_input_tokens;
+  else if (typeof rec.cacheReadTokens === 'number') u.cacheRead = rec.cacheReadTokens;
   if (typeof rec.cache_creation_input_tokens === 'number') u.cacheCreate = rec.cache_creation_input_tokens;
+  else if (typeof rec.cacheWriteTokens === 'number') u.cacheCreate = rec.cacheWriteTokens;
   return Object.keys(u).length > 0 ? u : undefined;
+}
+
+function buildOpenCodeToolBlocks(event: JsonRecord): OutputBlock[] {
+  const tool = getOpenCodeToolEventParts(event);
+  if (!tool) return [];
+
+  const blocks: OutputBlock[] = [
+    {
+      type: 'tool_call',
+      toolName: tool.toolName,
+      toolId: tool.toolId,
+      input: tool.input,
+    },
+  ];
+
+  if (tool.output) {
+    blocks.push({
+      type: 'tool_result',
+      toolId: tool.toolId,
+      content: tool.output,
+    });
+  }
+
+  return blocks;
 }
 
 function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
   const blocks: OutputBlock[] = [];
   const streamBlocks = new Map<number, StreamBlockState>();
   let currentMessageBlocks: OutputBlock[] = [];
+  let topLevelThinking = '';
 
   const flushBlock = (index: number) => {
     const sb = streamBlocks.get(index);
@@ -932,7 +1240,26 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
     streamBlocks.delete(index);
   };
 
+  const flushTopLevelThinking = () => {
+    const thinking = topLevelThinking.trim();
+    if (thinking) blocks.push({ type: 'thinking', content: thinking });
+    topLevelThinking = '';
+  };
+
   for (const event of events) {
+    const thinkingDelta = extractTopLevelThinkingDelta(event);
+    if (thinkingDelta !== null) {
+      topLevelThinking = appendStreamDelta(topLevelThinking, thinkingDelta);
+      continue;
+    }
+
+    if (isTopLevelThinkingEvent(event)) {
+      flushTopLevelThinking();
+      continue;
+    }
+
+    flushTopLevelThinking();
+
     if (event.type === 'system') {
       if (event.subtype === 'init') blocks.push(buildSystemInitBlock(event));
       continue;
@@ -971,6 +1298,48 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
       if (typeof event.message === 'string') rl.message = event.message;
       if (typeof event.retry_after === 'string') rl.retryAfter = event.retry_after;
       blocks.push(rl);
+      continue;
+    }
+
+    if (event.type === 'step_start') {
+      const meta = buildOpenCodeStepMeta(event, 'Step started');
+      if (meta) blocks.push(meta);
+      continue;
+    }
+
+    if (event.type === 'reasoning') {
+      const thinking = extractFromOpenCodeReasoningEvent(event);
+      if (thinking) blocks.push({ type: 'thinking', content: thinking });
+      continue;
+    }
+
+    if (event.type === 'text') {
+      const text = extractFromOpenCodeTextEvent(event);
+      if (text) blocks.push({ type: 'assistant_text', content: text });
+      continue;
+    }
+
+    if (['tool_use', 'tool_call', 'tool_result'].includes(String(event.type))) {
+      const toolBlocks = buildOpenCodeToolBlocks(event);
+      if (toolBlocks.length > 0) blocks.push(...toolBlocks);
+      continue;
+    }
+
+    if (event.type === 'step_finish') {
+      const part = getOpenCodePart(event);
+      const usage = parseOpenCodeUsage(part?.tokens);
+      const reason = typeof part?.reason === 'string' ? part.reason : undefined;
+
+      if (usage || reason) {
+        blocks.push({
+          type: 'result',
+          usage,
+          stopReason: reason,
+        });
+      }
+
+      const meta = buildOpenCodeStepMeta(event, 'Step completed');
+      if (meta) blocks.push(meta);
       continue;
     }
 
@@ -1042,6 +1411,7 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
 
   const remaining = [...streamBlocks.keys()].sort((a, b) => a - b);
   for (const index of remaining) flushBlock(index);
+  flushTopLevelThinking();
 
   return blocks;
 }
@@ -1063,7 +1433,7 @@ export function parseAgentOutputBlocks(output: string): OutputBlock[] | null {
 
 /**
  * Formats agent stdout for human-readable display.
- * - For stream-json logs (Claude/Qwen), renders readable structured events.
+ * - For structured logs (Claude/Qwen/OpenCode), renders readable structured events.
  * - For plain text output, returns stdout as-is (trimmed).
  */
 export function formatAgentOutputForDisplay(output: string): string {
@@ -1078,7 +1448,7 @@ export function formatAgentOutputForDisplay(output: string): string {
 
 /**
  * Returns a concise final user-facing response from agent stdout.
- * - For stream-json logs (Claude/Qwen), extracts final result/assistant text.
+ * - For structured logs (Claude/Qwen/OpenCode), extracts final result/assistant text.
  * - For plain text output, returns stdout as-is (trimmed).
  */
 export function extractFinalResponseText(stdout: string): string {
@@ -1097,6 +1467,9 @@ export function extractFinalResponseText(stdout: string): string {
     const text = extractFromAssistantEvent(parsedEvents[i]);
     if (text) return text;
   }
+
+  const openCodeText = extractOpenCodeFinalText(parsedEvents);
+  if (openCodeText) return openCodeText;
 
   return formatPartialStreamContent(parsedEvents);
 }

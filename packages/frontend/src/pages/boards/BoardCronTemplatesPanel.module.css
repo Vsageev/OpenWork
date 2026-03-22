@@ -127,6 +127,12 @@
   margin-top: 2px;
 }
 
+.templateNextRun {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
 .templateActions {
   display: flex;
   align-items: center;
