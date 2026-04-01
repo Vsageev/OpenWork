@@ -47,7 +47,9 @@ const avatarIconSchema = z.string().max(128);
 const avatarColorSchema = z.string().max(20);
 const avatarPresetNameSchema = z.string().trim().min(1).max(80);
 
-function serializePublicAgent(agent: ReturnType<typeof getAgent> extends infer T ? NonNullable<T> : never) {
+function serializePublicAgent(
+  agent: ReturnType<typeof getAgent> extends infer T ? NonNullable<T> : never,
+) {
   syncAgentCronJobs(agent.id);
   const publicAgent = asPublicAgent(agent);
 
@@ -283,9 +285,7 @@ export async function agentRoutes(app: FastifyInstance) {
           modelId: z.string().max(200).nullable().optional(),
           thinkingLevel: z.enum(['low', 'medium', 'high']).nullable().optional(),
           preset: z.string().min(1).max(100),
-          presetParameters: z
-            .record(z.string().min(1).max(100), z.string().max(2000))
-            .optional(),
+          presetParameters: z.record(z.string().min(1).max(100), z.string().max(2000)).optional(),
           apiKeyId: z.string().min(1).optional(),
           workspaceId: z.uuid().optional(),
           skipPermissions: z.boolean().optional(),
@@ -598,6 +598,13 @@ export async function agentRoutes(app: FastifyInstance) {
     '/api/agents/:id/files/content',
     {
       onRequest: [app.authenticate, requirePermission('settings:update')],
+      config: {
+        sanitization: {
+          preserve: {
+            body: ['content'],
+          },
+        },
+      },
       schema: {
         tags: ['Agents'],
         summary: 'Write text file content to agent workspace',

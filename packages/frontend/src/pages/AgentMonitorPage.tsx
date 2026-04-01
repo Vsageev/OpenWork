@@ -10,6 +10,7 @@ import { MarkdownContent } from '../ui/MarkdownContent';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { extractFinalResponseText, formatAgentOutputForDisplay, parseAgentOutputBlocks } from 'shared';
 import type { OutputBlock } from 'shared';
+import { getAgentModelDefinition } from '../lib/agent-models';
 
 type AgentRunTriggerType = 'chat' | 'cron_job' | 'card_assignment';
 
@@ -20,6 +21,8 @@ interface AgentRun {
   avatarIcon?: string | null;
   avatarBgColor?: string | null;
   avatarLogoColor?: string | null;
+  model?: string | null;
+  modelId?: string | null;
   triggerType: AgentRunTriggerType;
   status: 'running' | 'completed' | 'error';
   conversationId: string | null;
@@ -90,6 +93,14 @@ type TriggerFilter = 'all' | 'chat' | 'cron_job' | 'card_assignment';
 const HISTORY_PAGE_SIZE = 50;
 const ACTIVE_BATCH_RUNS_LIMIT = 20;
 const RECENT_BATCH_RUNS_LIMIT = 10;
+
+function formatModelLabel(model?: string | null, modelId?: string | null): string | null {
+  if (!model && !modelId) return null;
+  const provider = getAgentModelDefinition(model);
+  const providerName = provider?.name ?? model ?? '';
+  if (modelId) return `${providerName} / ${modelId}`;
+  return providerName || null;
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -640,8 +651,16 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
+  const modelLabel = formatModelLabel(detail.model, detail.modelId);
+
   return (
     <div className={styles.logPanel}>
+      {modelLabel && (
+        <div className={styles.modelInfo}>
+          <Cpu size={13} />
+          <span>{modelLabel}</span>
+        </div>
+      )}
       {promptText && (
         <div className={styles.logSection}>
           <div className={styles.logSectionHeader}>

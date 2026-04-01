@@ -175,6 +175,13 @@ export async function skillRoutes(app: FastifyInstance) {
     '/api/skills/:id/files/content',
     {
       onRequest: [app.authenticate, requirePermission('settings:update')],
+      config: {
+        sanitization: {
+          preserve: {
+            body: ['content'],
+          },
+        },
+      },
       schema: {
         tags: ['Skills'],
         summary: 'Write/update a text file in a skill folder',

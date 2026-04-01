@@ -119,7 +119,7 @@ function computeCoords(
 }
 
 export function Tooltip({ label, position = 'top', children }: TooltipProps) {
-  const wrapperRef = useRef<HTMLSpanElement>(null);
+  const wrapperRef = useRef<HTMLDivElement | HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [coords, setCoords] = useState<TooltipCoords | null>(null);
@@ -168,7 +168,7 @@ export function Tooltip({ label, position = 'top', children }: TooltipProps) {
     setCoords(null);
   };
 
-  const handleBlur = (event: FocusEvent<HTMLSpanElement>) => {
+  const handleBlur = (event: FocusEvent<HTMLDivElement | HTMLSpanElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
       closeTooltip();
     }

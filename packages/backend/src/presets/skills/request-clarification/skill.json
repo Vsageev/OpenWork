@@ -1,4 +1,4 @@
 {
   "name": "request-clarification",
-  "description": "Instructions on how to make sure the user intent is clear and not misinterpreted"
+  "description": "ALWAYS check is what the user request is not ambiguous and can't be misinterpreted by you"
 }

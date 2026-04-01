@@ -273,6 +273,8 @@ export interface AgentRun {
   id: string;
   agentId: string;
   agentName: string;
+  model: string | null;
+  modelId: string | null;
   triggerType: 'chat' | 'cron_job' | 'card_assignment';
   status: 'running' | 'completed' | 'error';
   conversationId: string | null;

@@ -60,6 +60,7 @@ import {
   FileText,
   RotateCcw,
   OctagonX,
+  Cpu,
 } from 'lucide-react';
 import { formatDate } from 'shared';
 import {
@@ -72,11 +73,13 @@ import {
   ApiKeyFormFields,
   MarkdownContent,
   Tooltip,
+  Modal,
 } from '../ui';
 import { api, apiUpload, ApiError } from '../lib/api';
 import {
   AGENT_MODEL_PROVIDERS as MODELS,
   getAgentModelDefaultId,
+  getAgentModelDefinition,
   getAgentModelOptions,
 } from '../lib/agent-models';
 import { toast } from '../stores/toast';
@@ -313,6 +316,8 @@ interface EditMessageResponse {
 
 interface AgentMessageMetadata {
   runId?: string | null;
+  model?: string | null;
+  modelId?: string | null;
   agentChatUpdate?: boolean;
   isFinal?: boolean;
   queuedFailure?: boolean;
@@ -429,6 +434,14 @@ function parseAgentMessageMetadata(raw: string | null | undefined): AgentMessage
   } catch {
     return null;
   }
+}
+
+function formatModelLabel(model?: string | null, modelId?: string | null): string | null {
+  if (!model && !modelId) return null;
+  const provider = getAgentModelDefinition(model);
+  const providerName = provider?.name ?? model ?? '';
+  if (modelId) return `${providerName} / ${modelId}`;
+  return providerName || null;
 }
 
 function buildMonitorRunUrl(runId: string): string {
@@ -1392,6 +1405,7 @@ interface AgentSidebarItemProps {
   onCleanConversations: (agentId: string) => void;
   onCreateConversation: (agentId: string) => void;
   onSelectConversation: (agentId: string, conversationId: string) => void;
+  onRenameConversation: (agentId: string, conversation: ChatConversation) => void;
   onDeleteConversation: (agentId: string, conversationId: string) => void;
 }
 
@@ -1409,6 +1423,7 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   onCleanConversations,
   onCreateConversation,
   onSelectConversation,
+  onRenameConversation,
   onDeleteConversation,
 }: AgentSidebarItemProps) {
   const hasUnreadAny = conversations.some((conversation) => conversation.isUnread);
@@ -1560,7 +1575,17 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
                   {relativeTime(conversation.lastMessageAt || conversation.createdAt)}
                 </span>
                 <button
-                  className={styles.convItemDelete}
+                  className={styles.convItemAction}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRenameConversation(agent.id, conversation);
+                  }}
+                  aria-label="Rename conversation"
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  className={`${styles.convItemAction} ${styles.convItemDelete}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     onDeleteConversation(agent.id, conversation.id);
@@ -2009,12 +2034,20 @@ export function AgentsPage() {
       if (chatLoadingTimerRef.current) clearTimeout(chatLoadingTimerRef.current);
     };
   }, [chatLoading]);
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingMessage, setEditingMessage] = useState<ComposerEditingState | null>(null);
   const [pendingConversationKeys, setPendingConversationKeys] = useState<Set<string>>(new Set());
   const [runHandoffKeys, setRunHandoffKeys] = useState<Set<string>>(new Set());
   const [stoppingRun, setStoppingRun] = useState(false);
   const [activeConversationRun, setActiveConversationRun] = useState<AgentRunSummary | null>(null);
+  const [renamingConversation, setRenamingConversation] = useState<{
+    agentId: string;
+    conversationId: string;
+    value: string;
+  } | null>(null);
+  const [renameConversationSaving, setRenameConversationSaving] = useState(false);
+  const [renameConversationError, setRenameConversationError] = useState<string | null>(null);
   const [optimisticResponseParentIds, setOptimisticResponseParentIds] = useState<
     Record<string, string>
   >({});
@@ -2234,35 +2267,32 @@ export function AgentsPage() {
     [],
   );
 
-  const syncActiveConversationUrl = useCallback(
-    () => {
-      if (conversationBootstrapRequest) return;
+  const syncActiveConversationUrl = useCallback(() => {
+    if (conversationBootstrapRequest) return;
 
-      const nextParams = new URLSearchParams(searchParams);
-      nextParams.delete('id');
-      nextParams.delete('settingsAgentId');
-      if (activeAgentId) {
-        nextParams.set('agentId', activeAgentId);
-      } else {
-        nextParams.delete('agentId');
-      }
-      if (activeConvId) {
-        nextParams.set('conversationId', activeConvId);
-      } else {
-        nextParams.delete('conversationId');
-      }
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('id');
+    nextParams.delete('settingsAgentId');
+    if (activeAgentId) {
+      nextParams.set('agentId', activeAgentId);
+    } else {
+      nextParams.delete('agentId');
+    }
+    if (activeConvId) {
+      nextParams.set('conversationId', activeConvId);
+    } else {
+      nextParams.delete('conversationId');
+    }
 
-      const currentParams = new URLSearchParams(searchParams);
-      currentParams.delete('id');
-      currentParams.delete('settingsAgentId');
-      const currentQuery = currentParams.toString();
-      const nextQuery = nextParams.toString();
-      if (currentQuery === nextQuery) return;
+    const currentParams = new URLSearchParams(searchParams);
+    currentParams.delete('id');
+    currentParams.delete('settingsAgentId');
+    const currentQuery = currentParams.toString();
+    const nextQuery = nextParams.toString();
+    if (currentQuery === nextQuery) return;
 
-      setSearchParams(nextParams, { replace: true });
-    },
-    [activeAgentId, activeConvId, conversationBootstrapRequest, searchParams, setSearchParams],
-  );
+    setSearchParams(nextParams, { replace: true });
+  }, [activeAgentId, activeConvId, conversationBootstrapRequest, searchParams, setSearchParams]);
 
   const setConversationPending = useCallback(
     (agentId: string, conversationId: string, pending: boolean) => {
@@ -3329,6 +3359,60 @@ export function AgentsPage() {
       setOptimisticResponseParent,
       setActiveConversation,
     ],
+  );
+
+  const openRenameConversation = useCallback((agentId: string, conversation: ChatConversation) => {
+    setRenameConversationError(null);
+    setRenamingConversation({
+      agentId,
+      conversationId: conversation.id,
+      value: conversation.subject || '',
+    });
+  }, []);
+
+  const closeRenameConversation = useCallback(() => {
+    if (renameConversationSaving) return;
+    setRenamingConversation(null);
+    setRenameConversationError(null);
+  }, [renameConversationSaving]);
+
+  const submitRenameConversation = useCallback(
+    async (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      if (!renamingConversation || renameConversationSaving) return;
+
+      const subject = renamingConversation.value.trim();
+      if (!subject) {
+        setRenameConversationError('Conversation name is required');
+        return;
+      }
+
+      try {
+        setRenameConversationSaving(true);
+        setRenameConversationError(null);
+        const updated = await api<ChatConversation>(
+          `/agents/${renamingConversation.agentId}/chat/conversations/${renamingConversation.conversationId}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ subject }),
+          },
+        );
+        setConvsByAgent((prev) => ({
+          ...prev,
+          [renamingConversation.agentId]: (prev[renamingConversation.agentId] || []).map((conv) =>
+            conv.id === updated.id ? { ...conv, ...updated } : conv,
+          ),
+        }));
+        setRenamingConversation(null);
+      } catch (error) {
+        setRenameConversationError(
+          error instanceof ApiError ? error.message : 'Failed to rename conversation',
+        );
+      } finally {
+        setRenameConversationSaving(false);
+      }
+    },
+    [renameConversationSaving, renamingConversation],
   );
 
   /* ── Clean conversations (delete all except active and unread) ── */
@@ -4934,6 +5018,7 @@ export function AgentsPage() {
                             onCleanConversations={cleanConversations}
                             onCreateConversation={createConversation}
                             onSelectConversation={selectConversation}
+                            onRenameConversation={openRenameConversation}
                             onDeleteConversation={deleteConversation}
                           />
                         ))}
@@ -4988,6 +5073,7 @@ export function AgentsPage() {
                             onCleanConversations={cleanConversations}
                             onCreateConversation={createConversation}
                             onSelectConversation={selectConversation}
+                            onRenameConversation={openRenameConversation}
                             onDeleteConversation={deleteConversation}
                           />
                         ))}
@@ -5078,6 +5164,10 @@ export function AgentsPage() {
                         const messageMeta = parseAgentMessageMetadata(msg.metadata);
                         const monitorRunId =
                           msg.direction === 'inbound' ? (messageMeta?.runId ?? null) : null;
+                        const messageModelLabel =
+                          msg.direction === 'inbound'
+                            ? formatModelLabel(messageMeta?.model, messageMeta?.modelId)
+                            : null;
                         const branchExecutionItems =
                           effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? [];
                         const processingBranchExecutionCount = branchExecutionItems.filter(
@@ -5215,6 +5305,12 @@ export function AgentsPage() {
                                           <ExternalLink size={12} />
                                           Monitor
                                         </button>
+                                      )}
+                                      {messageModelLabel && (
+                                        <span className={styles.messageMonitorBtn}>
+                                          <Cpu size={12} />
+                                          {messageModelLabel}
+                                        </span>
                                       )}
                                       <button
                                         className={styles.copyBtn}
@@ -5441,9 +5537,7 @@ export function AgentsPage() {
                                     onClick={() => void handleClearQueue()}
                                     disabled={clearingQueuedItems}
                                     style={
-                                      clearingQueuedItems
-                                        ? { pointerEvents: 'none' }
-                                        : undefined
+                                      clearingQueuedItems ? { pointerEvents: 'none' } : undefined
                                     }
                                     aria-label="Remove all queued messages"
                                   >
@@ -5468,7 +5562,9 @@ export function AgentsPage() {
                             className={`${styles.messageRow} ${styles.messageRowUser} ${styles.queuedMessageRow}`}
                           >
                             <div className={styles.messageContent}>
-                              <div className={`${styles.messageBubble} ${styles.messageBubbleUser}`}>
+                              <div
+                                className={`${styles.messageBubble} ${styles.messageBubbleUser}`}
+                              >
                                 <div className={styles.messagePlainText}>{item.prompt}</div>
                               </div>
                               <div className={`${styles.messageMeta} ${styles.messageMetaUser}`}>
@@ -5489,9 +5585,7 @@ export function AgentsPage() {
                                         })}
                                 </span>
                                 <Tooltip
-                                  label={
-                                    isQueuedItemBusy ? 'Please wait' : 'Edit queued message'
-                                  }
+                                  label={isQueuedItemBusy ? 'Please wait' : 'Edit queued message'}
                                 >
                                   <span
                                     className={
@@ -5525,9 +5619,7 @@ export function AgentsPage() {
                                   </span>
                                 </Tooltip>
                                 <Tooltip
-                                  label={
-                                    isQueuedItemBusy ? 'Please wait' : 'Remove from queue'
-                                  }
+                                  label={isQueuedItemBusy ? 'Please wait' : 'Remove from queue'}
                                 >
                                   <span
                                     className={
@@ -5542,9 +5634,7 @@ export function AgentsPage() {
                                       onClick={() => void handleDeleteQueueItem(item.id)}
                                       disabled={isQueuedItemBusy}
                                       style={
-                                        isQueuedItemBusy
-                                          ? { pointerEvents: 'none' }
-                                          : undefined
+                                        isQueuedItemBusy ? { pointerEvents: 'none' } : undefined
                                       }
                                       aria-label="Remove queued message"
                                     >
@@ -7031,6 +7121,54 @@ export function AgentsPage() {
             </div>
           );
         })()}
+      {renamingConversation && (
+        <Modal onClose={closeRenameConversation} size="sm" ariaLabel="Rename conversation">
+          <div className={styles.modalHeader}>
+            <h3 className={styles.modalTitle}>Rename Chat</h3>
+            <button
+              type="button"
+              className={styles.modalCloseBtn}
+              onClick={closeRenameConversation}
+              disabled={renameConversationSaving}
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <form onSubmit={submitRenameConversation}>
+            <div className={styles.modalBody}>
+              <Input
+                label="Name"
+                placeholder="Conversation name"
+                value={renamingConversation.value}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setRenamingConversation((prev) => (prev ? { ...prev, value } : prev));
+                  if (renameConversationError) setRenameConversationError(null);
+                }}
+                error={renameConversationError ?? undefined}
+                autoFocus
+              />
+            </div>
+            <div className={styles.modalFooter}>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={closeRenameConversation}
+                disabled={renameConversationSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={renameConversationSaving || !renamingConversation.value.trim()}
+              >
+                {renameConversationSaving ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
       {confirmDialog}
     </div>
   );

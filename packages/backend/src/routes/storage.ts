@@ -73,7 +73,10 @@ function isCanceledNativePicker(result: CommandResult): boolean {
 }
 
 async function pickDirectoryOnMac(startPath?: string): Promise<string | null> {
-  const scriptArgs = ['-e', 'set chosenFolder to choose folder with prompt "Select working directory"'];
+  const scriptArgs = [
+    '-e',
+    'set chosenFolder to choose folder with prompt "Select working directory"',
+  ];
   if (isExistingDirectory(startPath)) {
     scriptArgs[1] += ` default location POSIX file "${escapeAppleScriptString(startPath)}"`;
   }
@@ -405,6 +408,13 @@ export async function storageRoutes(app: FastifyInstance) {
     '/api/storage/files/content',
     {
       onRequest: [app.authenticate, requirePermission('settings:update')],
+      config: {
+        sanitization: {
+          preserve: {
+            body: ['content'],
+          },
+        },
+      },
       schema: {
         tags: ['Storage'],
         summary: 'Write text content to a storage file',

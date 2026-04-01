@@ -17,6 +17,8 @@ interface CreateAgentRunParams {
   avatarIcon?: string | null;
   avatarBgColor?: string | null;
   avatarLogoColor?: string | null;
+  model?: string | null;
+  modelId?: string | null;
   triggerType: TriggerType;
   conversationId?: string | null;
   cardId?: string | null;
@@ -35,6 +37,8 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
     avatarIcon: params.avatarIcon ?? null,
     avatarBgColor: params.avatarBgColor ?? null,
     avatarLogoColor: params.avatarLogoColor ?? null,
+    model: params.model ?? null,
+    modelId: params.modelId ?? null,
     triggerType: params.triggerType,
     status: 'running' as RunStatus,
     conversationId: params.conversationId ?? null,
@@ -180,6 +184,8 @@ function toAgentRunSummary(run: Record<string, unknown>) {
     avatarIcon: run.avatarIcon ?? null,
     avatarBgColor: run.avatarBgColor ?? null,
     avatarLogoColor: run.avatarLogoColor ?? null,
+    model: run.model ?? null,
+    modelId: run.modelId ?? null,
     triggerType: run.triggerType,
     status: run.status,
     conversationId: run.conversationId ?? null,

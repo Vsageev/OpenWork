@@ -26,7 +26,13 @@ function applyTheme(resolved: ResolvedTheme) {
 // ── Tiny external store ──
 
 let currentTheme: Theme = getStoredTheme();
-applyTheme(resolve(currentTheme));
+let isInitialized = false;
+
+export function initTheme() {
+  if (isInitialized) return;
+  applyTheme(resolve(currentTheme));
+  isInitialized = true;
+}
 
 const listeners = new Set<() => void>();
 
@@ -40,6 +46,7 @@ function emit() {
 }
 
 function setTheme(next: Theme) {
+  initTheme();
   currentTheme = next;
   localStorage.setItem(STORAGE_KEY, next);
   applyTheme(resolve(next));
@@ -59,6 +66,7 @@ function getSnapshot(): Theme {
 }
 
 export function useTheme() {
+  initTheme();
   const theme = useSyncExternalStore(subscribe, getSnapshot);
 
   return {

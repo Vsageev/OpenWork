@@ -1464,13 +1464,24 @@ function saveAgentRunResponse(
   metadata?: Record<string, unknown> | null,
   options?: { updateActiveBranch?: boolean },
 ): Record<string, unknown> {
+  // Enrich metadata with model info from the run record
+  let enrichedMetadata = metadata;
+  const runId = metadata?.runId as string | null | undefined;
+  if (runId) {
+    const run = store.getById('agent_runs', runId);
+    if (run) {
+      enrichedMetadata = { ...metadata };
+      if (run.model) (enrichedMetadata as Record<string, unknown>).model = run.model;
+      if (run.modelId) (enrichedMetadata as Record<string, unknown>).modelId = run.modelId;
+    }
+  }
   return saveAgentConversationMessage({
     conversationId,
     direction: 'inbound',
     content,
     type: 'text',
     parentId,
-    metadata,
+    metadata: enrichedMetadata,
     updateActiveBranch: options?.updateActiveBranch,
   });
 }
@@ -1481,8 +1492,14 @@ function attachRunIdToMessage(
 ): Record<string, unknown> {
   if (!runId || typeof message.id !== 'string') return message;
   const current = parseMetadata(message.metadata) ?? {};
-  if (current.runId === runId) return message;
-  const next = { ...current, runId };
+  if (current.runId === runId && current.model !== undefined) return message;
+  const next: Record<string, unknown> = { ...current, runId };
+  // Attach model info from the run record so chat messages show provider/model
+  const run = store.getById('agent_runs', runId);
+  if (run) {
+    if (run.model) next.model = run.model;
+    if (run.modelId) next.modelId = run.modelId;
+  }
   const updated = store.update('messages', message.id, {
     metadata: JSON.stringify(next),
   });
@@ -1955,6 +1972,8 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
     avatarIcon: options.agent.avatarIcon ?? null,
     avatarBgColor: options.agent.avatarBgColor ?? null,
     avatarLogoColor: options.agent.avatarLogoColor ?? null,
+    model: options.agent.model ?? null,
+    modelId: options.agent.modelId ?? null,
     triggerType: options.triggerType,
     conversationId: options.triggerRef?.conversationId,
     cardId: options.triggerRef?.cardId,

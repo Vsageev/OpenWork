@@ -513,6 +513,20 @@
   border-top: 1px solid var(--color-border-subtle);
 }
 
+.modelInfo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--space-3);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--color-border-subtle);
+}
+
 .logSection {
   margin-bottom: var(--space-3);
 }

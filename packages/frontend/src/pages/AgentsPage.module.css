@@ -769,7 +769,7 @@
   opacity: 0.5;
 }
 
-.convItemDelete {
+.convItemAction {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -789,12 +789,21 @@
     background var(--transition-fast);
 }
 
+.convItemAction:hover {
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.convItemDelete {
+  color: var(--color-text-tertiary);
+}
+
 .convItemDelete:hover {
   color: var(--color-error);
   background: rgba(239, 68, 68, 0.08);
 }
 
-.convItem:hover .convItemDelete {
+.convItem:hover .convItemAction {
   opacity: 1;
 }
 
@@ -992,6 +1001,22 @@
   color: var(--color-text-tertiary);
 }
 
+.messageMonitorBtn,
+.copyBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-tertiary);
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast);
+}
+
 .messageMetaUser {
   justify-content: flex-end;
 }
@@ -1037,21 +1062,9 @@
   color: var(--color-text-secondary);
 }
 
-.messageMonitorBtn,
+button.messageMonitorBtn,
 .copyBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--color-text-tertiary);
   cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity var(--transition-fast),
-    color var(--transition-fast);
   padding: 0;
 }
 
@@ -1680,7 +1693,9 @@
   border: none;
   color: var(--color-text-tertiary);
   cursor: pointer;
-  transition: color var(--transition-normal), background var(--transition-normal);
+  transition:
+    color var(--transition-normal),
+    background var(--transition-normal);
 }
 
 .errorDismissBtn:hover {
@@ -2621,7 +2636,9 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-4);
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
 }
 
 .envVarRow:hover {
@@ -2657,7 +2674,14 @@
 }
 
 .envVarKey {
-  font-family: var(--font-mono, 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace);
+  font-family: var(
+    --font-mono,
+    'SF Mono',
+    'Cascadia Code',
+    'Fira Code',
+    'JetBrains Mono',
+    monospace
+  );
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text);
@@ -2669,7 +2693,14 @@
 }
 
 .envVarPreview {
-  font-family: var(--font-mono, 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace);
+  font-family: var(
+    --font-mono,
+    'SF Mono',
+    'Cascadia Code',
+    'Fira Code',
+    'JetBrains Mono',
+    monospace
+  );
   font-size: 12px;
   color: var(--color-text-tertiary);
   letter-spacing: 0.03em;
