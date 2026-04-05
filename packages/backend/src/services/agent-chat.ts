@@ -825,16 +825,18 @@ export function editMessageAndBranch(
       'Only user messages can be edited',
     );
   }
-  if (original.type !== 'text' && original.type !== 'image') {
+  if (original.type !== 'text' && original.type !== 'image' && original.type !== 'file') {
     throw AgentChatError.badRequest(
       'message_edit_not_supported',
-      'Only text and image messages can be edited',
+      'Only text, image, and file messages can be edited',
     );
   }
 
   const parentId = (original.parentId as string | null) ?? null;
   const originalAttachments =
-    original.type === 'image' ? cloneAttachmentRecords(parseAttachments(original.attachments)) : [];
+    original.type === 'image' || original.type === 'file'
+      ? cloneAttachmentRecords(parseAttachments(original.attachments))
+      : [];
   const hasKeepStoragePaths = Array.isArray(options.keepStoragePaths);
   const keepStoragePathSet = hasKeepStoragePaths ? new Set(options.keepStoragePaths) : null;
   const retainedOriginalAttachments =
@@ -850,7 +852,7 @@ export function editMessageAndBranch(
       ? cloneAttachmentRecords(options.attachments as Array<Record<string, unknown>>)
       : [];
   const combinedAttachments =
-    original.type === 'image'
+    original.type === 'image' || original.type === 'file'
       ? [...retainedOriginalAttachments, ...appendedAttachments]
       : appendedAttachments;
   if (combinedAttachments.length > MAX_CHAT_MESSAGE_IMAGES) {
@@ -861,7 +863,11 @@ export function editMessageAndBranch(
   }
 
   const normalizedAttachments = combinedAttachments.length > 0 ? combinedAttachments : null;
-  const nextType = normalizedAttachments ? 'image' : 'text';
+  const nextType = normalizedAttachments
+    ? normalizedAttachments.every((attachment) => attachment.type === 'image')
+      ? 'image'
+      : 'file'
+    : 'text';
   const trimmedContent = newContent.trim();
   if (nextType === 'text' && !trimmedContent) {
     throw AgentChatError.badRequest(

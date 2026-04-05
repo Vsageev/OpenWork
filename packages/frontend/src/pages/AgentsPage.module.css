@@ -4099,13 +4099,16 @@ button.filesColName:hover .filesFileName {
   .sidebar {
     width: 100%;
     min-width: 0;
+    min-height: 0;
     border-right: none;
     border-bottom: 1px solid var(--color-border);
   }
 
   .sidebarMobileOpen {
     flex: 1;
+    min-height: 0;
     max-height: none;
+    overflow: hidden;
   }
 
   .sidebarMobileHidden {
@@ -4126,6 +4129,10 @@ button.filesColName:hover .filesFileName {
 
   .chatHeader {
     padding: var(--space-3) var(--space-4);
+  }
+
+  .chatHeaderInfo {
+    flex: 1;
   }
 
   .chatHeaderActions {
@@ -4192,6 +4199,8 @@ button.filesColName:hover .filesFileName {
     opacity: 1;
   }
 
+  /* Touch devices can't hover — always show message action buttons */
+  .messageMonitorBtn,
   .copyBtn {
     opacity: 1;
   }

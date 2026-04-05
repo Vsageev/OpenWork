@@ -19,6 +19,9 @@
   --color-text-secondary: #6b7280;
   --color-text-tertiary: #9ca3af;
   --color-text-inverse: #ffffff;
+  --color-tooltip-bg: #1a1a2e;
+  --color-tooltip-text: #ffffff;
+  --color-tooltip-border: rgba(255, 255, 255, 0.08);
 
   /* Accent Colors */
   --color-primary: #3b82f6;
@@ -83,6 +86,9 @@
   --color-text-secondary: #9a9aa8;
   --color-text-tertiary: #6b6b7a;
   --color-text-inverse: #111114;
+  --color-tooltip-bg: #f3f4f6;
+  --color-tooltip-text: #111114;
+  --color-tooltip-border: rgba(17, 17, 20, 0.12);
 
   /* Accent Colors */
   --color-primary: #60a5fa;

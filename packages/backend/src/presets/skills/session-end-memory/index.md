@@ -15,16 +15,10 @@ and decide whether any durable memory should be written back.
 
 - User provided feedback/correction on you work.
 - The insight/flow is likely to matter again.
-- Prefer updating an existing local notes or memory file instead of creating
-  many new files.
-- Keep memory concise and factual: stable paths, conventions, decisions,
-  pitfalls, or follow-up context.
-- Do not store secrets, credentials, temporary debugging noise, or speculative
-  claims.
 
 ## File choice
 
-- Prefer editring an existing file when it makes sense.
+- Prefer editring an existing file when it makes sense but dont hesitate adding new ones.
 - Make sure the information is easily searchable in future sessions by choosing file naming/placement and wodr choice/search tags.
 
 ## Reporting

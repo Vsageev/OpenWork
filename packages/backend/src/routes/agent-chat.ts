@@ -695,7 +695,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('settings:update')],
       schema: {
         tags: ['Agent Chat'],
-        summary: 'Edit a user message, attach images, and create a new conversation branch',
+        summary: 'Edit a user message, attach files, and create a new conversation branch',
         params: z.object({ id: z.string(), cid: z.string() }),
       },
     },
@@ -742,7 +742,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       }
 
       try {
-        const attachments = await persistUploadedChatFiles(fileParts, { imagesOnly: true });
+        const attachments = await persistUploadedChatFiles(fileParts);
         const newMessage = editMessageAndBranch(request.params.cid, messageId, content.trim(), {
           attachments,
           keepStoragePaths,

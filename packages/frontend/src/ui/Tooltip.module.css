@@ -13,9 +13,11 @@
   max-width: min(280px, calc(100vw - 16px));
   white-space: normal;
   overflow-wrap: anywhere;
-  color: #fff;
-  background: var(--color-text);
+  color: var(--color-tooltip-text);
+  background: var(--color-tooltip-bg);
+  border: 1px solid var(--color-tooltip-border);
   border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
   pointer-events: none;
   opacity: 0;
   visibility: hidden;

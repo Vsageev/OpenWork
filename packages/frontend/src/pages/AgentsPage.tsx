@@ -325,20 +325,17 @@ interface AgentMessageMetadata {
   fallbackModel?: string | null;
 }
 
-interface StagedImage {
-  file: File;
-  previewUrl: string;
-}
-
 interface DraftAttachment {
   file: File;
   kind: 'image' | 'file';
   previewUrl: string | null;
 }
 
-interface ManagedExistingImage {
+interface ManagedExistingAttachment {
   storagePath: string;
   fileName: string;
+  type: 'image' | 'file';
+  fileSize: number;
 }
 
 interface EditingChatMessageState {
@@ -348,7 +345,7 @@ interface EditingChatMessageState {
   id: string;
   initialValue: string;
   value: string;
-  existingImages: ManagedExistingImage[];
+  existingAttachments: ManagedExistingAttachment[];
   isSubmitting: boolean;
 }
 
@@ -384,23 +381,23 @@ interface ReplyComposerProps {
 const MAX_STAGED_ATTACHMENTS = 10;
 const AGENT_CHAT_DRAFT_STORAGE_KEY = 'openwork_agent_chat_global_draft';
 
-export function getChatMessageImages(
+export function getChatMessageEditableAttachments(
   message: Pick<ChatMessage, 'attachments'>,
-): ManagedExistingImage[] {
+): ManagedExistingAttachment[] {
   return (
-    message.attachments
-      ?.filter((attachment) => attachment.type === 'image')
-      .map((attachment) => ({
-        storagePath: attachment.storagePath,
-        fileName: attachment.fileName,
-      })) ?? []
+    message.attachments?.map((attachment) => ({
+      storagePath: attachment.storagePath,
+      fileName: attachment.fileName,
+      type: attachment.type === 'image' ? 'image' : 'file',
+      fileSize: attachment.fileSize,
+    })) ?? []
   );
 }
 
 export function isEditableChatMessage(message: ChatMessage): boolean {
   if (message.direction !== 'outbound') return false;
   const type = message.type ?? 'text';
-  return type === 'text' || type === 'image';
+  return type === 'text' || type === 'image' || type === 'file';
 }
 
 function readAgentChatDraft(): string {
@@ -470,8 +467,10 @@ export const ReplyComposer = memo(function ReplyComposer({
   const [input, setInput] = useState(() => readAgentChatDraft());
   const [uploading, setUploading] = useState(false);
   const [draftStagedAttachments, setDraftStagedAttachments] = useState<DraftAttachment[]>([]);
-  const [editStagedImages, setEditStagedImages] = useState<StagedImage[]>([]);
-  const [retainedEditImages, setRetainedEditImages] = useState<ManagedExistingImage[]>([]);
+  const [editStagedAttachments, setEditStagedAttachments] = useState<DraftAttachment[]>([]);
+  const [retainedEditAttachments, setRetainedEditAttachments] = useState<ManagedExistingAttachment[]>(
+    [],
+  );
   const [draggingOver, setDraggingOver] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -485,36 +484,43 @@ export const ReplyComposer = memo(function ReplyComposer({
     (attachment): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
       attachment.kind === 'image' && Boolean(attachment.previewUrl),
   );
-  const stagedImages = isEditingChatMessage ? editStagedImages : draftStagedImages;
-  const existingImages = isEditingChatMessage ? retainedEditImages : [];
+  const editStagedImages = editStagedAttachments.filter(
+    (attachment): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
+      attachment.kind === 'image' && Boolean(attachment.previewUrl),
+  );
   const totalAttachmentCount = isEditingChatMessage
-    ? stagedImages.length + existingImages.length
+    ? editStagedAttachments.length + retainedEditAttachments.length
     : isEditing
       ? 0
       : draftStagedAttachments.length;
   const trimmedComposerValue = isEditing ? editingMessage.value.trim() : input.trim();
-  const existingImagesChanged = isEditingChatMessage
-    ? editingMessage.existingImages.length !== retainedEditImages.length ||
-      editingMessage.existingImages.some(
-        (image, index) => retainedEditImages[index]?.storagePath !== image.storagePath,
+  const existingAttachmentsChanged = isEditingChatMessage
+    ? editingMessage.existingAttachments.length !== retainedEditAttachments.length ||
+      editingMessage.existingAttachments.some(
+        (attachment, index) => retainedEditAttachments[index]?.storagePath !== attachment.storagePath,
       )
     : false;
   const canSubmitEdit = isEditingChatMessage
     ? (trimmedComposerValue !== editingMessage.initialValue.trim() ||
-        stagedImages.length > 0 ||
-        existingImagesChanged) &&
+        editStagedAttachments.length > 0 ||
+        existingAttachmentsChanged) &&
       (trimmedComposerValue.length > 0 || totalAttachmentCount > 0)
     : isEditingQueueItem
       ? trimmedComposerValue !== editingMessage.initialValue.trim() &&
         trimmedComposerValue.length > 0
       : false;
 
-  const clearImageSet = useCallback((setImages: Dispatch<SetStateAction<StagedImage[]>>) => {
-    setImages((prev) => {
-      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
-      return [];
-    });
-  }, []);
+  const clearAttachmentSet = useCallback(
+    (setAttachments: Dispatch<SetStateAction<DraftAttachment[]>>) => {
+      setAttachments((prev) => {
+        for (const attachment of prev) {
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        }
+        return [];
+      });
+    },
+    [],
+  );
 
   const clearDraftStagedAttachments = useCallback(() => {
     setDraftStagedAttachments((prev) => {
@@ -527,31 +533,32 @@ export const ReplyComposer = memo(function ReplyComposer({
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
-  const clearEditStagedImages = useCallback(() => {
-    clearImageSet(setEditStagedImages);
+  const clearEditStagedAttachments = useCallback(() => {
+    clearAttachmentSet(setEditStagedAttachments);
     if (imageInputRef.current) imageInputRef.current.value = '';
-  }, [clearImageSet]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [clearAttachmentSet]);
 
   useEffect(
     () => () => {
       clearDraftStagedAttachments();
-      clearEditStagedImages();
+      clearEditStagedAttachments();
     },
-    [clearDraftStagedAttachments, clearEditStagedImages],
+    [clearDraftStagedAttachments, clearEditStagedAttachments],
   );
 
   useEffect(() => {
     if (editingMessage?.kind === 'message') {
-      setRetainedEditImages(editingMessage.existingImages);
+      setRetainedEditAttachments(editingMessage.existingAttachments);
     } else {
-      setRetainedEditImages([]);
+      setRetainedEditAttachments([]);
     }
-    clearEditStagedImages();
+    clearEditStagedAttachments();
   }, [
-    clearEditStagedImages,
+    clearEditStagedAttachments,
     editingMessage?.kind === 'message' ? editingMessage.id : null,
     editingMessage?.kind === 'queue' ? editingMessage.queueItemId : null,
-    editingMessage?.kind === 'message' ? editingMessage.existingImages : null,
+    editingMessage?.kind === 'message' ? editingMessage.existingAttachments : null,
   ]);
 
   useEffect(() => {
@@ -579,11 +586,13 @@ export const ReplyComposer = memo(function ReplyComposer({
       const images = files.filter(isImageFile);
       if (images.length === 0) return;
       if (isEditingChatMessage) {
-        setEditStagedImages((prev) => {
-          const remaining = MAX_STAGED_ATTACHMENTS - prev.length - retainedEditImages.length;
+        setEditStagedAttachments((prev) => {
+          const remaining =
+            MAX_STAGED_ATTACHMENTS - prev.length - retainedEditAttachments.length;
           if (remaining <= 0) return prev;
           const toAdd = images.slice(0, remaining).map((file) => ({
             file,
+            kind: 'image' as const,
             previewUrl: URL.createObjectURL(file),
           }));
           return [...prev, ...toAdd];
@@ -602,22 +611,27 @@ export const ReplyComposer = memo(function ReplyComposer({
         return [...prev, ...toAdd];
       });
     },
-    [isEditingChatMessage, isEditingQueueItem, retainedEditImages.length],
+    [isEditingChatMessage, isEditingQueueItem, retainedEditAttachments.length],
   );
 
-  const stageFiles = useCallback((files: File[]) => {
-    if (files.length === 0) return;
-    setDraftStagedAttachments((prev) => {
-      const remaining = MAX_STAGED_ATTACHMENTS - prev.length;
-      if (remaining <= 0) return prev;
-      const toAdd = files.slice(0, remaining).map((file) => ({
-        file,
-        kind: isImageFile(file) ? ('image' as const) : ('file' as const),
-        previewUrl: isImageFile(file) ? URL.createObjectURL(file) : null,
-      }));
-      return [...prev, ...toAdd];
-    });
-  }, []);
+  const stageFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0 || isEditingQueueItem) return;
+      const apply = isEditingChatMessage ? setEditStagedAttachments : setDraftStagedAttachments;
+      const retainedCount = isEditingChatMessage ? retainedEditAttachments.length : 0;
+      apply((prev) => {
+        const remaining = MAX_STAGED_ATTACHMENTS - prev.length - retainedCount;
+        if (remaining <= 0) return prev;
+        const toAdd = files.slice(0, remaining).map((file) => ({
+          file,
+          kind: isImageFile(file) ? ('image' as const) : ('file' as const),
+          previewUrl: isImageFile(file) ? URL.createObjectURL(file) : null,
+        }));
+        return [...prev, ...toAdd];
+      });
+    },
+    [isEditingChatMessage, isEditingQueueItem, retainedEditAttachments.length],
+  );
 
   const removeDraftAttachment = useCallback((index: number) => {
     setDraftStagedAttachments((prev) => {
@@ -634,18 +648,20 @@ export const ReplyComposer = memo(function ReplyComposer({
         removeDraftAttachment(index);
         return;
       }
-      setEditStagedImages((prev) => {
+      setEditStagedAttachments((prev) => {
         const next = [...prev];
         const [removed] = next.splice(index, 1);
-        if (removed) URL.revokeObjectURL(removed.previewUrl);
+        if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
         return next;
       });
     },
     [isEditingChatMessage, removeDraftAttachment],
   );
 
-  const removeExistingImage = useCallback((storagePath: string) => {
-    setRetainedEditImages((prev) => prev.filter((image) => image.storagePath !== storagePath));
+  const removeExistingAttachment = useCallback((storagePath: string) => {
+    setRetainedEditAttachments((prev) =>
+      prev.filter((attachment) => attachment.storagePath !== storagePath),
+    );
   }, []);
 
   const handleSend = useCallback(async () => {
@@ -653,15 +669,15 @@ export const ReplyComposer = memo(function ReplyComposer({
 
     if (isEditingChatMessage) {
       const nextValue = editingMessage.value.trim();
-      const hasImages = editStagedImages.length > 0;
-      const keptStoragePaths = retainedEditImages.map((image) => image.storagePath);
-      if (!nextValue && !hasImages && keptStoragePaths.length === 0) return;
+      const hasAttachments = editStagedAttachments.length > 0;
+      const keptStoragePaths = retainedEditAttachments.map((attachment) => attachment.storagePath);
+      if (!nextValue && !hasAttachments && keptStoragePaths.length === 0) return;
       try {
         await editingMessage.onSubmit(
-          editStagedImages.map((img) => img.file),
+          editStagedAttachments.map((attachment) => attachment.file),
           keptStoragePaths,
         );
-        clearEditStagedImages();
+        clearEditStagedAttachments();
       } catch {
         // Parent state already surfaces the failure; keep the draft intact for retry.
       } finally {
@@ -718,10 +734,10 @@ export const ReplyComposer = memo(function ReplyComposer({
     }
   }, [
     clearDraftStagedAttachments,
-    clearEditStagedImages,
+    clearEditStagedAttachments,
     draftStagedAttachments,
     editingSubmitting,
-    editStagedImages,
+    editStagedAttachments,
     editingMessage,
     input,
     isEditingChatMessage,
@@ -773,13 +789,11 @@ export const ReplyComposer = memo(function ReplyComposer({
       setDraggingOver(false);
       const files = Array.from(e.dataTransfer.files ?? []);
       if (files.length === 0) return;
-      if (isEditingChatMessage) {
-        stageImages(files);
-      } else if (!isEditing) {
+      if (isEditingChatMessage || !isEditing) {
         stageFiles(files);
       }
     },
-    [isEditing, isEditingChatMessage, stageFiles, stageImages],
+    [isEditing, isEditingChatMessage, stageFiles],
   );
 
   const handleImageSelect = useCallback(
@@ -802,9 +816,9 @@ export const ReplyComposer = memo(function ReplyComposer({
 
   const handleEditCancel = useCallback(() => {
     if (editingSubmitting) return;
-    clearEditStagedImages();
+    clearEditStagedAttachments();
     editingMessage?.onCancel();
-  }, [clearEditStagedImages, editingMessage, editingSubmitting]);
+  }, [clearEditStagedAttachments, editingMessage, editingSubmitting]);
 
   return (
     <div
@@ -837,42 +851,86 @@ export const ReplyComposer = memo(function ReplyComposer({
           </button>
         </div>
       )}
-      {(existingImages.length > 0 ||
+      {(retainedEditAttachments.length > 0 ||
         (!isEditing && draftStagedAttachments.length > 0) ||
-        (isEditingChatMessage && stagedImages.length > 0)) && (
+        (isEditingChatMessage && editStagedAttachments.length > 0)) && (
         <div className={styles.stagedImagesRow}>
-          {existingImages.map((img) => (
-            <div key={img.storagePath} className={styles.stagedImagePreview}>
-              <StorageImageThumb
-                storagePath={img.storagePath}
-                alt={img.fileName}
-                className={styles.stagedImageThumb}
-                placeholderClassName={styles.stagedImageThumbPlaceholder}
-              />
-              <button
-                className={styles.stagedImageRemove}
-                onClick={() => removeExistingImage(img.storagePath)}
-                aria-label="Remove image"
-                disabled={editingSubmitting}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-          {isEditingChatMessage
-            ? stagedImages.map((img, i) => (
-                <div key={img.previewUrl} className={styles.stagedImagePreview}>
-                  <img src={img.previewUrl} alt="Preview" className={styles.stagedImageThumb} />
-                  <button
-                    className={styles.stagedImageRemove}
-                    onClick={() => removeStagedImage(i)}
-                    aria-label="Remove image"
-                    disabled={editingSubmitting}
-                  >
-                    <X size={12} />
-                  </button>
+          {retainedEditAttachments.map((attachment) =>
+            attachment.type === 'image' ? (
+              <div key={attachment.storagePath} className={styles.stagedImagePreview}>
+                <StorageImageThumb
+                  storagePath={attachment.storagePath}
+                  alt={attachment.fileName}
+                  className={styles.stagedImageThumb}
+                  placeholderClassName={styles.stagedImageThumbPlaceholder}
+                />
+                <button
+                  className={styles.stagedImageRemove}
+                  onClick={() => removeExistingAttachment(attachment.storagePath)}
+                  aria-label="Remove image"
+                  disabled={editingSubmitting}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <div key={attachment.storagePath} className={styles.stagedFileChip}>
+                <FileText size={14} className={styles.stagedFileIcon} />
+                <div className={styles.stagedFileMeta}>
+                  <span className={styles.stagedFileName}>{attachment.fileName}</span>
+                  <span className={styles.stagedFileSize}>
+                    {formatBytes(attachment.fileSize)}
+                  </span>
                 </div>
-              ))
+                <button
+                  className={styles.stagedFileRemove}
+                  onClick={() => removeExistingAttachment(attachment.storagePath)}
+                  aria-label="Remove attachment"
+                  disabled={editingSubmitting}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ),
+          )}
+          {isEditingChatMessage
+            ? editStagedAttachments.map((attachment, i) =>
+                attachment.kind === 'image' && attachment.previewUrl ? (
+                  <div key={attachment.previewUrl} className={styles.stagedImagePreview}>
+                    <img
+                      src={attachment.previewUrl}
+                      alt={attachment.file.name}
+                      className={styles.stagedImageThumb}
+                    />
+                    <button
+                      className={styles.stagedImageRemove}
+                      onClick={() => removeStagedImage(i)}
+                      aria-label="Remove image"
+                      disabled={editingSubmitting}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <div key={`${attachment.file.name}-${i}`} className={styles.stagedFileChip}>
+                    <FileText size={14} className={styles.stagedFileIcon} />
+                    <div className={styles.stagedFileMeta}>
+                      <span className={styles.stagedFileName}>{attachment.file.name}</span>
+                      <span className={styles.stagedFileSize}>
+                        {formatBytes(attachment.file.size)}
+                      </span>
+                    </div>
+                    <button
+                      className={styles.stagedFileRemove}
+                      onClick={() => removeStagedImage(i)}
+                      aria-label="Remove attachment"
+                      disabled={editingSubmitting}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ),
+              )
             : draftStagedAttachments.map((attachment, i) =>
                 attachment.kind === 'image' && attachment.previewUrl ? (
                   <div key={attachment.previewUrl} className={styles.stagedImagePreview}>
@@ -922,7 +980,7 @@ export const ReplyComposer = memo(function ReplyComposer({
             className={styles.hiddenFileInput}
             onChange={handleImageSelect}
           />
-          {!isEditing && (
+          {!isEditingQueueItem && (
             <input
               ref={fileInputRef}
               type="file"
@@ -951,14 +1009,14 @@ export const ReplyComposer = memo(function ReplyComposer({
             >
               <Image size={16} />
             </button>
-            {!isEditing && (
+            {!isEditingQueueItem && (
               <button
                 className={styles.attachBtn}
                 onClick={() => fileInputRef.current?.click()}
                 disabled={
                   uploading ||
                   editingSubmitting ||
-                  streaming ||
+                  (!isEditing && streaming) ||
                   totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
                 }
                 aria-label="Attach files"
@@ -2104,6 +2162,9 @@ export function AgentsPage() {
     [mgrActiveSkillId],
   );
 
+  // ── Mobile sidebar/chat toggle ──
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+
   // ── Header menu ──
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -2249,6 +2310,7 @@ export function AgentsPage() {
       setDeletingQueueItemIds(new Set());
       setClearingQueuedItems(false);
       setEditingMessage(null);
+      setMobileChatOpen(!!(agentId && conversationId));
       // Expand the active agent so the selected conversation is visible in the sidebar
       if (agentId) {
         setCollapsedAgents((prev) => {
@@ -3233,6 +3295,7 @@ export function AgentsPage() {
   const selectConversation = useCallback(
     async (agentId: string, convId: string) => {
       if (agentId === activeAgentId && convId === activeConvId) {
+        setMobileChatOpen(true);
         void markConversationRead(agentId, convId);
         return;
       }
@@ -3737,7 +3800,7 @@ export function AgentsPage() {
       id: msg.id,
       initialValue: msg.content,
       value: msg.content,
-      existingImages: getChatMessageImages(msg),
+      existingAttachments: getChatMessageEditableAttachments(msg),
       isSubmitting: false,
     });
   }
@@ -3786,7 +3849,7 @@ export function AgentsPage() {
           fd.append('keepStoragePaths', storagePath);
         }
         for (const file of files) {
-          const prepared = await prepareImageForUpload(file);
+          const prepared = isImageFile(file) ? await prepareImageForUpload(file) : file;
           fd.append('files', prepared, prepared.name);
         }
         response = await apiUpload<EditMessageResponse>(
@@ -4758,7 +4821,7 @@ export function AgentsPage() {
     <div className={styles.wrapper}>
       <div className={styles.container}>
         {/* ── Left sidebar ── */}
-        <div className={styles.sidebar}>
+        <div className={`${styles.sidebar} ${mobileChatOpen ? styles.sidebarMobileHidden : styles.sidebarMobileOpen}`}>
           <div className={styles.sidebarHeader}>
             <span className={styles.sidebarTitle}>Agents</span>
             <div style={{ display: 'flex', gap: 4 }}>
@@ -5086,11 +5149,18 @@ export function AgentsPage() {
         </div>
 
         {/* ── Right panel: Chat ── */}
-        <div className={styles.chatPanel}>
+        <div className={`${styles.chatPanel} ${mobileChatOpen ? styles.chatPanelMobileOpen : styles.chatPanelMobileHidden}`}>
           {activeAgent && activeConvId ? (
             <>
               {/* Chat header */}
               <div className={styles.chatHeader}>
+                <button
+                  className={styles.mobileBackBtn}
+                  onClick={() => setMobileChatOpen(false)}
+                  aria-label="Back to agents"
+                >
+                  <ArrowLeft size={18} />
+                </button>
                 <div className={styles.chatHeaderInfo}>
                   <AgentAvatar
                     icon={activeAgent.avatarIcon || 'spark'}
