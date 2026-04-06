@@ -33,6 +33,7 @@ import {
   getActiveMessagePath,
   editMessageAndBranch,
   switchBranch,
+  getPreviousUserMessageIdForConversationMessage,
   AgentChatError,
 } from '../services/agent-chat.js';
 import { listAgentRuns } from '../services/agent-runs.js';
@@ -103,6 +104,7 @@ function requireConversationExists(conversationId: string, agentId: string) {
 function serializeActivePathEntries(conversationId: string) {
   return getActiveMessagePath(conversationId).map((msg) => ({
     ...msg,
+    previousUserMessageId: getPreviousUserMessageIdForConversationMessage(conversationId, msg),
     siblingIndex: msg._siblingIndex,
     siblingCount: msg._siblingCount,
     siblingIds: msg._siblingIds,
@@ -375,6 +377,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
         body: z.object({
           prompt: z.string().min(1).max(50000),
           conversationId: z.string(),
+          messageId: z.string(),
+          previousUserMessageId: z.string().nullable().optional(),
         }),
       },
     },
@@ -393,6 +397,10 @@ export async function agentChatRoutes(app: FastifyInstance) {
           request.params.id,
           request.body.conversationId,
           request.body.prompt,
+          {
+            queuedMessageId: request.body.messageId,
+            previousUserMessageId: request.body.previousUserMessageId ?? null,
+          },
         );
         const statusCode = wasQueuedOrBusy ? 202 : 201;
         return reply.status(statusCode).send({
@@ -580,6 +588,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
         params: z.object({ id: z.string() }),
         body: z.object({
           conversationId: z.string(),
+          targetMessageId: z.string().optional(),
         }),
       },
     },
@@ -591,9 +600,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireConversationExists(request.body.conversationId, request.params.id);
 
       try {
-        const activePath = getActiveMessagePath(request.body.conversationId);
-        const leaf = activePath.length > 0 ? activePath[activePath.length - 1] : null;
-        const targetMessageId = typeof leaf?.id === 'string' ? (leaf.id as string) : null;
+        const targetMessageId =
+          request.body.targetMessageId ??
+          (() => {
+            const activePath = getActiveMessagePath(request.body.conversationId);
+            const leaf = activePath.length > 0 ? activePath[activePath.length - 1] : null;
+            return typeof leaf?.id === 'string' ? (leaf.id as string) : null;
+          })();
         if (!targetMessageId) {
           throw ApiError.badRequest(
             'response_target_missing',
@@ -636,7 +649,9 @@ export async function agentChatRoutes(app: FastifyInstance) {
         summary: 'Edit a user message and create a new conversation branch',
         params: z.object({ id: z.string(), cid: z.string() }),
         body: z.object({
-          messageId: z.string(),
+          originalMessageId: z.string(),
+          newMessageId: z.string(),
+          previousUserMessageId: z.string().nullable().optional(),
           content: z.string().max(50000),
           keepStoragePaths: z.array(z.string()).max(10).optional(),
         }),
@@ -652,9 +667,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
       try {
         const newMessage = editMessageAndBranch(
           request.params.cid,
-          request.body.messageId,
+          request.body.originalMessageId,
           request.body.content,
-          { keepStoragePaths: request.body.keepStoragePaths },
+          {
+            newMessageId: request.body.newMessageId,
+            previousUserMessageId: request.body.previousUserMessageId ?? null,
+            keepStoragePaths: request.body.keepStoragePaths,
+          },
         );
 
         // Queue the edited prompt for processing
@@ -708,15 +727,22 @@ export async function agentChatRoutes(app: FastifyInstance) {
 
       const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
-      let messageId: string | undefined;
+      let originalMessageId: string | undefined;
+      let newMessageId: string | undefined;
+      let previousUserMessageId: string | null = null;
       let content = '';
       const keepStoragePaths: string[] = [];
       const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
 
       for await (const part of parts) {
         if (part.type === 'field') {
-          if (part.fieldname === 'messageId') messageId = part.value as string;
-          else if (part.fieldname === 'content') content = (part.value as string) || '';
+          if (part.fieldname === 'messageId') originalMessageId = part.value as string;
+          else if (part.fieldname === 'newMessageId') newMessageId = part.value as string;
+          else if (part.fieldname === 'previousUserMessageId') {
+            previousUserMessageId = ((part.value as string) || '').trim() || null;
+          } else if (part.fieldname === 'content') {
+            content = (part.value as string) || '';
+          }
           else if (part.fieldname === 'keepStoragePaths' && typeof part.value === 'string') {
             keepStoragePaths.push(part.value);
           }
@@ -734,8 +760,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
         }
       }
 
-      if (!messageId) {
+      if (!originalMessageId) {
         throw ApiError.badRequest('message_id_required', 'messageId is required');
+      }
+      if (!newMessageId) {
+        throw ApiError.badRequest('new_message_id_required', 'newMessageId is required');
       }
       if (!content.trim() && fileParts.length === 0 && keepStoragePaths.length === 0) {
         throw ApiError.badRequest('message_content_required', 'Content or files are required');
@@ -743,10 +772,17 @@ export async function agentChatRoutes(app: FastifyInstance) {
 
       try {
         const attachments = await persistUploadedChatFiles(fileParts);
-        const newMessage = editMessageAndBranch(request.params.cid, messageId, content.trim(), {
-          attachments,
-          keepStoragePaths,
-        });
+        const newMessage = editMessageAndBranch(
+          request.params.cid,
+          originalMessageId,
+          content.trim(),
+          {
+            newMessageId,
+            previousUserMessageId,
+            attachments,
+            keepStoragePaths,
+          },
+        );
 
         const willQueueBehind = !canRespondToMessageStartImmediately(
           request.params.id,
@@ -819,13 +855,20 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
       let conversationId: string | undefined;
+      let messageId: string | undefined;
+      let previousUserMessageId: string | null = null;
       let caption: string | null = null;
       const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
 
       for await (const part of parts) {
         if (part.type === 'field') {
           if (part.fieldname === 'conversationId') conversationId = part.value as string;
-          else if (part.fieldname === 'caption') caption = (part.value as string) || null;
+          else if (part.fieldname === 'messageId') messageId = part.value as string;
+          else if (part.fieldname === 'previousUserMessageId') {
+            previousUserMessageId = ((part.value as string) || '').trim() || null;
+          } else if (part.fieldname === 'caption') {
+            caption = (part.value as string) || null;
+          }
         } else if (part.type === 'file') {
           if (fileParts.length >= MAX_ATTACHMENTS) continue;
           const chunks: Buffer[] = [];
@@ -846,6 +889,9 @@ export async function agentChatRoutes(app: FastifyInstance) {
       if (!conversationId) {
         throw ApiError.badRequest('conversation_id_required', 'conversationId is required');
       }
+      if (!messageId) {
+        throw ApiError.badRequest('message_id_required', 'messageId is required');
+      }
 
       requireConversationExists(conversationId, request.params.id);
 
@@ -856,11 +902,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
         : 'file';
 
       const message = saveAgentConversationMessage({
+        id: messageId,
         conversationId,
         direction: 'outbound',
         content: caption || '',
         type: messageType,
         attachments,
+        previousUserMessageId,
       });
 
       return reply.status(201).send(message);

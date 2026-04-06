@@ -1,9 +1,24 @@
+interface AgentChatAttachment {
+  type: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storagePath: string;
+}
+
 export interface AgentChatMessage {
   id: string;
   direction: 'inbound' | 'outbound';
   content: string;
   createdAt: string;
+  type?: string;
+  metadata?: string | null;
+  attachments?: AgentChatAttachment[] | null;
   parentId?: string | null;
+  previousUserMessageId?: string | null;
+  siblingIndex?: number;
+  siblingCount?: number;
+  siblingIds?: string[];
 }
 
 export interface AgentChatQueueItem {
@@ -17,6 +32,7 @@ export interface AgentChatQueueItem {
   createdAt: string;
   targetMessageId?: string | null;
   queuedMessageId?: string | null;
+  previousUserMessageId?: string | null;
   runId?: string | null;
   errorMessage?: string | null;
 }
@@ -33,16 +49,21 @@ export type QueueExecutionMode = NonNullable<AgentChatQueueItem['mode']>;
 export interface BuildAgentConversationViewModelOptions {
   messages: AgentChatMessage[];
   queueItems: AgentChatQueueItem[];
-  activeConversationRun: AgentConversationRunSummary | null;
+  activeConversationRuns: AgentConversationRunSummary[];
   activeAgentId: string | null;
   activeConvId: string | null;
   activeConversationKey: string | null;
   optimisticResponseParentIds: Record<string, string | null | undefined>;
-  streaming: boolean;
 }
 
 export interface AgentConversationViewModel {
+  visibleMessages: AgentChatMessage[];
   queuedQueueItems: AgentChatQueueItem[];
+  queuedMessages: {
+    message: AgentChatMessage;
+    status: 'queued' | 'processing';
+    queueItem: AgentChatQueueItem | null;
+  }[];
   notifyQueueItems: AgentChatQueueItem[];
   effectivePendingBranchExecutionsByMessageId: Map<string, AgentChatQueueItem[]>;
   errorsByMessageId: Map<string, AgentChatQueueItem[]>;
@@ -77,41 +98,113 @@ export function getBranchTargetIdByOffset(
   return branchIds[targetIdx] ?? null;
 }
 
+const ROOT_PREVIOUS_USER_MESSAGE_KEY = '__root__';
+
+function compareByCreatedAt(
+  a: Pick<AgentChatMessage, 'createdAt' | 'id'>,
+  b: Pick<AgentChatMessage, 'createdAt' | 'id'>,
+): number {
+  const createdAtDelta = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  if (createdAtDelta !== 0) return createdAtDelta;
+  return a.id.localeCompare(b.id);
+}
+
 export function buildAgentConversationViewModel(
   options: BuildAgentConversationViewModelOptions,
 ): AgentConversationViewModel {
   const {
     messages,
     queueItems,
-    activeConversationRun,
+    activeConversationRuns,
     activeAgentId,
     activeConvId,
     activeConversationKey,
     optimisticResponseParentIds,
-    streaming,
   } = options;
 
-  const queuedQueueItems = queueItems.filter(
-    (item) => item.status === 'queued' && getQueueItemMode(item) === 'append_prompt',
+  const activeBranchMessages = [...messages].sort(compareByCreatedAt);
+  const activeBranchMessageIds = new Set(activeBranchMessages.map((message) => message.id));
+  const activeBranchUserMessages = activeBranchMessages.filter(
+    (message) => message.direction === 'outbound',
   );
+  const activeBranchUserMessageIds = new Set(activeBranchUserMessages.map((message) => message.id));
+  const agentResponseParentIds = new Set(
+    activeBranchMessages
+      .filter((message) => message.direction === 'inbound')
+      .map((message) => message.parentId ?? null)
+      .filter((parentId): parentId is string => Boolean(parentId)),
+  );
+  const queuedStyleUserMessageIds = new Set(
+    activeBranchUserMessages
+      .filter((message) => {
+        const previousUserMessageId = message.previousUserMessageId ?? null;
+        if (!previousUserMessageId) return false;
+        if (!activeBranchUserMessageIds.has(previousUserMessageId)) return false;
+        return !agentResponseParentIds.has(previousUserMessageId);
+      })
+      .map((message) => message.id),
+  );
+  const visibleMessages = activeBranchMessages.filter((message) => {
+    if (message.direction !== 'outbound') return true;
+    return !queuedStyleUserMessageIds.has(message.id);
+  });
+  const activeMessageIds = new Set(visibleMessages.map((message) => message.id));
+  const hiddenPendingMessageIds = new Set(
+    queueItems
+      .filter(
+        (item) =>
+          getQueueItemMode(item) === 'append_prompt' &&
+          (item.status === 'queued' || item.status === 'processing') &&
+          Boolean(item.queuedMessageId),
+      )
+      .map((item) => item.queuedMessageId!),
+  );
+  const selectedUserMessageIdByPreviousMessageId = new Map<string, string>();
+  for (const message of activeBranchMessages) {
+    if (message.direction !== 'outbound') continue;
+    const key = message.previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
+    selectedUserMessageIdByPreviousMessageId.set(key, message.id);
+  }
+
+  const queuedQueueItems = queueItems
+    .filter((item) => {
+      if (getQueueItemMode(item) !== 'append_prompt') {
+        return false;
+      }
+      if (item.status !== 'queued' && item.status !== 'processing') return false;
+
+      const previousUserMessageId = item.previousUserMessageId ?? null;
+      const queuedMessageId = item.queuedMessageId ?? null;
+      const selectionKey = previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
+      const selectedMessageId = selectedUserMessageIdByPreviousMessageId.get(selectionKey) ?? null;
+
+      if (selectedMessageId && queuedMessageId && selectedMessageId !== queuedMessageId) {
+        return false;
+      }
+
+      return (
+        previousUserMessageId === null || activeBranchUserMessageIds.has(previousUserMessageId)
+      );
+    })
+    .sort(compareByCreatedAt);
   const notifyQueueItems = queueItems.filter(
     (item) => item.status === 'failed' || item.status === 'cancelled',
   );
 
-  const activeMessageIds = new Set(messages.map((message) => message.id));
   const activeChildParentIds = new Set(
-    messages
+    visibleMessages
       .map((message) => message.parentId ?? null)
       .filter((parentId): parentId is string => Boolean(parentId)),
   );
   const pendingBranchExecutionsByMessageId = new Map<string, AgentChatQueueItem[]>();
   for (const item of queueItems) {
-    if (getQueueItemMode(item) !== 'respond_to_message') continue;
     if (item.status !== 'queued' && item.status !== 'processing') continue;
-    if (!item.targetMessageId) continue;
-    const entries = pendingBranchExecutionsByMessageId.get(item.targetMessageId) ?? [];
+    if (getQueueItemMode(item) !== 'respond_to_message') continue;
+    const anchorId = item.targetMessageId;
+    if (!anchorId) continue;
+    const entries = pendingBranchExecutionsByMessageId.get(anchorId) ?? [];
     entries.push(item);
-    pendingBranchExecutionsByMessageId.set(item.targetMessageId, entries);
+    pendingBranchExecutionsByMessageId.set(anchorId, entries);
   }
 
   const effectivePendingBranchExecutionsByMessageId = new Map<string, AgentChatQueueItem[]>();
@@ -119,41 +212,71 @@ export function buildAgentConversationViewModel(
     effectivePendingBranchExecutionsByMessageId.set(messageId, [...items]);
   }
 
-  if (
-    activeConversationRun?.status === 'running' &&
-    activeConversationRun.responseParentId &&
-    activeMessageIds.has(activeConversationRun.responseParentId)
-  ) {
-    const messageId = activeConversationRun.responseParentId;
+  const liveAppendQueueItemByMessageId = new Map<string, AgentChatQueueItem>();
+  for (const item of queueItems) {
+    if (getQueueItemMode(item) !== 'append_prompt') continue;
+    if (item.status !== 'queued' && item.status !== 'processing') continue;
+    const queuedMessageId = item.queuedMessageId ?? null;
+    if (!queuedMessageId) continue;
+    const existingItem = liveAppendQueueItemByMessageId.get(queuedMessageId);
+    if (!existingItem || existingItem.status !== 'processing') {
+      liveAppendQueueItemByMessageId.set(queuedMessageId, item);
+    }
+  }
+
+  const visibleConversationRuns = activeConversationRuns.filter(
+    (run) => run.status === 'running' && Boolean(run.responseParentId) && activeMessageIds.has(run.responseParentId!),
+  );
+
+  for (const run of visibleConversationRuns) {
+    const messageId = run.responseParentId!;
     const existingItems = effectivePendingBranchExecutionsByMessageId.get(messageId) ?? [];
     const hasProcessingExecution = existingItems.some((item) => item.status === 'processing');
     if (!hasProcessingExecution && activeAgentId && activeConvId) {
       existingItems.push({
-        id: `run-${activeConversationRun.id}`,
+        id: `run-${run.id}`,
         agentId: activeAgentId,
         conversationId: activeConvId,
         mode: 'respond_to_message',
         prompt: '',
         status: 'processing',
         attempts: 0,
-        createdAt: activeConversationRun.startedAt,
+        createdAt: run.startedAt,
         targetMessageId: messageId,
-        runId: activeConversationRun.id,
+        runId: run.id,
       });
       effectivePendingBranchExecutionsByMessageId.set(messageId, existingItems);
     }
   }
 
+  const queuedMessages = activeBranchUserMessages
+    .filter((message) => queuedStyleUserMessageIds.has(message.id))
+    .map((message) => {
+      const appendQueueItem = liveAppendQueueItemByMessageId.get(message.id) ?? null;
+      const pendingExecutions = effectivePendingBranchExecutionsByMessageId.get(message.id) ?? [];
+      const hasProcessingExecution =
+        appendQueueItem?.status === 'processing' ||
+        pendingExecutions.some((item) => item.status === 'processing');
+      const status: 'queued' | 'processing' = hasProcessingExecution
+        ? 'processing'
+        : 'queued';
+      return {
+        message,
+        status,
+        queueItem: appendQueueItem,
+      };
+    });
+
   function shouldHideBranchError(item: AgentChatQueueItem): boolean {
-    if (getQueueItemMode(item) !== 'respond_to_message' || !item.targetMessageId) {
+    const anchorId = item.targetMessageId ?? item.queuedMessageId;
+    if (!anchorId) {
       return false;
     }
-    if (activeChildParentIds.has(item.targetMessageId)) {
+    if (item.targetMessageId && activeChildParentIds.has(item.targetMessageId)) {
       return true;
     }
 
-    const pendingExecutions =
-      effectivePendingBranchExecutionsByMessageId.get(item.targetMessageId) ?? [];
+    const pendingExecutions = effectivePendingBranchExecutionsByMessageId.get(anchorId) ?? [];
     return pendingExecutions.some((pendingItem) => pendingItem.id !== item.id);
   }
 
@@ -175,46 +298,61 @@ export function buildAgentConversationViewModel(
     }
     const anchorId = item.targetMessageId ?? item.queuedMessageId;
     if (!anchorId) return true;
+    if (hiddenPendingMessageIds.has(anchorId)) return true;
     // If the anchor exists but isn't on the active path, the error belongs
     // to a different branch and should be hidden — not shown as an orphan.
     return false;
   });
 
   let activeProcessingTargetMessageId: string | null = null;
-  if (activeConversationRun?.status === 'running' && activeConversationRun.responseParentId) {
-    activeProcessingTargetMessageId = activeConversationRun.responseParentId;
+  if (visibleConversationRuns.length > 0) {
+    activeProcessingTargetMessageId = visibleConversationRuns[0].responseParentId ?? null;
   } else {
-    const processingQueueItem = queueItems.find(
-      (item) =>
-        item.status === 'processing' &&
-        getQueueItemMode(item) === 'respond_to_message' &&
-        item.targetMessageId,
-    );
-    if (processingQueueItem?.targetMessageId) {
-      activeProcessingTargetMessageId = processingQueueItem.targetMessageId;
+    const processingQueueItem = queueItems.find((item) => {
+        if (item.status !== 'processing') return false;
+        if (getQueueItemMode(item) !== 'respond_to_message') return false;
+        const anchorId = item.targetMessageId;
+        return Boolean(anchorId && activeMessageIds.has(anchorId));
+      });
+    if (processingQueueItem) {
+      activeProcessingTargetMessageId = processingQueueItem.targetMessageId ?? null;
     } else {
-      const queuedBranchItem = queueItems.find(
-        (item) =>
-          item.status === 'queued' &&
-          getQueueItemMode(item) === 'respond_to_message' &&
-          item.targetMessageId,
-      );
-      if (queuedBranchItem?.targetMessageId) {
-        activeProcessingTargetMessageId = queuedBranchItem.targetMessageId;
-      } else if (activeConversationKey) {
+      const queuedBranchItem = queueItems.find((item) => {
+          if (item.status !== 'queued') return false;
+          const anchorId =
+            getQueueItemMode(item) === 'respond_to_message'
+              ? item.targetMessageId
+              : item.queuedMessageId;
+          return Boolean(anchorId && activeMessageIds.has(anchorId));
+        });
+      if (queuedBranchItem) {
         activeProcessingTargetMessageId =
-          optimisticResponseParentIds[activeConversationKey] ?? null;
+          (getQueueItemMode(queuedBranchItem) === 'respond_to_message'
+            ? queuedBranchItem.targetMessageId
+            : queuedBranchItem.queuedMessageId) ?? null;
+      } else if (activeConversationKey) {
+        const optimisticTargetId = optimisticResponseParentIds[activeConversationKey] ?? null;
+        activeProcessingTargetMessageId =
+          optimisticTargetId && activeMessageIds.has(optimisticTargetId) ? optimisticTargetId : null;
       }
     }
   }
 
-  const activeLeafMessageId = messages.length > 0 ? messages[messages.length - 1].id : null;
-  const showStreamingBubble =
-    streaming &&
-    (!activeProcessingTargetMessageId || activeProcessingTargetMessageId === activeLeafMessageId);
+  const hasQueuedAppendProcessing = queuedQueueItems.some((item) => item.status === 'processing');
+  const hasVisibleRespondProcessing =
+    visibleConversationRuns.length > 0 ||
+    queueItems.some(
+      (item) =>
+        item.status === 'processing' &&
+        getQueueItemMode(item) === 'respond_to_message' &&
+        Boolean(item.targetMessageId && activeBranchMessageIds.has(item.targetMessageId)),
+    );
+  const showStreamingBubble = hasQueuedAppendProcessing || hasVisibleRespondProcessing;
 
   return {
+    visibleMessages,
     queuedQueueItems,
+    queuedMessages,
     notifyQueueItems,
     effectivePendingBranchExecutionsByMessageId,
     errorsByMessageId,

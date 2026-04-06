@@ -608,6 +608,23 @@ function getSelectableBranchChildren(
   );
 }
 
+function getSelectableReplyChildren(
+  childrenMap: Map<string, Record<string, unknown>[]>,
+  parentId: string,
+): Record<string, unknown>[] {
+  return getSelectableBranchChildren(childrenMap, parentId).filter(
+    (message) => message.direction !== 'outbound',
+  );
+}
+
+function getUserBranchSelectionKey(previousUserMessageId: string | null): string {
+  return `user:${previousUserMessageId ?? ROOT_BRANCH_KEY}`;
+}
+
+function getReplyBranchSelectionKey(userMessageId: string): string {
+  return `reply:${userMessageId}`;
+}
+
 function withSelectedSiblingMetadata(
   message: Record<string, unknown>,
   siblings: Record<string, unknown>[],
@@ -678,32 +695,44 @@ export function getActiveMessagePath(conversationId: string): TreePathMessage[] 
 
   if (allMessages.length === 0) return [];
 
-  // Non-tree conversation: return flat list
-  if (!allMessages.some((m) => m.parentId != null)) {
-    return allMessages.map((m) => ({ ...m }));
-  }
-
   const activeBranches = getActiveBranches(conversationId);
   const childrenMap = buildChildrenMap(allMessages);
+  const userMessages = allMessages.filter((message) => message.direction === 'outbound');
+  const userVariantsByPreviousMessageId = new Map<string | null, Record<string, unknown>[]>();
+  for (const message of userMessages) {
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      message,
+    );
+    const variants = userVariantsByPreviousMessageId.get(previousUserMessageId);
+    if (variants) variants.push(message);
+    else userVariantsByPreviousMessageId.set(previousUserMessageId, [message]);
+  }
 
-  // Walk the tree following active branches
   const path: TreePathMessage[] = [];
-  let currentParent = ROOT_BRANCH_KEY;
+  let previousUserMessageId: string | null = null;
 
   while (true) {
-    const siblings = getSelectableBranchChildren(childrenMap, currentParent);
-    if (!siblings || siblings.length === 0) break;
+    const userVariants = userVariantsByPreviousMessageId.get(previousUserMessageId) ?? [];
+    if (userVariants.length === 0) break;
 
-    const activeChildId = activeBranches[currentParent];
-    let activeChild: Record<string, unknown> | undefined;
-    if (activeChildId) {
-      activeChild = siblings.find((s) => s.id === activeChildId);
+    const activeUserId = activeBranches[getUserBranchSelectionKey(previousUserMessageId)];
+    const selectedUser =
+      userVariants.find((variant) => variant.id === activeUserId) ??
+      userVariants[userVariants.length - 1];
+    path.push(withSelectedSiblingMetadata(selectedUser, userVariants));
+
+    const selectedUserId = selectedUser.id as string;
+    const replyVariants = getSelectableReplyChildren(childrenMap, selectedUserId);
+    if (replyVariants.length > 0) {
+      const activeReplyId = activeBranches[getReplyBranchSelectionKey(selectedUserId)];
+      const selectedReply =
+        replyVariants.find((variant) => variant.id === activeReplyId) ??
+        replyVariants[replyVariants.length - 1];
+      path.push(withSelectedSiblingMetadata(selectedReply, replyVariants));
     }
-    // Default to latest sibling
-    if (!activeChild) activeChild = siblings[siblings.length - 1];
 
-    path.push(withSelectedSiblingMetadata(activeChild, siblings));
-    currentParent = activeChild.id as string;
+    previousUserMessageId = selectedUserId;
   }
 
   return path;
@@ -712,32 +741,64 @@ export function getActiveMessagePath(conversationId: string): TreePathMessage[] 
 function getMessagePathToLeaf(conversationId: string, leafMessageId: string): TreePathMessage[] {
   const allMessages = listConversationMessages(conversationId);
   if (allMessages.length === 0) return [];
-
-  if (!allMessages.some((m) => m.parentId != null)) {
-    const leafIndex = allMessages.findIndex((message) => message.id === leafMessageId);
-    if (leafIndex === -1) return [];
-    return allMessages.slice(0, leafIndex + 1).map((message) => ({ ...message }));
-  }
-
   const messagesById = new Map(allMessages.map((message) => [message.id as string, message]));
   const leaf = messagesById.get(leafMessageId);
   if (!leaf) return [];
-
   const childrenMap = buildChildrenMap(allMessages);
-  const lineage: Record<string, unknown>[] = [];
-  let current: Record<string, unknown> | null = leaf;
-
-  while (current) {
-    lineage.push(current);
-    const parentId = current.parentId as string | null;
-    current = parentId ? (messagesById.get(parentId) ?? null) : null;
+  const userMessages = allMessages.filter((message) => message.direction === 'outbound');
+  const userVariantsByPreviousMessageId = new Map<string | null, Record<string, unknown>[]>();
+  for (const message of userMessages) {
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      message,
+    );
+    const variants = userVariantsByPreviousMessageId.get(previousUserMessageId);
+    if (variants) variants.push(message);
+    else userVariantsByPreviousMessageId.set(previousUserMessageId, [message]);
   }
 
-  return lineage.reverse().map((message) => {
-    const parentId = (message.parentId as string | null) ?? ROOT_BRANCH_KEY;
-    const siblings = getSelectableBranchChildren(childrenMap, parentId);
-    return withSelectedSiblingMetadata(message, siblings);
-  });
+  const targetUser =
+    leaf.direction === 'outbound'
+      ? leaf
+      : typeof leaf.parentId === 'string'
+        ? (messagesById.get(leaf.parentId as string) ?? null)
+        : null;
+  if (!targetUser || targetUser.direction !== 'outbound') return [];
+
+  const userLineage: Record<string, unknown>[] = [];
+  let currentUser: Record<string, unknown> | null = targetUser;
+  while (currentUser) {
+    userLineage.push(currentUser);
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      currentUser,
+    );
+    currentUser = previousUserMessageId ? (messagesById.get(previousUserMessageId) ?? null) : null;
+  }
+
+  const path: TreePathMessage[] = [];
+  for (const userMessage of userLineage.reverse()) {
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      userMessage,
+    );
+    const userVariants = userVariantsByPreviousMessageId.get(previousUserMessageId) ?? [];
+    path.push(withSelectedSiblingMetadata(userMessage, userVariants));
+
+    const replyVariants = getSelectableReplyChildren(childrenMap, userMessage.id as string);
+    if (replyVariants.length === 0) continue;
+
+    if (userMessage.id === targetUser.id) {
+      if (leaf.direction === 'inbound') {
+        path.push(withSelectedSiblingMetadata(leaf, replyVariants));
+      }
+      break;
+    }
+
+    path.push(withSelectedSiblingMetadata(replyVariants[replyVariants.length - 1], replyVariants));
+  }
+
+  return path;
 }
 
 /**
@@ -759,6 +820,117 @@ function getCurrentConversationLeafId(conversationId: string): string | null {
 
   const leaf = getActivePathLeaf(conversationId);
   return leaf && typeof leaf.id === 'string' ? (leaf.id as string) : null;
+}
+
+function findPreviousOutboundAncestor(
+  conversationId: string,
+  startingParentId: string | null,
+): string | null {
+  let currentParentId = startingParentId;
+  while (currentParentId) {
+    const current = store.getById('messages', currentParentId);
+    if (!current || current.conversationId !== conversationId) break;
+    if (current.direction === 'outbound') {
+      return current.id as string;
+    }
+    currentParentId = (current.parentId as string | null) ?? null;
+  }
+  return null;
+}
+
+export function getPreviousUserMessageIdForConversationMessage(
+  conversationId: string,
+  message: Record<string, unknown>,
+): string | null {
+  if (message.direction === 'outbound' && typeof message.parentId === 'string') {
+    const parentMessage = store.getById('messages', message.parentId as string);
+    if (
+      parentMessage &&
+      parentMessage.conversationId === conversationId &&
+      parentMessage.direction === 'outbound'
+    ) {
+      return getPreviousUserMessageIdForConversationMessage(conversationId, parentMessage);
+    }
+  }
+
+  const stored =
+    typeof message.previousUserMessageId === 'string'
+      ? (message.previousUserMessageId as string)
+      : null;
+  if (stored) return stored;
+  return findPreviousOutboundAncestor(conversationId, (message.parentId as string | null) ?? null);
+}
+
+function resolvePreviousUserMessageId(
+  conversationId: string,
+  previousUserMessageId: string | null,
+): string | null {
+  if (!previousUserMessageId) return null;
+  const message = store.getById('messages', previousUserMessageId);
+  if (message && message.conversationId === conversationId) {
+    if (message.direction !== 'outbound') {
+      throw AgentChatError.badRequest(
+        'previous_user_message_invalid',
+        'Previous user message must be a user message',
+      );
+    }
+    return previousUserMessageId;
+  }
+
+  const pendingQueuedMessage = store.findOne(
+    AGENT_CHAT_QUEUE_COLLECTION,
+    (record: Record<string, unknown>) =>
+      record.conversationId === conversationId &&
+      record.queuedMessageId === previousUserMessageId &&
+      getQueueItemMode(record) === 'append_prompt' &&
+      (record.status === 'queued' || record.status === 'processing'),
+  );
+  if (pendingQueuedMessage) {
+    return previousUserMessageId;
+  }
+
+  throw AgentChatError.notFound(
+    'previous_user_message_not_found',
+    'Previous user message not found',
+  );
+}
+
+function getContinuationParentIdForPreviousUserMessage(
+  conversationId: string,
+  previousUserMessageId: string | null,
+): string | null {
+  const normalizedPreviousUserMessageId = resolvePreviousUserMessageId(
+    conversationId,
+    previousUserMessageId,
+  );
+  if (!normalizedPreviousUserMessageId) return null;
+  const previousUserMessage = store.getById('messages', normalizedPreviousUserMessageId);
+  if (!previousUserMessage || previousUserMessage.conversationId !== conversationId) {
+    return null;
+  }
+
+  let currentId = normalizedPreviousUserMessageId;
+  while (true) {
+    const activeChildren = getSelectableReplyChildren(
+      buildChildrenMap(listConversationMessages(conversationId)),
+      currentId,
+    );
+    if (activeChildren.length === 0) {
+      return currentId;
+    }
+
+    const activeChildId = getActiveBranchSelection(
+      conversationId,
+      getReplyBranchSelectionKey(currentId),
+    );
+    const selectedChild =
+      activeChildren.find((child) => child.id === activeChildId) ??
+      activeChildren[activeChildren.length - 1];
+    if (!selectedChild) {
+      return currentId;
+    }
+    currentId = selectedChild.id as string;
+  }
 }
 
 function setActiveBranchSelection(
@@ -787,13 +959,45 @@ function shouldAutoSelectNewChild(
 }
 
 function activateMessagePath(conversationId: string, leafMessageId: string): void {
-  const path = getMessagePathToLeaf(conversationId, leafMessageId);
-  for (const message of path) {
-    if (typeof message.id !== 'string') continue;
+  const messages = listConversationMessages(conversationId);
+  const messagesById = new Map(messages.map((message) => [message.id as string, message]));
+  const leaf = messagesById.get(leafMessageId);
+  if (!leaf) return;
+
+  const targetUser =
+    leaf.direction === 'outbound'
+      ? leaf
+      : typeof leaf.parentId === 'string'
+        ? (messagesById.get(leaf.parentId as string) ?? null)
+        : null;
+  if (!targetUser || targetUser.direction !== 'outbound') return;
+
+  const userLineage: Record<string, unknown>[] = [];
+  let currentUser: Record<string, unknown> | null = targetUser;
+  while (currentUser) {
+    userLineage.push(currentUser);
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      currentUser,
+    );
+    currentUser = previousUserMessageId ? (messagesById.get(previousUserMessageId) ?? null) : null;
+  }
+
+  for (const userMessage of userLineage.reverse()) {
     setActiveBranchSelection(
       conversationId,
-      (message.parentId as string | null) ?? null,
-      message.id as string,
+      getUserBranchSelectionKey(
+        getPreviousUserMessageIdForConversationMessage(conversationId, userMessage),
+      ),
+      userMessage.id as string,
+    );
+  }
+
+  if (leaf.direction === 'inbound') {
+    setActiveBranchSelection(
+      conversationId,
+      getReplyBranchSelectionKey(targetUser.id as string),
+      leaf.id as string,
     );
   }
 }
@@ -807,6 +1011,8 @@ export function editMessageAndBranch(
   messageId: string,
   newContent: string,
   options: {
+    newMessageId?: string | null;
+    previousUserMessageId?: string | null;
     attachments?: unknown[] | null;
     keepStoragePaths?: string[] | null;
   } = {},
@@ -832,7 +1038,15 @@ export function editMessageAndBranch(
     );
   }
 
-  const parentId = (original.parentId as string | null) ?? null;
+  const derivedPreviousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+    conversationId,
+    original,
+  );
+  const previousUserMessageId = resolvePreviousUserMessageId(
+    conversationId,
+    derivedPreviousUserMessageId,
+  );
+  const parentId = ((original.parentId as string | null | undefined) ?? null);
   const originalAttachments =
     original.type === 'image' || original.type === 'file'
       ? cloneAttachmentRecords(parseAttachments(original.attachments))
@@ -878,6 +1092,7 @@ export function editMessageAndBranch(
 
   // Create new sibling message
   const msg = store.insert('messages', {
+    id: options.newMessageId ?? undefined,
     conversationId,
     direction: 'outbound',
     type: nextType,
@@ -886,10 +1101,11 @@ export function editMessageAndBranch(
     attachments: normalizedAttachments,
     metadata: null,
     parentId,
+    previousUserMessageId,
   });
 
-  // Update active branch so the parent points to the new message
-  setActiveBranchSelection(conversationId, parentId, msg.id as string);
+  // Make the edited branch the selected visible path across its full lineage.
+  activateMessagePath(conversationId, msg.id as string);
 
   store.update('conversations', conversationId, {
     lastMessageAt: new Date().toISOString(),
@@ -908,10 +1124,22 @@ export function switchBranch(conversationId: string, messageId: string): void {
     throw AgentChatError.notFound('message_not_found', 'Message not found');
   }
 
-  const parentId = msg.parentId as string | null;
-  const siblings = listConversationMessages(conversationId)
-    .filter((candidate) => ((candidate.parentId as string | null) ?? null) === (parentId ?? null))
-    .filter((candidate) => !isNonFinalAgentUpdateMessage(candidate));
+  const allMessages = listConversationMessages(conversationId);
+  const siblings =
+    msg.direction === 'outbound'
+      ? allMessages.filter(
+          (candidate) =>
+            candidate.direction === 'outbound' &&
+            getPreviousUserMessageIdForConversationMessage(conversationId, candidate) ===
+              getPreviousUserMessageIdForConversationMessage(conversationId, msg),
+        )
+      : allMessages
+          .filter(
+            (candidate) =>
+              ((candidate.parentId as string | null) ?? null) ===
+                ((msg.parentId as string | null) ?? null) && candidate.direction !== 'outbound',
+          )
+          .filter((candidate) => !isNonFinalAgentUpdateMessage(candidate));
   if (siblings.length <= 1 || !siblings.some((candidate) => candidate.id === messageId)) {
     throw AgentChatError.badRequest(
       'invalid_branch_choice',
@@ -919,7 +1147,7 @@ export function switchBranch(conversationId: string, messageId: string): void {
     );
   }
 
-  setActiveBranchSelection(conversationId, parentId, messageId);
+  activateMessagePath(conversationId, messageId);
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +1157,7 @@ export function switchBranch(conversationId: string, messageId: string): void {
 type AgentConversationMessageType = 'text' | 'system' | 'file';
 
 interface SaveAgentMessageParams {
+  id?: string;
   conversationId: string;
   direction: 'inbound' | 'outbound';
   content: string;
@@ -936,6 +1165,7 @@ interface SaveAgentMessageParams {
   metadata?: Record<string, unknown> | null;
   attachments?: unknown[] | null;
   parentId?: string | null;
+  previousUserMessageId?: string | null;
   updateActiveBranch?: boolean;
 }
 
@@ -954,15 +1184,27 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
   let parentId: string | null = null;
   if (params.parentId !== undefined) {
     parentId = params.parentId;
+  } else if (params.previousUserMessageId !== undefined) {
+    parentId = getContinuationParentIdForPreviousUserMessage(
+      params.conversationId,
+      params.previousUserMessageId ?? null,
+    );
   } else if (treeEnabled) {
     const leaf = getActivePathLeaf(params.conversationId);
     parentId = leaf ? (leaf.id as string) : null;
   }
+  const previousUserMessageId =
+    params.direction === 'outbound'
+      ? params.previousUserMessageId !== undefined
+        ? resolvePreviousUserMessageId(params.conversationId, params.previousUserMessageId ?? null)
+        : findPreviousOutboundAncestor(params.conversationId, parentId)
+      : null;
   const currentLeafId = canAdvanceActiveBranch
     ? getCurrentConversationLeafId(params.conversationId)
     : null;
 
   const msg = store.insert('messages', {
+    id: params.id,
     conversationId: params.conversationId,
     direction: params.direction,
     type: params.type ?? 'text',
@@ -971,6 +1213,7 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     attachments: params.attachments ?? null,
     metadata,
     parentId,
+    previousUserMessageId,
   });
 
   const markUnread = params.direction === 'inbound' && params.type !== 'system';
@@ -979,11 +1222,18 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     isUnread: markUnread,
   });
 
-  if (
-    canAdvanceActiveBranch &&
-    shouldAutoSelectNewChild(params.conversationId, parentId, currentLeafId)
-  ) {
-    setActiveBranchSelection(params.conversationId, parentId, msg.id as string);
+  if (canAdvanceActiveBranch) {
+    if (params.direction === 'outbound') {
+      const selectionKey = getUserBranchSelectionKey(previousUserMessageId);
+      if (shouldAutoSelectNewChild(params.conversationId, selectionKey, currentLeafId)) {
+        setActiveBranchSelection(params.conversationId, selectionKey, msg.id as string);
+      }
+    } else if (parentId) {
+      const selectionKey = getReplyBranchSelectionKey(parentId);
+      if (shouldAutoSelectNewChild(params.conversationId, selectionKey, currentLeafId)) {
+        setActiveBranchSelection(params.conversationId, selectionKey, msg.id as string);
+      }
+    }
   }
 
   if (params.direction === 'outbound') {
@@ -1016,6 +1266,54 @@ function getQueueItemAnchorMessageId(queueItem: Record<string, unknown>): string
     : null;
 }
 
+function getQueueItemDependencyId(queueItem: Record<string, unknown>): string | null {
+  return typeof queueItem.dependsOnQueueItemId === 'string'
+    ? (queueItem.dependsOnQueueItemId as string)
+    : null;
+}
+
+function findPendingBranchDependencyForAppendPrompt(
+  agentId: string,
+  conversationId: string,
+  previousUserMessageId: string | null,
+  continuationParentId: string | null,
+): Record<string, unknown> | null {
+  const pendingItems = listConversationQueueItems(agentId, conversationId).filter((item) =>
+    isPendingQueueItem(item),
+  );
+
+  if (previousUserMessageId) {
+    const queuedMessageDependency =
+      [...pendingItems]
+        .reverse()
+        .find(
+          (item) =>
+            getQueueItemMode(item) === 'append_prompt' &&
+            item.queuedMessageId === previousUserMessageId,
+        ) ?? null;
+    if (queuedMessageDependency) {
+      return queuedMessageDependency;
+    }
+  }
+
+  if (!continuationParentId) {
+    return null;
+  }
+
+  return (
+    [...pendingItems]
+      .reverse()
+      .find((item) => {
+        const mode = getQueueItemMode(item);
+        if (mode === 'respond_to_message') {
+          return item.targetMessageId === continuationParentId;
+        }
+
+        return item.queuedMessageId === continuationParentId;
+      }) ?? null
+  );
+}
+
 function ensureQueuedPromptMessage(
   queueItemId: string,
   queueItem: Record<string, unknown>,
@@ -1038,7 +1336,13 @@ function ensureQueuedPromptMessage(
     return messageId;
   };
 
-  let parentId = getConversationMessageId(queueItem.continuationParentId);
+  let parentId =
+    typeof queueItem.previousUserMessageId === 'string' || queueItem.previousUserMessageId === null
+      ? getContinuationParentIdForPreviousUserMessage(
+          conversationId,
+          (queueItem.previousUserMessageId as string | null | undefined) ?? null,
+        )
+      : getConversationMessageId(queueItem.continuationParentId);
   const dependsOnQueueItemId =
     typeof queueItem.dependsOnQueueItemId === 'string'
       ? (queueItem.dependsOnQueueItemId as string)
@@ -1059,12 +1363,18 @@ function ensureQueuedPromptMessage(
   }
 
   const userMessage = saveAgentConversationMessage({
+    id:
+      typeof queueItem.queuedMessageId === 'string' ? (queueItem.queuedMessageId as string) : undefined,
     conversationId,
     direction: 'outbound',
     content: prompt,
     type: 'text',
     metadata: null,
     parentId,
+    previousUserMessageId:
+      typeof queueItem.previousUserMessageId === 'string' || queueItem.previousUserMessageId === null
+        ? ((queueItem.previousUserMessageId as string | null | undefined) ?? null)
+        : undefined,
   });
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     queuedMessageId: userMessage.id,
@@ -2937,6 +3247,52 @@ async function processQueueItem(
   }
 }
 
+function getQueuedItemBlockedDependency(
+  queueItems: Record<string, unknown>[],
+  queueItem: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const dependencyId = getQueueItemDependencyId(queueItem);
+  if (!dependencyId) return null;
+
+  const dependency = queueItems.find((item) => item.id === dependencyId) ?? null;
+  if (!dependency) return null;
+  return isPendingQueueItem(dependency) ? dependency : null;
+}
+
+function canStartQueuedItemNow(
+  agentId: string,
+  conversationId: string,
+  queueItems: Record<string, unknown>[],
+  queueItem: Record<string, unknown>,
+  now: number,
+): boolean {
+  if (queueItem.status !== 'queued') return false;
+
+  const nextAttemptAtMs = parseIsoDateMs(queueItem.nextAttemptAt);
+  if (Number.isFinite(nextAttemptAtMs) && nextAttemptAtMs > now) {
+    return false;
+  }
+
+  if (getQueuedItemBlockedDependency(queueItems, queueItem)) {
+    return false;
+  }
+
+  const mode = getQueueItemMode(queueItem);
+  if (mode === 'respond_to_message') {
+    const targetMessageId =
+      typeof queueItem.targetMessageId === 'string'
+        ? (queueItem.targetMessageId as string)
+        : null;
+    if (!targetMessageId) return true;
+    return !hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId);
+  }
+
+  const queuedMessageId =
+    typeof queueItem.queuedMessageId === 'string' ? (queueItem.queuedMessageId as string) : null;
+  if (!queuedMessageId) return true;
+  return !hasRunningProcessForTargetMessage(agentId, conversationId, queuedMessageId);
+}
+
 async function drainConversationQueue(agentId: string, conversationId: string): Promise<void> {
   const key = queueKey(agentId, conversationId);
   if (queueProcessors.has(key)) return;
@@ -2946,89 +3302,73 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
     while (true) {
       const queueItems = listConversationQueueItems(agentId, conversationId);
       const now = Date.now();
-      const readyItem = queueItems.find((item) => {
-        if (item.status !== 'queued') return false;
-        const nextAttemptAtMs = parseIsoDateMs(item.nextAttemptAt);
-        return !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= now;
-      });
+      const readyItems = queueItems.filter((item) =>
+        canStartQueuedItemNow(agentId, conversationId, queueItems, item, now),
+      );
 
-      if (!readyItem) {
-        const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
-        if (nextDelayMs !== null) {
-          scheduleQueueDrain(agentId, conversationId, nextDelayMs);
-        } else {
+      if (readyItems.length === 0) {
+        const hasQueuedItems = queueItems.some((item) => item.status === 'queued');
+        if (!hasQueuedItems) {
           clearQueueDrainTimerForKey(key);
+          return;
         }
+
+        const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
+        scheduleQueueDrain(
+          agentId,
+          conversationId,
+          nextDelayMs === null ? 1000 : Math.max(nextDelayMs, 1000),
+        );
         return;
       }
 
-      const readyItemId = readyItem.id as string;
-      const attempts = Number(readyItem.attempts ?? 0);
-      const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
-      const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
-      const targetMessageId =
-        typeof readyItem.targetMessageId === 'string'
-          ? (readyItem.targetMessageId as string)
-          : null;
-
-      // Validate item
-      if (mode === 'append_prompt' && !prompt) {
-        store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-          status: 'failed',
-          completedAt: new Date().toISOString(),
-          nextAttemptAt: null,
-          runId: null,
-          errorMessage: 'Queued prompt is empty',
-        });
-        continue;
-      }
-      if (mode === 'respond_to_message' && !targetMessageId) {
-        store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-          status: 'failed',
-          completedAt: new Date().toISOString(),
-          nextAttemptAt: null,
-          runId: null,
-          errorMessage: 'Queued branch target is missing',
-        });
-        continue;
-      }
-
-      // Mode-aware busy check:
-      // - respond_to_message (branch edits): only block if this specific target is already running
-      // - append_prompt: block if ANY process is running for the conversation (serial)
-      if (mode === 'respond_to_message' && targetMessageId) {
-        if (hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId)) {
-          // This specific target is already running — reschedule
-          scheduleQueueDrain(agentId, conversationId, 1000);
+      for (const readyItem of readyItems) {
+        if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
+          scheduleQueueDrain(agentId, conversationId, 2000);
           return;
         }
-      } else {
-        if (hasRunningProcessForConversation(agentId, conversationId)) {
-          scheduleQueueDrain(agentId, conversationId, 1000);
-          return;
+
+        const readyItemId = readyItem.id as string;
+        const attempts = Number(readyItem.attempts ?? 0);
+        const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
+        const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
+        const targetMessageId =
+          typeof readyItem.targetMessageId === 'string'
+            ? (readyItem.targetMessageId as string)
+            : null;
+
+        if (mode === 'append_prompt' && !prompt) {
+          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+            nextAttemptAt: null,
+            runId: null,
+            errorMessage: 'Queued prompt is empty',
+          });
+          continue;
         }
-      }
+        if (mode === 'respond_to_message' && !targetMessageId) {
+          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+            nextAttemptAt: null,
+            runId: null,
+            errorMessage: 'Queued branch target is missing',
+          });
+          continue;
+        }
 
-      // Global concurrency gate — defer if all slots are occupied
-      if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
-        scheduleQueueDrain(agentId, conversationId, 2000);
-        return;
-      }
+        store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+          status: 'processing',
+          attempts: attempts + 1,
+          startedAt: new Date().toISOString(),
+          runId: null,
+          errorMessage: null,
+          completedAt: null,
+          usedFallback: false,
+          fallbackModel: null,
+        });
 
-      store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-        status: 'processing',
-        attempts: attempts + 1,
-        startedAt: new Date().toISOString(),
-        runId: null,
-        errorMessage: null,
-        completedAt: null,
-        usedFallback: false,
-        fallbackModel: null,
-      });
-
-      if (mode === 'respond_to_message') {
-        // Fire without blocking — branch operations run in parallel.
-        // On completion, re-trigger the drain to pick up any remaining items.
         void processQueueItem(
           readyItemId,
           readyItem,
@@ -3040,21 +3380,7 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
         ).finally(() => {
           scheduleQueueDrain(agentId, conversationId, 0);
         });
-        // Continue the loop to pick up more branch items
-        continue;
       }
-
-      // append_prompt — block and process serially
-      await processQueueItem(
-        readyItemId,
-        readyItem,
-        agentId,
-        conversationId,
-        mode,
-        prompt,
-        targetMessageId,
-      );
-      scheduleQueueDrain(agentId, conversationId, 0);
     }
   } finally {
     queueProcessors.delete(key);
@@ -3157,7 +3483,12 @@ export function enqueueAgentPrompt(
   agentId: string,
   conversationId: string,
   prompt: string,
-  options: { mode?: QueueExecutionMode; targetMessageId?: string | null } = {},
+  options: {
+    mode?: QueueExecutionMode;
+    targetMessageId?: string | null;
+    queuedMessageId?: string | null;
+    previousUserMessageId?: string | null;
+  } = {},
 ): EnqueueAgentPromptResult {
   const trimmedPrompt = prompt.trim();
   const mode = options.mode ?? 'append_prompt';
@@ -3165,6 +3496,11 @@ export function enqueueAgentPrompt(
     throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
   }
   const targetMessageId = options.targetMessageId ?? null;
+  const queuedMessageId = options.queuedMessageId ?? null;
+  const previousUserMessageId = resolvePreviousUserMessageId(
+    conversationId,
+    options.previousUserMessageId ?? null,
+  );
   if (mode === 'respond_to_message') {
     if (!targetMessageId) {
       throw AgentChatError.badRequest('target_message_required', 'Target message is required');
@@ -3178,16 +3514,18 @@ export function enqueueAgentPrompt(
   let continuationParentId: string | null = null;
   let dependsOnQueueItemId: string | null = null;
   if (mode === 'append_prompt') {
-    const pendingAppendItems = listConversationQueueItems(agentId, conversationId).filter(
-      (item) =>
-        (item.status === 'queued' || item.status === 'processing') &&
-        ((item.mode as QueueExecutionMode | undefined) ?? 'append_prompt') === 'append_prompt',
+    continuationParentId = getContinuationParentIdForPreviousUserMessage(
+      conversationId,
+      previousUserMessageId,
     );
-    const previousAppendItem = pendingAppendItems[pendingAppendItems.length - 1];
-    if (previousAppendItem && typeof previousAppendItem.id === 'string') {
-      dependsOnQueueItemId = previousAppendItem.id as string;
-    } else {
-      continuationParentId = getCurrentConversationLeafId(conversationId);
+    const dependency = findPendingBranchDependencyForAppendPrompt(
+      agentId,
+      conversationId,
+      previousUserMessageId,
+      continuationParentId,
+    );
+    if (dependency && typeof dependency.id === 'string') {
+      dependsOnQueueItemId = dependency.id as string;
     }
   }
 
@@ -3206,7 +3544,8 @@ export function enqueueAgentPrompt(
     lastRunId: null,
     continuationParentId,
     dependsOnQueueItemId,
-    queuedMessageId: null,
+    previousUserMessageId,
+    queuedMessageId,
     responseMessageId: null,
     errorMessage: null,
     nextAttemptAt: new Date().toISOString(),

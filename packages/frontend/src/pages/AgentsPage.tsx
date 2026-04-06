@@ -265,9 +265,12 @@ interface ChatMessage {
   metadata?: string | null;
   attachments?: ChatAttachment[] | null;
   parentId?: string | null;
+  previousUserMessageId?: string | null;
   siblingIndex?: number;
   siblingCount?: number;
   siblingIds?: string[];
+  queueItemId?: string | null;
+  queueStatus?: 'queued' | 'processing' | null;
 }
 
 interface QueuePromptResponse {
@@ -287,6 +290,7 @@ interface QueueItem {
   updatedAt?: string;
   targetMessageId?: string | null;
   queuedMessageId?: string | null;
+  previousUserMessageId?: string | null;
   responseMessageId?: string | null;
   errorMessage?: string | null;
   nextAttemptAt?: string | null;
@@ -1745,6 +1749,65 @@ function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+function getLastUserMessageId(messages: ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.direction === 'outbound') {
+      return messages[index]!.id;
+    }
+  }
+  return null;
+}
+
+function getLastPersistedUserMessageId(
+  messages: ChatMessage[],
+  optimisticMessages: ChatMessage[],
+): string | null {
+  const optimisticIds = new Set(optimisticMessages.map((message) => message.id));
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.direction !== 'outbound') continue;
+    if (optimisticIds.has(message.id)) continue;
+    return message.id;
+  }
+  return null;
+}
+
+function buildOptimisticChatMessage(params: {
+  id: string;
+  content: string;
+  previousUserMessageId: string | null;
+  createdAt?: string;
+}): ChatMessage {
+  return {
+    id: params.id,
+    direction: 'outbound',
+    content: params.content,
+    createdAt: params.createdAt ?? new Date().toISOString(),
+    type: 'text',
+    metadata: null,
+    attachments: null,
+    parentId: null,
+    previousUserMessageId: params.previousUserMessageId,
+  };
+}
+
+function mergeMessagesWithOptimistic(
+  persistedMessages: ChatMessage[],
+  optimisticMessages: ChatMessage[],
+): ChatMessage[] {
+  if (optimisticMessages.length === 0) return persistedMessages;
+  const persistedIds = new Set(persistedMessages.map((message) => message.id));
+  const merged = [...persistedMessages];
+  for (const optimisticMessage of optimisticMessages) {
+    if (persistedIds.has(optimisticMessage.id)) continue;
+    merged.push(optimisticMessage);
+  }
+  merged.sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+  return merged;
+}
+
 /* ── Agent Files sub-component ── */
 
 function agentFileEndpoints(agentId: string) {
@@ -2098,7 +2161,7 @@ export function AgentsPage() {
   const [pendingConversationKeys, setPendingConversationKeys] = useState<Set<string>>(new Set());
   const [runHandoffKeys, setRunHandoffKeys] = useState<Set<string>>(new Set());
   const [stoppingRun, setStoppingRun] = useState(false);
-  const [activeConversationRun, setActiveConversationRun] = useState<AgentRunSummary | null>(null);
+  const [activeConversationRuns, setActiveConversationRuns] = useState<AgentRunSummary[]>([]);
   const [renamingConversation, setRenamingConversation] = useState<{
     agentId: string;
     conversationId: string;
@@ -2108,6 +2171,9 @@ export function AgentsPage() {
   const [renameConversationError, setRenameConversationError] = useState<string | null>(null);
   const [optimisticResponseParentIds, setOptimisticResponseParentIds] = useState<
     Record<string, string>
+  >({});
+  const [optimisticMessagesByConversation, setOptimisticMessagesByConversation] = useState<
+    Record<string, ChatMessage[]>
   >({});
 
   const isFirstMessageRef = useRef(false);
@@ -2446,31 +2512,12 @@ export function AgentsPage() {
     });
   }, []);
 
-  const activeConversation = useMemo(() => {
-    if (!activeAgentId || !activeConvId) return null;
-    return (convsByAgent[activeAgentId] || []).find((conv) => conv.id === activeConvId) ?? null;
-  }, [activeAgentId, activeConvId, convsByAgent]);
-  const activeConversationPending =
-    activeAgentId && activeConvId
-      ? pendingConversationKeys.has(agentConversationKey(activeAgentId, activeConvId))
-      : false;
-  const activeConversationHandoff =
-    activeAgentId && activeConvId
-      ? runHandoffKeys.has(agentConversationKey(activeAgentId, activeConvId))
-      : false;
-  const activeConversationBusy = Boolean(activeConversation?.isBusy);
-  const activeConversationQueueCount = toQueueCount(activeConversation?.queuedCount);
-  const activeConversationRunBusy = activeConversationRun?.status === 'running';
-  const streaming =
-    activeConversationPending ||
-    activeConversationBusy ||
-    activeConversationRunBusy ||
-    activeConversationHandoff ||
-    activeConversationQueueCount > 0;
   const activeConversationKey =
     activeAgentId && activeConvId ? agentConversationKey(activeAgentId, activeConvId) : null;
   const {
+    visibleMessages,
     queuedQueueItems,
+    queuedMessages,
     effectivePendingBranchExecutionsByMessageId,
     errorsByMessageId,
     orphanErrorItems,
@@ -2480,24 +2527,53 @@ export function AgentsPage() {
       buildAgentConversationViewModel({
         messages,
         queueItems,
-        activeConversationRun,
+        activeConversationRuns,
         activeAgentId,
         activeConvId,
         activeConversationKey,
         optimisticResponseParentIds,
-        streaming,
       }),
     [
       activeAgentId,
       activeConvId,
       activeConversationKey,
-      activeConversationRun,
+      activeConversationRuns,
       messages,
       optimisticResponseParentIds,
       queueItems,
-      streaming,
     ],
   );
+  const activeMessageIds = useMemo(
+    () => new Set(visibleMessages.map((message) => message.id)),
+    [visibleMessages],
+  );
+  const optimisticActiveTargetId = activeConversationKey
+    ? optimisticResponseParentIds[activeConversationKey] ?? null
+    : null;
+  const activeConversationPending = activeConversationKey
+    ? pendingConversationKeys.has(activeConversationKey) &&
+      (!optimisticActiveTargetId || activeMessageIds.has(optimisticActiveTargetId))
+    : false;
+  const activeConversationHandoff = activeConversationKey
+    ? runHandoffKeys.has(activeConversationKey) &&
+      (!optimisticActiveTargetId || activeMessageIds.has(optimisticActiveTargetId))
+    : false;
+  const activeConversationRun = useMemo(
+    () =>
+      activeConversationRuns.find(
+        (run) =>
+          run.status === 'running' &&
+          Boolean(run.responseParentId) &&
+          activeMessageIds.has(run.responseParentId!),
+      ) ?? null,
+    [activeConversationRuns, activeMessageIds],
+  );
+  const streaming =
+    activeConversationPending ||
+    activeConversationHandoff ||
+    showStreamingBubble ||
+    activeConversationRun !== null ||
+    effectivePendingBranchExecutionsByMessageId.size > 0;
   const isNearMessagesBottom = useCallback((element: HTMLDivElement) => {
     return (
       element.scrollHeight - element.scrollTop - element.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX
@@ -2700,10 +2776,37 @@ export function AgentsPage() {
   /* ── Fetch messages ── */
   const messagesRef2 = useRef<ChatMessage[]>([]);
   messagesRef2.current = messages;
+  const optimisticMessagesByConversationRef = useRef<Record<string, ChatMessage[]>>({});
+  optimisticMessagesByConversationRef.current = optimisticMessagesByConversation;
   const queueItemsRef = useRef<QueueItem[]>([]);
   queueItemsRef.current = queueItems;
   const activeMessagesRequestTokenRef = useRef(0);
   const activeQueueRequestTokenRef = useRef(0);
+
+  const setOptimisticConversationMessages = useCallback(
+    (
+      agentId: string,
+      conversationId: string,
+      nextMessages:
+        | ChatMessage[]
+        | ((currentMessages: ChatMessage[]) => ChatMessage[]),
+    ) => {
+      const key = agentConversationKey(agentId, conversationId);
+      setOptimisticMessagesByConversation((prev) => {
+        const currentMessages = prev[key] ?? [];
+        const resolvedMessages =
+          typeof nextMessages === 'function' ? nextMessages(currentMessages) : nextMessages;
+        if (resolvedMessages.length === 0) {
+          if (!(key in prev)) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        }
+        return { ...prev, [key]: resolvedMessages };
+      });
+    },
+    [],
+  );
 
   const setActiveConversationMessages = useCallback(
     (
@@ -2740,6 +2843,21 @@ export function AgentsPage() {
     [isActiveConversation],
   );
 
+  const removeOptimisticMessage = useCallback(
+    (agentId: string, conversationId: string, messageId: string | null | undefined) => {
+      if (!messageId) return;
+      setOptimisticConversationMessages(agentId, conversationId, (prev) =>
+        prev.filter((message) => message.id !== messageId),
+      );
+      if (isActiveConversation(agentId, conversationId)) {
+        setActiveConversationMessages(agentId, conversationId, (prev) =>
+          prev.filter((message) => message.id !== messageId),
+        );
+      }
+    },
+    [isActiveConversation, setActiveConversationMessages, setOptimisticConversationMessages],
+  );
+
   const fetchMessages = useCallback(
     async (agentId: string, conversationId: string, options?: { silent?: boolean }) => {
       const silent = options?.silent === true;
@@ -2751,11 +2869,22 @@ export function AgentsPage() {
         );
         if (!isActiveConversation(agentId, conversationId)) return;
         if (requestToken !== activeMessagesRequestTokenRef.current) return;
+        const conversationKey = agentConversationKey(agentId, conversationId);
+        const optimisticMessages =
+          optimisticMessagesByConversationRef.current[conversationKey] ?? [];
+        const mergedEntries = mergeMessagesWithOptimistic(data.entries, optimisticMessages);
+        if (optimisticMessages.length > 0) {
+          const persistedIds = new Set(data.entries.map((message) => message.id));
+          const remainingOptimisticMessages = optimisticMessages.filter(
+            (message) => !persistedIds.has(message.id),
+          );
+          setOptimisticConversationMessages(agentId, conversationId, remainingOptimisticMessages);
+        }
         const handoffStartedAt =
-          runHandoffStartedAtRef.current.get(agentConversationKey(agentId, conversationId)) ?? null;
+          runHandoffStartedAtRef.current.get(conversationKey) ?? null;
         if (
           handoffStartedAt !== null &&
-          data.entries.some(
+          mergedEntries.some(
             (message) =>
               message.direction === 'inbound' &&
               message.type !== 'system' &&
@@ -2768,14 +2897,15 @@ export function AgentsPage() {
         // temp messages and prevents unnecessary re-renders during polling).
         const prev = messagesRef2.current;
         if (
-          prev.length === data.entries.length &&
+          prev.length === mergedEntries.length &&
           prev.every((m, i) => {
-            const next = data.entries[i];
+            const next = mergedEntries[i];
             return (
               m.id === next.id &&
               m.content === next.content &&
               m.type === next.type &&
               m.parentId === next.parentId &&
+              m.previousUserMessageId === next.previousUserMessageId &&
               (m.siblingIndex ?? 0) === (next.siblingIndex ?? 0) &&
               (m.siblingCount ?? 1) === (next.siblingCount ?? 1) &&
               JSON.stringify(m.siblingIds ?? []) === JSON.stringify(next.siblingIds ?? []) &&
@@ -2785,7 +2915,7 @@ export function AgentsPage() {
         ) {
           return;
         }
-        setActiveConversationMessages(agentId, conversationId, data.entries);
+        setActiveConversationMessages(agentId, conversationId, mergedEntries);
       } catch {
         if (!isActiveConversation(agentId, conversationId)) return;
         setChatError('Failed to load messages');
@@ -2793,7 +2923,12 @@ export function AgentsPage() {
         if (!silent) setChatLoading(false);
       }
     },
-    [clearRunHandoff, isActiveConversation, setActiveConversationMessages],
+    [
+      clearRunHandoff,
+      isActiveConversation,
+      setActiveConversationMessages,
+      setOptimisticConversationMessages,
+    ],
   );
 
   const markConversationRead = useCallback(async (agentId: string, conversationId: string) => {
@@ -2844,16 +2979,15 @@ export function AgentsPage() {
           agentId,
           conversationId,
           status: 'running',
-          limit: '1',
+          limit: '50',
         });
         const data = await api<{ entries: AgentRunSummary[] }>(`/agent-runs?${params.toString()}`);
         if (!isActiveConversation(agentId, conversationId)) return;
 
-        const latestRun = data.entries[0] ?? null;
-        setActiveConversationRun(latestRun);
+        setActiveConversationRuns(data.entries);
       } catch {
         if (!isActiveConversation(agentId, conversationId)) return;
-        setActiveConversationRun(null);
+        setActiveConversationRuns([]);
       } finally {
         // no-op
       }
@@ -2885,6 +3019,7 @@ export function AgentsPage() {
     const agentId = activeAgentId;
     const conversationId = activeConvId;
     if (!agentId || !conversationId) return;
+    const removedItem = queueItemsRef.current.find((item) => item.id === itemId) ?? null;
     setDeletingQueueItemIds((prev) => {
       const next = new Set(prev);
       next.add(itemId);
@@ -2898,6 +3033,7 @@ export function AgentsPage() {
       setEditingMessage((prev) =>
         prev?.kind === 'queue' && prev.queueItemId === itemId ? null : prev,
       );
+      removeOptimisticMessage(agentId, conversationId, removedItem?.queuedMessageId ?? null);
       setActiveConversationQueueItems(agentId, conversationId, (prev) =>
         prev.filter((item) => item.id !== itemId),
       );
@@ -2921,6 +3057,7 @@ export function AgentsPage() {
     const agentId = activeAgentId;
     const conversationId = activeConvId;
     const queuedItemIds = queuedQueueItems.map((item) => item.id);
+    const removedMessageIds = queuedQueueItems.map((item) => item.queuedMessageId ?? null);
     if (!agentId || !conversationId || queuedItemIds.length === 0) return;
     setClearingQueuedItems(true);
     try {
@@ -2935,6 +3072,9 @@ export function AgentsPage() {
       setEditingMessage((prev) =>
         prev?.kind === 'queue' && queuedItemIds.includes(prev.queueItemId) ? null : prev,
       );
+      for (const removedMessageId of removedMessageIds) {
+        removeOptimisticMessage(agentId, conversationId, removedMessageId);
+      }
       setActiveConversationQueueItems(agentId, conversationId, (prev) =>
         prev.filter((item) => !queuedItemIds.includes(item.id)),
       );
@@ -2964,11 +3104,17 @@ export function AgentsPage() {
 
   async function handleDismissQueueItem(itemId: string) {
     if (!activeAgentId || !activeConvId) return;
+    const removedItem = queueItemsRef.current.find((item) => item.id === itemId) ?? null;
     try {
       await api(`/agents/${activeAgentId}/chat/queue/${itemId}`, {
         method: 'DELETE',
         body: JSON.stringify({ conversationId: activeConvId }),
       });
+      removeOptimisticMessage(
+        activeAgentId,
+        activeConvId,
+        removedItem?.queuedMessageId ?? null,
+      );
       await syncActiveConversation(activeAgentId, activeConvId);
     } catch {
       // silently fail
@@ -3133,7 +3279,7 @@ export function AgentsPage() {
   }, [agents, refreshAllConversations]);
 
   useEffect(() => {
-    setActiveConversationRun(null);
+    setActiveConversationRuns([]);
 
     if (!activeAgentId || !activeConvId) {
       return;
@@ -3538,19 +3684,13 @@ export function AgentsPage() {
   /* ── Send message ── */
   async function stopActiveRun() {
     if (!activeAgentId || !activeConvId || stoppingRun) return;
+    if (!activeConversationRun) {
+      toast.error('No active run found on this branch');
+      return;
+    }
     setStoppingRun(true);
     try {
-      const data = await api<{
-        entries: { id: string; agentId: string; conversationId: string | null }[];
-      }>('/agent-runs/active');
-      const run = data.entries.find(
-        (r) => r.agentId === activeAgentId && r.conversationId === activeConvId,
-      );
-      if (!run) {
-        toast.error('No active run found');
-        return;
-      }
-      await api(`/agent-runs/${run.id}`, { method: 'DELETE' });
+      await api(`/agent-runs/${activeConversationRun.id}`, { method: 'DELETE' });
       toast.success('Run stopped');
       // Refresh state
       await Promise.all([
@@ -3571,6 +3711,12 @@ export function AgentsPage() {
       if (!ensureAgentCliAvailable(activeAgentId)) return;
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
+      const messageId = `upload-${Date.now()}-${generateId()}`;
+      const previousUserMessageId = getLastPersistedUserMessageId(
+        messagesRef2.current,
+        optimisticMessagesByConversationRef.current[agentConversationKey(sentAgentId, sentConvId)] ??
+          [],
+      );
       setChatError(null);
       requestAutoScrollToBottom();
 
@@ -3580,6 +3726,8 @@ export function AgentsPage() {
       try {
         const fd = new FormData();
         fd.append('conversationId', sentConvId);
+        fd.append('messageId', messageId);
+        if (previousUserMessageId) fd.append('previousUserMessageId', previousUserMessageId);
         if (caption) fd.append('caption', caption);
         for (const file of files) {
           const prepared = isImageFile(file) ? await prepareImageForUpload(file) : file;
@@ -3614,7 +3762,7 @@ export function AgentsPage() {
             `/agents/${sentAgentId}/chat/respond`,
             {
               method: 'POST',
-              body: JSON.stringify({ conversationId: sentConvId }),
+              body: JSON.stringify({ conversationId: sentConvId, targetMessageId: imgMsg.id }),
             },
           );
           const immediateQueuedCount = toQueueCount(queueResponse.queuedCount);
@@ -3679,8 +3827,24 @@ export function AgentsPage() {
 
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
+      const messageId = `direct-${Date.now()}-${generateId()}`;
+      const previousUserMessageId = getLastUserMessageId(messagesRef2.current);
       setChatError(null);
       requestAutoScrollToBottom();
+
+      const optimisticMessage = buildOptimisticChatMessage({
+        id: messageId,
+        content: prompt,
+        previousUserMessageId,
+      });
+      setOptimisticConversationMessages(sentAgentId, sentConvId, (prev) => {
+        if (prev.some((message) => message.id === optimisticMessage.id)) return prev;
+        return [...prev, optimisticMessage];
+      });
+      setActiveConversationMessages(sentAgentId, sentConvId, (prev) =>
+        mergeMessagesWithOptimistic(prev, [optimisticMessage]),
+      );
+      setOptimisticResponseParent(sentAgentId, sentConvId, messageId);
 
       const optimisticQueueItem: QueueItem = {
         id: `temp-${Date.now()}`,
@@ -3690,6 +3854,7 @@ export function AgentsPage() {
         status: 'queued',
         attempts: 0,
         createdAt: new Date().toISOString(),
+        queuedMessageId: messageId,
       };
       setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) => [
         ...prev,
@@ -3701,7 +3866,6 @@ export function AgentsPage() {
       // loop takes care of it).
       const alreadyBusy = streaming;
 
-      const directMessageId = `direct-${Date.now()}-${generateId()}`;
       if (!alreadyBusy) {
         beginRunHandoff(sentAgentId, sentConvId);
         setConversationPending(sentAgentId, sentConvId, true);
@@ -3712,11 +3876,13 @@ export function AgentsPage() {
           {
             method: 'POST',
             headers: {
-              'Idempotency-Key': `agent-chat-direct:${directMessageId}`,
+              'Idempotency-Key': `agent-chat-direct:${messageId}`,
             },
             body: JSON.stringify({
               prompt,
               conversationId: sentConvId,
+              messageId,
+              previousUserMessageId,
             }),
           },
         );
@@ -3749,6 +3915,13 @@ export function AgentsPage() {
         setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) =>
           prev.filter((item) => item.id !== optimisticQueueItem.id),
         );
+        setOptimisticConversationMessages(sentAgentId, sentConvId, (prev) =>
+          prev.filter((message) => message.id !== messageId),
+        );
+        setActiveConversationMessages(sentAgentId, sentConvId, (prev) =>
+          prev.filter((message) => message.id !== messageId),
+        );
+        setOptimisticResponseParent(sentAgentId, sentConvId, null);
         setChatError(err instanceof Error ? err.message : 'Failed to send message');
         throw err;
       } finally {
@@ -3767,7 +3940,9 @@ export function AgentsPage() {
       fetchMessages,
       fetchQueueItems,
       requestAutoScrollToBottom,
+      setActiveConversationMessages,
       setActiveConversationQueueItems,
+      setOptimisticConversationMessages,
       setConversationPending,
       streaming,
     ],
@@ -3818,6 +3993,9 @@ export function AgentsPage() {
 
     const { agentId: sentAgentId, conversationId: sentConvId, id: messageId } = editingMessage;
     const content = trimmedContent;
+    const newMessageId = `edit-${Date.now()}-${generateId()}`;
+    const previousUserMessageId =
+      messagesRef2.current.find((message) => message.id === messageId)?.previousUserMessageId ?? null;
     const requestId = `edit-${Date.now()}-${generateId()}`;
     const headers = {
       'Idempotency-Key': `agent-chat-edit:${sentAgentId}:${sentConvId}:${messageId}:${requestId}`,
@@ -3844,6 +4022,10 @@ export function AgentsPage() {
       if (files.length > 0) {
         const fd = new FormData();
         fd.append('messageId', messageId);
+        fd.append('newMessageId', newMessageId);
+        if (previousUserMessageId) {
+          fd.append('previousUserMessageId', previousUserMessageId);
+        }
         if (content) fd.append('content', content);
         for (const storagePath of keepStoragePaths) {
           fd.append('keepStoragePaths', storagePath);
@@ -3863,7 +4045,13 @@ export function AgentsPage() {
           {
             method: 'POST',
             headers,
-            body: JSON.stringify({ messageId, content, keepStoragePaths }),
+            body: JSON.stringify({
+              originalMessageId: messageId,
+              newMessageId,
+              previousUserMessageId,
+              content,
+              keepStoragePaths,
+            }),
           },
         );
       }
@@ -5208,12 +5396,12 @@ export function AgentsPage() {
                   {chatError && <div className={styles.errorBanner}>{chatError}</div>}
 
                   {/* Messages */}
-                  {showChatLoading && messages.length === 0 ? (
+                  {showChatLoading && visibleMessages.length === 0 ? (
                     <div className={styles.emptyPanel}>
                       <Loader size={20} className={styles.chatSpinner} />
                       <div className={styles.emptyText}>Loading messages…</div>
                     </div>
-                  ) : messages.length === 0 &&
+                  ) : visibleMessages.length === 0 &&
                     !streaming &&
                     !chatLoading &&
                     orphanErrorItems.length === 0 ? (
@@ -5230,27 +5418,13 @@ export function AgentsPage() {
                       ref={messagesRef}
                       onScroll={handleMessagesScroll}
                     >
-                      {messages.map((msg) => {
+                      {visibleMessages.map((msg) => {
                         const messageMeta = parseAgentMessageMetadata(msg.metadata);
                         const monitorRunId =
                           msg.direction === 'inbound' ? (messageMeta?.runId ?? null) : null;
                         const messageModelLabel =
                           msg.direction === 'inbound'
                             ? formatModelLabel(messageMeta?.model, messageMeta?.modelId)
-                            : null;
-                        const branchExecutionItems =
-                          effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? [];
-                        const processingBranchExecutionCount = branchExecutionItems.filter(
-                          (item) => item.status === 'processing',
-                        ).length;
-                        const queuedBranchExecutionCount = branchExecutionItems.filter(
-                          (item) => item.status === 'queued',
-                        ).length;
-                        const branchExecutionLabel =
-                          queuedBranchExecutionCount > 0
-                            ? queuedBranchExecutionCount === 1
-                              ? 'Edit queued to run'
-                              : `${queuedBranchExecutionCount} edits queued to run`
                             : null;
 
                         return (
@@ -5342,13 +5516,6 @@ export function AgentsPage() {
                                     msg.direction === 'outbound' ? styles.messageMetaUser : ''
                                   }`}
                                 >
-                                  {branchExecutionLabel && (
-                                    <span
-                                      className={`${styles.messageExecutionState} ${styles.messageExecutionStateQueued}`}
-                                    >
-                                      {branchExecutionLabel}
-                                    </span>
-                                  )}
                                   {new Date(msg.createdAt).toLocaleTimeString([], {
                                     hour: '2-digit',
                                     minute: '2-digit',
@@ -5402,7 +5569,6 @@ export function AgentsPage() {
                                 </div>
                               </div>
                             </div>
-                            {/* Inline errors targeting this specific message */}
                             {errorsByMessageId.get(msg.id)?.map((item) => (
                               <div
                                 key={item.id}
@@ -5472,45 +5638,6 @@ export function AgentsPage() {
                         );
                       })}
 
-                      {/* Pending response bubble */}
-                      {showStreamingBubble && (
-                        <div className={`${styles.messageRow} ${styles.messageRowAgent}`}>
-                          <div className={styles.messageContent}>
-                            <div
-                              className={`${styles.messageBubble} ${styles.messageBubbleAgent} ${styles.streamingCursor}`}
-                            >
-                              <span className={styles.streamingQueueInfo}>
-                                <Loader size={13} className={styles.spinIcon} />
-                                Thinking…
-                              </span>
-                            </div>
-                            <div className={styles.streamingActions}>
-                              {activeConversationRun && (
-                                <button
-                                  className={styles.messageMonitorBtn}
-                                  onClick={() => openMonitorRun(activeConversationRun.id)}
-                                  title="Open current run in monitor"
-                                >
-                                  <ExternalLink size={12} />
-                                  Monitor
-                                </button>
-                              )}
-                              {activeConversationRun && (
-                                <button
-                                  className={styles.stopRunBtn}
-                                  onClick={stopActiveRun}
-                                  disabled={stoppingRun}
-                                  title="Stop the current run"
-                                >
-                                  <Square size={12} />
-                                  Stop
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
                       {/* Orphan error items — no target message (append_prompt failures) */}
                       {orphanErrorItems.map((item) => (
                         <div
@@ -5578,145 +5705,244 @@ export function AgentsPage() {
                         </div>
                       ))}
 
-                      {queuedQueueItems.length > 0 && (
-                        <div className={`${styles.messageRow} ${styles.messageRowUser}`}>
+                      {/* Pending response bubble */}
+                      {showStreamingBubble && (
+                        <div className={`${styles.messageRow} ${styles.messageRowAgent}`}>
                           <div className={styles.messageContent}>
-                            <div className={styles.inlineQueueSummary}>
-                              <span className={styles.inlineQueueSummaryLabel}>
-                                <Clock size={12} aria-hidden />
-                                {queueItemsLabel(queuedQueueItems.length)} — sends when the current
-                                run finishes
+                            <div
+                              className={`${styles.messageBubble} ${styles.messageBubbleAgent} ${styles.streamingCursor}`}
+                            >
+                              <span className={styles.streamingQueueInfo}>
+                                <Loader size={13} className={styles.spinIcon} />
+                                Thinking…
                               </span>
-                              <Tooltip
-                                label={
-                                  clearingQueuedItems
-                                    ? 'Removing queued messages'
-                                    : 'Remove all queued messages from this chat'
-                                }
-                              >
-                                <span
-                                  className={
-                                    clearingQueuedItems
-                                      ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                      : styles.queuedIconBtnWrap
-                                  }
+                            </div>
+                            <div className={styles.streamingActions}>
+                              {activeConversationRun && (
+                                <button
+                                  className={styles.messageMonitorBtn}
+                                  onClick={() => openMonitorRun(activeConversationRun.id)}
+                                  title="Open current run in monitor"
                                 >
-                                  <button
-                                    type="button"
-                                    className={styles.inlineQueueClearAllBtn}
-                                    onClick={() => void handleClearQueue()}
-                                    disabled={clearingQueuedItems}
-                                    style={
-                                      clearingQueuedItems ? { pointerEvents: 'none' } : undefined
-                                    }
-                                    aria-label="Remove all queued messages"
-                                  >
-                                    Clear all
-                                  </button>
-                                </span>
-                              </Tooltip>
+                                  <ExternalLink size={12} />
+                                  Monitor
+                                </button>
+                              )}
+                              {activeConversationRun && (
+                                <button
+                                  className={styles.stopRunBtn}
+                                  onClick={stopActiveRun}
+                                  disabled={stoppingRun}
+                                  title="Stop the current run"
+                                >
+                                  <Square size={12} />
+                                  Stop
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
                       )}
 
-                      {queuedQueueItems.map((item, idx) => {
-                        const isSavingQueuedItem = savingQueueItemId === item.id;
-                        const isDeletingQueuedItem = deletingQueueItemIds.has(item.id);
-                        const isQueuedItemBusy =
-                          isSavingQueuedItem || isDeletingQueuedItem || clearingQueuedItems;
-
-                        return (
-                          <div
-                            key={item.id}
-                            className={`${styles.messageRow} ${styles.messageRowUser} ${styles.queuedMessageRow}`}
-                          >
+                      {queuedMessages.length > 0 && (
+                        <>
+                          <div className={`${styles.messageRow} ${styles.messageRowUser}`}>
                             <div className={styles.messageContent}>
-                              <div
-                                className={`${styles.messageBubble} ${styles.messageBubbleUser}`}
-                              >
-                                <div className={styles.messagePlainText}>{item.prompt}</div>
-                              </div>
-                              <div className={`${styles.messageMeta} ${styles.messageMetaUser}`}>
-                                <span
-                                  className={`${styles.messageExecutionState} ${styles.messageExecutionStateQueued}`}
-                                >
-                                  <Clock size={11} aria-hidden />
-                                  Queued #{idx + 1}
+                              <div className={styles.inlineQueueSummary}>
+                                <span className={styles.inlineQueueSummaryLabel}>
+                                  <Clock size={12} aria-hidden />
+                                  {queueItemsLabel(queuedMessages.length)}
                                 </span>
-                                <span>
-                                  {isDeletingQueuedItem
-                                    ? 'Removing…'
-                                    : isSavingQueuedItem
-                                      ? 'Saving…'
-                                      : new Date(item.createdAt).toLocaleTimeString([], {
-                                          hour: '2-digit',
-                                          minute: '2-digit',
-                                        })}
-                                </span>
-                                <Tooltip
-                                  label={isQueuedItemBusy ? 'Please wait' : 'Edit queued message'}
-                                >
-                                  <span
-                                    className={
-                                      isQueuedItemBusy
-                                        ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                        : styles.queuedIconBtnWrap
+                                {queuedQueueItems.length > 1 && (
+                                  <Tooltip
+                                    label={
+                                      clearingQueuedItems
+                                        ? 'Removing queued messages'
+                                        : 'Remove all queued messages'
                                     }
                                   >
-                                    <button
-                                      type="button"
-                                      className={styles.editMsgBtn}
-                                      onClick={() => {
-                                        setEditingMessage({
-                                          kind: 'queue',
-                                          queueItemId: item.id,
-                                          initialValue: item.prompt,
-                                          value: item.prompt,
-                                          isSubmitting: false,
-                                        });
-                                      }}
-                                      disabled={isQueuedItemBusy || editingMessage?.isSubmitting}
-                                      style={
-                                        isQueuedItemBusy || editingMessage?.isSubmitting
-                                          ? { pointerEvents: 'none' }
-                                          : undefined
+                                    <span
+                                      className={
+                                        clearingQueuedItems
+                                          ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                          : styles.queuedIconBtnWrap
                                       }
-                                      aria-label="Edit queued message"
                                     >
-                                      <Pencil size={12} />
-                                    </button>
-                                  </span>
-                                </Tooltip>
-                                <Tooltip
-                                  label={isQueuedItemBusy ? 'Please wait' : 'Remove from queue'}
-                                >
-                                  <span
-                                    className={
-                                      isQueuedItemBusy
-                                        ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                        : styles.queuedIconBtnWrap
-                                    }
-                                  >
-                                    <button
-                                      type="button"
-                                      className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
-                                      onClick={() => void handleDeleteQueueItem(item.id)}
-                                      disabled={isQueuedItemBusy}
-                                      style={
-                                        isQueuedItemBusy ? { pointerEvents: 'none' } : undefined
-                                      }
-                                      aria-label="Remove queued message"
-                                    >
-                                      <Trash2 size={12} />
-                                    </button>
-                                  </span>
-                                </Tooltip>
+                                      <button
+                                        type="button"
+                                        className={styles.inlineQueueClearAllBtn}
+                                        onClick={() => void handleClearQueue()}
+                                        disabled={clearingQueuedItems}
+                                        style={
+                                          clearingQueuedItems
+                                            ? { pointerEvents: 'none' }
+                                            : undefined
+                                        }
+                                        aria-label="Remove all queued messages"
+                                      >
+                                        Clear all
+                                      </button>
+                                    </span>
+                                  </Tooltip>
+                                )}
                               </div>
                             </div>
                           </div>
-                        );
-                      })}
+
+                          {queuedMessages.map(({ message, status, queueItem }, idx) => {
+                            const queueItemId = queueItem?.id ?? null;
+                            const isSavingQueuedItem =
+                              queueItemId != null && savingQueueItemId === queueItemId;
+                            const isDeletingQueuedItem =
+                              queueItemId != null && deletingQueueItemIds.has(queueItemId);
+                            const isQueuedItemBusy =
+                              isSavingQueuedItem || isDeletingQueuedItem || clearingQueuedItems;
+                            const isProcessingQueuedItem = status === 'processing';
+
+                            return (
+                              <div
+                                key={message.id}
+                                className={`${styles.messageRow} ${styles.messageRowUser} ${styles.queuedMessageRow}`}
+                              >
+                                <div className={styles.messageContent}>
+                                  <div
+                                    className={`${styles.messageBubble} ${styles.messageBubbleUser}`}
+                                  >
+                                    {message.attachments?.map((att, i) =>
+                                      att.type === 'image' ? (
+                                        <ChatImage
+                                          key={i}
+                                          storagePath={att.storagePath}
+                                          alt={att.fileName}
+                                        />
+                                      ) : (
+                                        <ChatFileAttachment key={i} attachment={att} />
+                                      ),
+                                    )}
+                                    {message.content && (
+                                      <div className={styles.messagePlainText}>
+                                        {message.content}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className={`${styles.messageMeta} ${styles.messageMetaUser}`}>
+                                    <span
+                                      className={`${styles.messageExecutionState} ${
+                                        isProcessingQueuedItem
+                                          ? styles.messageExecutionStateProcessing
+                                          : styles.messageExecutionStateQueued
+                                      }`}
+                                    >
+                                      {isProcessingQueuedItem ? (
+                                        <Loader size={11} className={styles.spinIcon} />
+                                      ) : (
+                                        <Clock size={11} aria-hidden />
+                                      )}
+                                      {isDeletingQueuedItem
+                                        ? 'Removing…'
+                                        : isSavingQueuedItem
+                                          ? 'Saving…'
+                                          : isProcessingQueuedItem
+                                            ? 'Processing…'
+                                            : `Queued #${idx + 1}`}
+                                    </span>
+                                    <span>
+                                      {new Date(
+                                        queueItem?.createdAt ?? message.createdAt,
+                                      ).toLocaleTimeString([], {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                      })}
+                                    </span>
+                                    {queueItem && (
+                                      <>
+                                        <Tooltip
+                                          label={
+                                            isProcessingQueuedItem
+                                              ? 'Processing'
+                                              : isQueuedItemBusy
+                                                ? 'Please wait'
+                                                : 'Edit queued message'
+                                          }
+                                        >
+                                          <span
+                                            className={
+                                              isQueuedItemBusy
+                                                ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                                : styles.queuedIconBtnWrap
+                                            }
+                                          >
+                                            <button
+                                              type="button"
+                                              className={styles.editMsgBtn}
+                                              onClick={() => {
+                                                setEditingMessage({
+                                                  kind: 'queue',
+                                                  queueItemId: queueItem.id,
+                                                  initialValue: queueItem.prompt,
+                                                  value: queueItem.prompt,
+                                                  isSubmitting: false,
+                                                });
+                                              }}
+                                              disabled={
+                                                isProcessingQueuedItem ||
+                                                isQueuedItemBusy ||
+                                                editingMessage?.isSubmitting
+                                              }
+                                              style={
+                                                isProcessingQueuedItem ||
+                                                isQueuedItemBusy ||
+                                                editingMessage?.isSubmitting
+                                                  ? { pointerEvents: 'none' }
+                                                  : undefined
+                                              }
+                                              aria-label="Edit queued message"
+                                            >
+                                              <Pencil size={12} />
+                                            </button>
+                                          </span>
+                                        </Tooltip>
+                                        <Tooltip
+                                          label={
+                                            isProcessingQueuedItem
+                                              ? 'Processing'
+                                              : isQueuedItemBusy
+                                                ? 'Please wait'
+                                                : 'Remove from queue'
+                                          }
+                                        >
+                                          <span
+                                            className={
+                                              isQueuedItemBusy
+                                                ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                                : styles.queuedIconBtnWrap
+                                            }
+                                          >
+                                            <button
+                                              type="button"
+                                              className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
+                                              onClick={() => void handleDeleteQueueItem(queueItem.id)}
+                                              disabled={isProcessingQueuedItem || isQueuedItemBusy}
+                                              style={
+                                                isProcessingQueuedItem || isQueuedItemBusy
+                                                  ? { pointerEvents: 'none' }
+                                                  : undefined
+                                              }
+                                              aria-label="Remove queued message"
+                                            >
+                                              <Trash2 size={12} />
+                                            </button>
+                                          </span>
+                                        </Tooltip>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
                     </div>
                   )}
 
