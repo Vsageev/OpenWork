@@ -11,6 +11,7 @@ import { createAgentRateLimiter } from '../lib/api-helpers.js';
 import {
   listAgentConversations,
   listRecentAgentConversations,
+  searchAgentMessages,
   getAgentConversation,
   createAgentConversation,
   validateConversationOwnership,
@@ -158,6 +159,26 @@ export async function agentChatRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       const result = listRecentAgentConversations(request.query.limit);
+      return reply.send(result);
+    },
+  );
+
+  // Search messages across all agent chat conversations
+  typedApp.get(
+    '/api/agent-chat/search',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Search messages across all agent chat conversations',
+        querystring: z.object({
+          q: z.string().min(1).max(200),
+          limit: z.coerce.number().int().min(1).max(50).default(20),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const result = searchAgentMessages(request.query.q, request.query.limit);
       return reply.send(result);
     },
   );

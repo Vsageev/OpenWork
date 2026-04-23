@@ -495,6 +495,98 @@ export function listRecentAgentConversations(limit = 10) {
 }
 
 /**
+ * Search messages across all agent chat conversations by content.
+ * Returns matches with snippet + agent/conversation metadata so UI can preview
+ * and jump to the exact message in its conversation.
+ */
+export function searchAgentMessages(query: string, limit = 20) {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return { entries: [] };
+  const lowerQuery = normalizedQuery.toLowerCase();
+
+  const agents = listAgents();
+  const agentMap = new Map(agents.map((a) => [a.id, a]));
+
+  // Build map of conversationId -> { agentId, conversation }
+  const convMap = new Map<string, { agentId: string; conversation: Record<string, unknown> }>();
+  for (const conv of store.find('conversations', (r) => r.channelType === 'agent')) {
+    if (isBackgroundTriggerConversationRecord(conv)) continue;
+    const meta = parseMetadata(conv.metadata);
+    const agentId = meta?.agentId as string | undefined;
+    if (!agentId || !agentMap.has(agentId)) continue;
+    convMap.set(conv.id as string, { agentId, conversation: conv });
+  }
+
+  const SNIPPET_BEFORE = 40;
+  const SNIPPET_AFTER = 120;
+
+  type SearchEntry = {
+    messageId: string;
+    conversationId: string;
+    agentId: string;
+    agentName: string;
+    agentAvatarIcon: string | null;
+    agentAvatarBgColor: string | null;
+    agentAvatarLogoColor: string | null;
+    conversationSubject: string | null;
+    snippet: string;
+    matchStart: number;
+    matchLength: number;
+    direction: string;
+    createdAt: string;
+  };
+
+  const matches: SearchEntry[] = [];
+
+  for (const msg of store.getAll('messages')) {
+    const conversationId = msg.conversationId as string | undefined;
+    if (!conversationId) continue;
+    const convInfo = convMap.get(conversationId);
+    if (!convInfo) continue;
+    if (msg.type === 'system') continue; // skip progress updates
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    if (!content) continue;
+    const idx = content.toLowerCase().indexOf(lowerQuery);
+    if (idx === -1) continue;
+
+    const start = Math.max(0, idx - SNIPPET_BEFORE);
+    const end = Math.min(content.length, idx + lowerQuery.length + SNIPPET_AFTER);
+    let snippet = content.slice(start, end);
+    let matchStart = idx - start;
+    if (start > 0) {
+      snippet = '…' + snippet;
+      matchStart += 1;
+    }
+    if (end < content.length) snippet = snippet + '…';
+
+    const agent = agentMap.get(convInfo.agentId)!;
+    matches.push({
+      messageId: msg.id as string,
+      conversationId,
+      agentId: convInfo.agentId,
+      agentName: agent.name,
+      agentAvatarIcon: agent.avatarIcon ?? null,
+      agentAvatarBgColor: agent.avatarBgColor ?? null,
+      agentAvatarLogoColor: agent.avatarLogoColor ?? null,
+      conversationSubject: (convInfo.conversation.subject as string | null | undefined) ?? null,
+      snippet,
+      matchStart,
+      matchLength: lowerQuery.length,
+      direction: (msg.direction as string) ?? '',
+      createdAt: (msg.createdAt as string) ?? '',
+    });
+  }
+
+  matches.sort((a, b) => {
+    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return bTime - aTime;
+  });
+
+  return { entries: matches.slice(0, limit) };
+}
+
+/**
  * Create a new conversation for an agent.
  */
 export function createAgentConversation(agentId: string, subject?: string) {
