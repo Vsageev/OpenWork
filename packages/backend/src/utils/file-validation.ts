@@ -121,18 +121,5 @@ export function validateUploadedFile(
     };
   }
 
-  // Block double extensions (e.g., "file.php.jpg")
-  const parts = filename.toLowerCase().split('.');
-  if (parts.length > 2) {
-    for (let i = 1; i < parts.length - 1; i++) {
-      if (BLOCKED_EXTENSIONS.has(`.${parts[i]}`)) {
-        return {
-          valid: false,
-          error: 'File contains a suspicious double extension',
-        };
-      }
-    }
-  }
-
   return { valid: true };
 }
