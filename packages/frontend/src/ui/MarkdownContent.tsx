@@ -1,5 +1,6 @@
 import type { ClassAttributes, ComponentProps, HTMLAttributes, MouseEvent } from 'react';
 import { useCallback, useEffect, useState } from 'react';
+import { ImageLightbox } from './ImageLightbox';
 import ReactMarkdown from 'react-markdown';
 import type { ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -79,6 +80,7 @@ function MarkdownImage(props: ComponentProps<'img'>) {
   const { src, alt = '', ...rest } = props;
   const storagePath = getInternalStoragePath(src);
   const [resolvedSrc, setResolvedSrc] = useState(src ?? '');
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   useEffect(() => {
     if (!storagePath) {
@@ -116,7 +118,12 @@ function MarkdownImage(props: ComponentProps<'img'>) {
     return <div className={styles.imagePlaceholder}>Loading image...</div>;
   }
 
-  return <img src={resolvedSrc} alt={alt} {...rest} />;
+  return (
+    <>
+      <img src={resolvedSrc} alt={alt} style={{ cursor: 'zoom-in' }} onClick={() => setLightboxOpen(true)} {...rest} />
+      {lightboxOpen && <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setLightboxOpen(false)} />}
+    </>
+  );
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   Bold, Italic, Code, List, Heading2, ChevronLeft, ChevronRight, Image,
 } from 'lucide-react';
 import { Breadcrumb, Button, MarkdownContent, PageLoader, Tooltip } from '../../ui';
+import { ImageLightbox } from '../../ui/ImageLightbox';
 import type { BreadcrumbItem } from '../../ui';
 import { AgentAvatar } from '../../components/AgentAvatar';
 import { api, apiUpload, ApiError } from '../../lib/api';
@@ -116,6 +117,7 @@ function ini(f: string, l: string) {
 
 function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -139,7 +141,12 @@ function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }
   }, [storagePath]);
 
   if (!src) return <div className={styles.commentImagePlaceholder}>Loading image…</div>;
-  return <img className={styles.commentImage} src={src} alt={alt} />;
+  return (
+    <>
+      <img className={styles.commentImage} src={src} alt={alt} onClick={() => setLightboxOpen(true)} />
+      {lightboxOpen && <ImageLightbox src={src} alt={alt} onClose={() => setLightboxOpen(false)} />}
+    </>
+  );
 }
 
 /* ── Assignee picker (portal) ─────────────────────────── */
@@ -288,6 +295,7 @@ export function CardDetailPage() {
   const [savingEditComment, setSavingEditComment] = useState(false);
   const [stagedImages, setStagedImages] = useState<{ file: File; previewUrl: string }[]>([]);
   const [uploadingImages, setUploadingImages] = useState(false);
+  const [stagedLightboxSrc, setStagedLightboxSrc] = useState<string | null>(null);
   const commentFileInputRef = useRef<HTMLInputElement>(null);
   const MAX_COMMENT_IMAGES = 10;
 
@@ -1546,7 +1554,7 @@ export function CardDetailPage() {
                     <div className={styles.commentStagedImagesRow}>
                       {stagedImages.map((img, i) => (
                         <div key={img.previewUrl} className={styles.commentStagedImagePreview}>
-                          <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} />
+                          <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} onClick={() => setStagedLightboxSrc(img.previewUrl)} style={{ cursor: 'zoom-in' }} />
                           <button className={styles.commentStagedImageRemove} onClick={() => removeStagedImage(i)} aria-label="Remove image">
                             <X size={12} />
                           </button>
@@ -2033,6 +2041,7 @@ export function CardDetailPage() {
           </div>
         </div>
       </div>
+      {stagedLightboxSrc && <ImageLightbox src={stagedLightboxSrc} alt="Preview" onClose={() => setStagedLightboxSrc(null)} />}
     </div>
   );
 }

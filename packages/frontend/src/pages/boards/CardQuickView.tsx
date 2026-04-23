@@ -6,6 +6,7 @@ import {
   ChevronLeft, ChevronRight, Copy, Image,
 } from 'lucide-react';
 import { Button, MarkdownContent, Tooltip } from '../../ui';
+import { ImageLightbox } from '../../ui/ImageLightbox';
 import { AgentAvatar } from '../../components/AgentAvatar';
 import { api, apiUpload, ApiError } from '../../lib/api';
 import { toast } from '../../stores/toast';
@@ -105,6 +106,7 @@ function ini(f: string, l: string) {
 
 function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -128,7 +130,12 @@ function CommentImage({ storagePath, alt }: { storagePath: string; alt: string }
   }, [storagePath]);
 
   if (!src) return <div className={styles.commentImagePlaceholder}>Loading image…</div>;
-  return <img className={styles.commentImage} src={src} alt={alt} />;
+  return (
+    <>
+      <img className={styles.commentImage} src={src} alt={alt} onClick={() => setLightboxOpen(true)} />
+      {lightboxOpen && <ImageLightbox src={src} alt={alt} onClose={() => setLightboxOpen(false)} />}
+    </>
+  );
 }
 
 export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdated, cardIds, onNavigate }: CardQuickViewProps) {
@@ -156,6 +163,7 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
   const [loadingAssignees, setLoadingAssignees] = useState(false);
   const [stagedImages, setStagedImages] = useState<{ file: File; previewUrl: string }[]>([]);
   const [uploadingImages, setUploadingImages] = useState(false);
+  const [stagedLightboxSrc, setStagedLightboxSrc] = useState<string | null>(null);
   const commentFileInputRef = useRef<HTMLInputElement>(null);
   const MAX_COMMENT_IMAGES = 10;
   const cancelTitleEditRef = useRef(false);
@@ -1007,7 +1015,7 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
                   <div className={styles.commentStagedImagesRow}>
                     {stagedImages.map((img, i) => (
                       <div key={img.previewUrl} className={styles.commentStagedImagePreview}>
-                        <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} />
+                        <img src={img.previewUrl} alt="Preview" className={styles.commentStagedImageThumb} onClick={() => setStagedLightboxSrc(img.previewUrl)} style={{ cursor: 'zoom-in' }} />
                         <button className={styles.commentStagedImageRemove} onClick={() => removeStagedImage(i)} aria-label="Remove image">
                           <X size={12} />
                         </button>
@@ -1066,6 +1074,7 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
           </div>
         )}
       </div>
+      {stagedLightboxSrc && <ImageLightbox src={stagedLightboxSrc} alt="Preview" onClose={() => setStagedLightboxSrc(null)} />}
     </>
   );
 }

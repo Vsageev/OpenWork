@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { ImageLightbox } from '../../ui/ImageLightbox';
 import { useSearchParams } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import {
@@ -419,6 +420,8 @@ export function InboxPage() {
 
   // File attachment state
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxAlt, setLightboxAlt] = useState('');
 
   // Draft state
   const [draftConversationIds, setDraftConversationIds] = useState<Set<string>>(new Set());
@@ -1734,14 +1737,14 @@ export function InboxPage() {
 
                                 if (att.type === 'photo') {
                                   return (
-                                    <a key={ai} href={mediaUrl} target="_blank" rel="noopener noreferrer" className={styles.mediaImageLink}>
+                                    <div key={ai} className={styles.mediaImageLink} onClick={() => { setLightboxSrc(mediaUrl); setLightboxAlt('Photo'); }} style={{ cursor: 'zoom-in' }}>
                                       <img
                                         src={mediaUrl}
                                         alt="Photo"
                                         className={styles.mediaImage}
                                         loading="lazy"
                                       />
-                                    </a>
+                                    </div>
                                   );
                                 }
 
@@ -1781,6 +1784,8 @@ export function InboxPage() {
                                       alt={att.emoji || 'Sticker'}
                                       className={styles.mediaSticker}
                                       loading="lazy"
+                                      onClick={() => { setLightboxSrc(mediaUrl); setLightboxAlt(att.emoji || 'Sticker'); }}
+                                      style={{ cursor: 'zoom-in' }}
                                     />
                                   );
                                 }
@@ -2242,6 +2247,7 @@ export function InboxPage() {
         }
       />
     )}
+    {lightboxSrc && <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => setLightboxSrc(null)} />}
     </>
   );
 }

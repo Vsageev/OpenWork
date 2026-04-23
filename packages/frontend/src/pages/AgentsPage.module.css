@@ -1203,7 +1203,7 @@ button.messageMonitorBtn,
   max-height: 360px;
   border-radius: var(--radius-md);
   object-fit: contain;
-  cursor: pointer;
+  cursor: zoom-in;
 }
 
 .chatImagePlaceholder {

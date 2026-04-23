@@ -75,6 +75,7 @@ import {
   Tooltip,
   Modal,
 } from '../ui';
+import { ImageLightbox } from '../ui/ImageLightbox';
 import { api, apiUpload, ApiError } from '../lib/api';
 import {
   AGENT_MODEL_PROVIDERS as MODELS,
@@ -476,6 +477,8 @@ export const ReplyComposer = memo(function ReplyComposer({
     [],
   );
   const [draggingOver, setDraggingOver] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxAlt, setLightboxAlt] = useState('');
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -867,6 +870,7 @@ export const ReplyComposer = memo(function ReplyComposer({
                   alt={attachment.fileName}
                   className={styles.stagedImageThumb}
                   placeholderClassName={styles.stagedImageThumbPlaceholder}
+                  onClick={(src) => { setLightboxSrc(src); setLightboxAlt(attachment.fileName); }}
                 />
                 <button
                   className={styles.stagedImageRemove}
@@ -905,6 +909,8 @@ export const ReplyComposer = memo(function ReplyComposer({
                       src={attachment.previewUrl}
                       alt={attachment.file.name}
                       className={styles.stagedImageThumb}
+                      style={{ cursor: 'zoom-in' }}
+                      onClick={() => { setLightboxSrc(attachment.previewUrl); setLightboxAlt(attachment.file.name); }}
                     />
                     <button
                       className={styles.stagedImageRemove}
@@ -942,6 +948,8 @@ export const ReplyComposer = memo(function ReplyComposer({
                       src={attachment.previewUrl}
                       alt={attachment.file.name}
                       className={styles.stagedImageThumb}
+                      style={{ cursor: 'zoom-in' }}
+                      onClick={() => { setLightboxSrc(attachment.previewUrl); setLightboxAlt(attachment.file.name); }}
                     />
                     <button
                       className={styles.stagedImageRemove}
@@ -1086,6 +1094,7 @@ export const ReplyComposer = memo(function ReplyComposer({
           <Send size={18} />
         </button>
       </div>
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => setLightboxSrc(null)} />}
     </div>
   );
 });
@@ -1095,11 +1104,13 @@ function StorageImageThumb({
   alt,
   className,
   placeholderClassName,
+  onClick,
 }: {
   storagePath: string;
   alt: string;
   className: string;
   placeholderClassName: string;
+  onClick?: (src: string) => void;
 }) {
   const [src, setSrc] = useState<string | null>(null);
 
@@ -1125,13 +1136,14 @@ function StorageImageThumb({
   }, [storagePath]);
 
   if (!src) return <div className={placeholderClassName}>Loading…</div>;
-  return <img className={className} src={src} alt={alt} />;
+  return <img className={className} src={src} alt={alt} onClick={onClick ? () => onClick(src) : undefined} style={onClick ? { cursor: 'zoom-in' } : undefined} />;
 }
 
 /* ── ChatImage component ── */
 
 function ChatImage({ storagePath, alt }: { storagePath: string; alt: string }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -1155,7 +1167,12 @@ function ChatImage({ storagePath, alt }: { storagePath: string; alt: string }) {
   }, [storagePath]);
 
   if (!src) return <div className={styles.chatImagePlaceholder}>Loading image…</div>;
-  return <img className={styles.chatImage} src={src} alt={alt} />;
+  return (
+    <>
+      <img className={styles.chatImage} src={src} alt={alt} onClick={() => setLightboxOpen(true)} />
+      {lightboxOpen && <ImageLightbox src={src} alt={alt} onClose={() => setLightboxOpen(false)} />}
+    </>
+  );
 }
 
 async function downloadStorageFile(storagePath: string, fileName: string) {
