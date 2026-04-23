@@ -227,6 +227,7 @@ export function FileBrowser({
 
   // Preview
   const [previewEntry, setPreviewEntry] = useState<FileEntry | null>(null);
+  const previewEntryPath = previewEntry?.path ?? null;
 
   // Upload / drag-and-drop
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -443,18 +444,20 @@ export function FileBrowser({
     await fetchEntries(currentPath);
 
     if (failCount === 0 && failedEmptyDirectories === 0) {
-      let successMessage = '';
-      if (total > 0 && createdEmptyDirectories > 0) {
-        successMessage = `${total === 1 ? '1 file uploaded' : `${total} files uploaded`} and ${createdEmptyDirectories} empty ${createdEmptyDirectories === 1 ? 'folder' : 'folders'} added`;
-      } else if (total > 0) {
-        successMessage = total === 1 ? 'File uploaded' : `${total} files uploaded`;
-      } else if (existingEmptyDirectories > 0) {
-        successMessage = existingEmptyDirectories === 1
+      const successMessage = (() => {
+        if (total > 0 && createdEmptyDirectories > 0) {
+          return `${total === 1 ? '1 file uploaded' : `${total} files uploaded`} and ${createdEmptyDirectories} empty ${createdEmptyDirectories === 1 ? 'folder' : 'folders'} added`;
+        }
+        if (total > 0) {
+          return total === 1 ? 'File uploaded' : `${total} files uploaded`;
+        }
+        if (existingEmptyDirectories > 0) {
+          return existingEmptyDirectories === 1
           ? 'Folder already exists'
           : 'Folder structure already exists';
-      } else {
-        successMessage = createdEmptyDirectories === 1 ? 'Empty folder added' : `${createdEmptyDirectories} empty folders added`;
-      }
+        }
+        return createdEmptyDirectories === 1 ? 'Empty folder added' : `${createdEmptyDirectories} empty folders added`;
+      })();
 
       toast.success(
         skippedCount > 0
@@ -591,22 +594,25 @@ export function FileBrowser({
     if (files && files.length > 0) uploadFiles(buildUploadItems(Array.from(files)));
   }
 
-  const previewLoadTextContent = previewEntry && endpoints.readTextContent
-    ? async () => {
-      const data = await api<{ content: string }>(endpoints.readTextContent!(previewEntry.path));
+  const previewLoadTextContent = useMemo(() => {
+    if (!previewEntryPath || !endpoints.readTextContent) return undefined;
+    return async () => {
+      const data = await api<{ content: string }>(endpoints.readTextContent!(previewEntryPath));
       return data.content;
-    }
-    : undefined;
-  const previewSaveTextContent = previewEntry && endpoints.writeTextContent
-    ? async (content: string) => {
+    };
+  }, [endpoints, previewEntryPath]);
+
+  const previewSaveTextContent = useMemo(() => {
+    if (!previewEntryPath || !endpoints.writeTextContent) return undefined;
+    return async (content: string) => {
       await api(endpoints.writeTextContent!, {
         method: 'PUT',
-        body: JSON.stringify({ path: previewEntry.path, content }),
+        body: JSON.stringify({ path: previewEntryPath, content }),
       });
       toast.success('File saved');
       await fetchEntries(currentPath);
-    }
-    : undefined;
+    };
+  }, [currentPath, endpoints, fetchEntries, previewEntryPath]);
 
   function handleDragEnter(e: React.DragEvent) {
     e.preventDefault();
@@ -723,14 +729,11 @@ export function FileBrowser({
     const arr = [...entries];
     arr.sort((a, b) => {
       if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-      let cmp = 0;
-      if (sortKey === 'name') {
-        cmp = a.name.localeCompare(b.name);
-      } else if (sortKey === 'size') {
-        cmp = a.size - b.size;
-      } else {
-        cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      }
+      const cmp = sortKey === 'name'
+        ? a.name.localeCompare(b.name)
+        : sortKey === 'size'
+          ? a.size - b.size
+          : new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
       return sortAsc ? cmp : -cmp;
     });
     return arr;

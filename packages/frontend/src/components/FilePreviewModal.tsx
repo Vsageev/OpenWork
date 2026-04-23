@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Download, X } from 'lucide-react';
 import { Button, MarkdownContent, Tooltip } from '../ui';
 import { isMarkdownFile, isImagePreviewable } from '../lib/file-utils';
@@ -30,6 +30,11 @@ export function FilePreviewModal({
   const [draftContent, setDraftContent] = useState('');
   const [saving, setSaving] = useState(false);
   const overlayPressStartedRef = useRef(false);
+  const onLoadTextContentRef = useRef(onLoadTextContent);
+
+  useEffect(() => {
+    onLoadTextContentRef.current = onLoadTextContent;
+  }, [onLoadTextContent]);
 
   const isMarkdown = isMarkdownFile(fileName);
   const fileExt = useMemo(() => {
@@ -46,16 +51,6 @@ export function FilePreviewModal({
     return { Authorization: `Bearer ${token}` };
   }
 
-  async function loadTextContent() {
-    if (onLoadTextContent) return onLoadTextContent();
-
-    const res = await fetch(downloadUrl, {
-      headers: getAuthHeaders(),
-    });
-    if (!res.ok) throw new Error('Failed to fetch');
-    return res.text();
-  }
-
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
@@ -63,6 +58,17 @@ export function FilePreviewModal({
     setBlobUrl(null);
     setIsEditing(false);
     setDraftContent('');
+
+    async function loadTextContent() {
+      if (onLoadTextContentRef.current) return onLoadTextContentRef.current();
+
+      const res = await fetch(downloadUrl, {
+        headers: getAuthHeaders(),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return res.text();
+    }
 
     (async () => {
       try {
@@ -95,13 +101,33 @@ export function FilePreviewModal({
     return () => {
       controller.abort();
     };
-  }, [downloadUrl, fileName, isHtml, onLoadTextContent]);
+  }, [downloadUrl, fileName, isHtml]);
 
   useEffect(() => {
     return () => {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
   }, [blobUrl]);
+
+  const handleSave = useCallback(async () => {
+    if (!onSaveTextContent || textContent === null || saving || !hasUnsavedChanges) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onSaveTextContent(draftContent);
+      setTextContent(draftContent);
+      setIsEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  }, [draftContent, hasUnsavedChanges, onSaveTextContent, saving, textContent]);
+
+  const handleCancelEdit = useCallback(() => {
+    setDraftContent(textContent ?? '');
+    setIsEditing(false);
+  }, [textContent]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -124,27 +150,16 @@ export function FilePreviewModal({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [canEditMarkdown, draftContent, isEditing, onClose, saving, textContent]);
-
-  async function handleSave() {
-    if (!onSaveTextContent || textContent === null || saving || !hasUnsavedChanges) {
-      return;
-    }
-
-    setSaving(true);
-    try {
-      await onSaveTextContent(draftContent);
-      setTextContent(draftContent);
-      setIsEditing(false);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function handleCancelEdit() {
-    setDraftContent(textContent ?? '');
-    setIsEditing(false);
-  }
+  }, [
+    canEditMarkdown,
+    draftContent,
+    handleCancelEdit,
+    handleSave,
+    isEditing,
+    onClose,
+    saving,
+    textContent,
+  ]);
 
   function handleEnableEditMode() {
     if (!canEditMarkdown || isEditing) return;
