@@ -126,41 +126,55 @@ function MarkdownImage(props: ComponentProps<'img'>) {
   );
 }
 
+interface FileLinkInfo {
+  filePath: string;
+  line?: number;
+  column?: number;
+}
+
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseFileLink(url: string | undefined): FileLinkInfo | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    const pathname = decodeURI(parsed.pathname);
+    if (!pathname.match(/^\/(?:Users|home|tmp|var|opt|etc)\//)) return null;
+
+    const pathMatch = pathname.match(/^(.+\.[A-Za-z0-9][A-Za-z0-9_-]*)(?::(\d+))?(?::(\d+))?$/);
+    if (!pathMatch) return null;
+
+    const hashMatch = parsed.hash.match(/^#L(\d+)(?:C(\d+))?$/i);
+    return {
+      filePath: pathMatch[1],
+      line: parsePositiveInt(pathMatch[2]) ?? parsePositiveInt(hashMatch?.[1]),
+      column: parsePositiveInt(pathMatch[3]) ?? parsePositiveInt(hashMatch?.[2]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Detects links that point to local file paths (e.g. http://localhost:5173/Users/vlad/file.dart#L61)
+ * Detects links that point to local file paths (e.g. /Users/vlad/file.ts:61)
  * and opens them in the configured editor instead of navigating in the browser.
  */
 function FileLink(props: ComponentProps<'a'>) {
   const { href, children, ...rest } = props;
-
-  function parseFileLink(url: string | undefined): { filePath: string; line?: number } | null {
-    if (!url) return null;
-    try {
-      const parsed = new URL(url, window.location.origin);
-      const pathname = parsed.pathname;
-      // Detect absolute file paths (macOS /Users/..., Linux /home/..., or generic /...)
-      if (!pathname.match(/^\/(?:Users|home|tmp|var|opt|etc)\//)) return null;
-      // Must have a file extension to avoid false positives with app routes
-      if (!pathname.match(/\.\w+$/)) return null;
-      const lineMatch = parsed.hash.match(/^#L(\d+)/);
-      return { filePath: pathname, line: lineMatch ? parseInt(lineMatch[1], 10) : undefined };
-    } catch {
-      return null;
-    }
-  }
 
   const fileInfo = parseFileLink(href);
 
   function handleClick(e: MouseEvent<HTMLAnchorElement>) {
     if (!fileInfo) return;
     e.preventDefault();
+    e.stopPropagation();
     const editor = localStorage.getItem('ws_editor_protocol') || 'cursor';
-    const lineStr = fileInfo.line ? `:${fileInfo.line}` : '';
-    if (editor === 'vscode') {
-      window.open(`vscode://file${fileInfo.filePath}${lineStr}`, '_self');
-    } else {
-      window.open(`cursor://file${fileInfo.filePath}${lineStr}`, '_self');
-    }
+    const position = fileInfo.line ? `:${fileInfo.line}${fileInfo.column ? `:${fileInfo.column}` : ''}` : '';
+    window.location.href = `${editor === 'vscode' ? 'vscode' : 'cursor'}://file${fileInfo.filePath}${position}`;
   }
 
   return (
