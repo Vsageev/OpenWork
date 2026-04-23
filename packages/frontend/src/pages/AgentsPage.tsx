@@ -249,6 +249,22 @@ interface ConversationBootstrapRequest {
   conversationId: string | null;
 }
 
+interface MessageSearchResult {
+  messageId: string;
+  conversationId: string;
+  agentId: string;
+  agentName: string;
+  agentAvatarIcon: string | null;
+  agentAvatarBgColor: string | null;
+  agentAvatarLogoColor: string | null;
+  conversationSubject: string | null;
+  snippet: string;
+  matchStart: number;
+  matchLength: number;
+  direction: string;
+  createdAt: string;
+}
+
 interface ChatAttachment {
   type: string;
   fileName: string;
@@ -2144,6 +2160,12 @@ export function AgentsPage() {
   const [chatLoading, setChatLoading] = useState(false);
   const [showChatLoading, setShowChatLoading] = useState(false);
   const chatLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Message search state ──
+  const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchResult[]>([]);
+  const [messageSearchLoading, setMessageSearchLoading] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const highlightClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const nextRequest = readConversationBootstrapRequest(searchParams);
