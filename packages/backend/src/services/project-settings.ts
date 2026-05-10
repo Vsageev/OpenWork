@@ -8,6 +8,7 @@ export interface ProjectSettings {
   defaultAgentKeyId: string | null;
   fallbackModel: string | null;
   fallbackModelId: string | null;
+  autoAttachOversizedPasteAsTextFile: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -25,12 +26,19 @@ function asProjectSettings(rec: Record<string, unknown>): ProjectSettings {
     typeof rec.fallbackModelId === 'string' && rec.fallbackModelId.length > 0
       ? rec.fallbackModelId
       : null;
+  const autoAttachOversizedPasteAsTextFile =
+    typeof rec.autoAttachOversizedPasteAsTextFile === 'boolean'
+      ? rec.autoAttachOversizedPasteAsTextFile
+      : typeof rec.autoConvertLargePastedTextToAttachment === 'boolean'
+        ? rec.autoConvertLargePastedTextToAttachment
+      : true;
 
   return {
     id: typeof rec.id === 'string' ? rec.id : PROJECT_SETTINGS_ID,
     defaultAgentKeyId,
     fallbackModel,
     fallbackModelId,
+    autoAttachOversizedPasteAsTextFile,
     createdAt:
       typeof rec.createdAt === 'string' ? rec.createdAt : new Date().toISOString(),
     updatedAt:
@@ -46,6 +54,7 @@ export function getProjectSettings(): ProjectSettings {
     defaultAgentKeyId: null,
     fallbackModel: null,
     fallbackModelId: null,
+    autoAttachOversizedPasteAsTextFile: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -66,6 +75,7 @@ export function updateProjectSettings(
     defaultAgentKeyId?: string | null;
     fallbackModel?: string | null;
     fallbackModelId?: string | null;
+    autoAttachOversizedPasteAsTextFile?: boolean;
   },
 ): ProjectSettings {
   const existing = store.getById(SETTINGS_COLLECTION, PROJECT_SETTINGS_ID);
@@ -80,6 +90,11 @@ export function updateProjectSettings(
       : {}),
     ...(data.fallbackModelId !== undefined
       ? { fallbackModelId: data.fallbackModelId }
+      : {}),
+    ...(data.autoAttachOversizedPasteAsTextFile !== undefined
+      ? {
+          autoAttachOversizedPasteAsTextFile: data.autoAttachOversizedPasteAsTextFile,
+        }
       : {}),
   };
 

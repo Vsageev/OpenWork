@@ -37,7 +37,6 @@ import {
   createAgentGroup,
   updateAgentGroup,
   deleteAgentGroup,
-  reorderAgentGroups,
 } from '../services/agents.js';
 import { getWorkspaceById } from '../services/workspaces.js';
 import { listAgentCronJobsWithNextRun, syncAgentCronJobs } from '../services/agent-cron.js';
@@ -111,10 +110,10 @@ export async function agentRoutes(app: FastifyInstance) {
       let all = listAgents();
 
       if (request.query.workspaceId) {
-        const workspace = (await getWorkspaceById(request.query.workspaceId)) as any;
+        const workspace = await getWorkspaceById(request.query.workspaceId);
         if (workspace && Array.isArray(workspace.agentGroupIds)) {
           const idSet = new Set(workspace.agentGroupIds);
-          all = all.filter((a: any) => a.groupId && idSet.has(a.groupId));
+          all = all.filter((agent) => agent.groupId && idSet.has(agent.groupId));
         }
       }
 
@@ -396,6 +395,7 @@ export async function agentRoutes(app: FastifyInstance) {
           status: z.enum(['active', 'inactive', 'error']).optional(),
           apiKeyId: z.string().min(1).optional(),
           skipPermissions: z.boolean().optional(),
+          separateFolderPerChat: z.boolean().optional(),
           groupId: z.string().nullable().optional(),
           avatarIcon: avatarIconSchema.optional(),
           avatarBgColor: avatarColorSchema.optional(),
@@ -469,10 +469,10 @@ export async function agentRoutes(app: FastifyInstance) {
       let groups = listAgentGroups();
 
       if (request.query.workspaceId) {
-        const workspace = (await getWorkspaceById(request.query.workspaceId)) as any;
+        const workspace = await getWorkspaceById(request.query.workspaceId);
         if (workspace && Array.isArray(workspace.agentGroupIds)) {
           const idSet = new Set(workspace.agentGroupIds);
-          groups = groups.filter((g: any) => idSet.has(g.id));
+          groups = groups.filter((group) => idSet.has(group.id));
         }
       }
 

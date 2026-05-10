@@ -173,6 +173,11 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
   const descTextareaRef = useRef<HTMLTextAreaElement>(null);
   const descFileInputRef = useRef<HTMLInputElement>(null);
   const descSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   const [linkCopied, setLinkCopied] = useState(false);
 
@@ -202,11 +207,11 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
       setCard(data);
     } catch {
       toast.error('Failed to load card');
-      onClose();
+      onCloseRef.current();
     } finally {
       setLoading(false);
     }
-  }, [cardId, onClose]);
+  }, [cardId]);
 
   const fetchComments = useCallback(async () => {
     try {
@@ -259,12 +264,12 @@ export function CardQuickView({ cardId, boardId, boardName, onClose, onCardUpdat
       if (e.key === 'Escape') {
         // If an editing mode is active, let its local handler cancel the edit — don't close the panel
         if (editingTitle || editingDesc || editingCommentId !== null || showAssignee) return;
-        onClose();
+        onCloseRef.current();
       }
     }
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose, editingTitle, editingDesc, editingCommentId, showAssignee]);
+  }, [editingTitle, editingDesc, editingCommentId, showAssignee]);
 
   function startEditTitle() {
     if (!card) return;

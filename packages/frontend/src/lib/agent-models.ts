@@ -17,6 +17,7 @@ export const AGENT_MODEL_PROVIDERS = [
     vendor: 'OpenAI',
     description: 'Code-first agent model. Good for dev-oriented tasks.',
     modelIds: [
+      'gpt-5.5',
       'gpt-5.4',
       'gpt-5.4-mini',
       'gpt-5.4-nano',
@@ -70,6 +71,7 @@ export const AGENT_MODEL_PROVIDERS = [
       'opencode/gpt-5-nano',
       'opencode/minimax-m2.5-free',
       'opencode/nemotron-3-super-free',
+      'openai/gpt-5.5',
       'openai/gpt-5.4',
       'openai/gpt-5.4-mini',
       'openai/gpt-5.3-codex',

@@ -361,3 +361,58 @@ export function buildAgentConversationViewModel(
     showStreamingBubble,
   };
 }
+
+export function buildAgentChatMarkdownExport(options: {
+  agentName: string;
+  conversationSubject: string | null;
+  messages: AgentChatMessage[];
+  /** When true, note sibling branch variants (export includes all branches). */
+  includeAllBranches?: boolean;
+}): string {
+  const { agentName, conversationSubject, messages, includeAllBranches } = options;
+  const title = conversationSubject?.trim() || 'Conversation';
+  const exportedAt = new Date().toISOString();
+  const lines: string[] = [
+    `# ${title}`,
+    '',
+    `**Agent:** ${agentName}`,
+    `**Exported:** ${exportedAt}`,
+  ];
+  if (includeAllBranches) {
+    lines.push(
+      '_This export lists every message from every branch (not only the branch visible in the UI). Chronological order may interleave parallel branches._',
+    );
+  }
+  lines.push('', '---', '');
+
+  for (const msg of messages) {
+    const role = msg.direction === 'outbound' ? 'You' : 'Assistant';
+    const when = new Date(msg.createdAt).toISOString();
+    lines.push(`## ${role}`);
+    lines.push(`_${when}_`);
+    if (
+      includeAllBranches &&
+      typeof msg.siblingCount === 'number' &&
+      msg.siblingCount > 1 &&
+      typeof msg.siblingIndex === 'number'
+    ) {
+      lines.push(
+        `_Branch variant ${msg.siblingIndex + 1} of ${msg.siblingCount} at this tree step._`,
+      );
+    }
+    lines.push('');
+    if (msg.attachments?.length) {
+      for (const att of msg.attachments) {
+        lines.push(`- _Attachment (${att.type}):_ \`${att.fileName}\` (${att.mimeType})`);
+      }
+      lines.push('');
+    }
+    const body = msg.content?.trim();
+    if (body) {
+      lines.push(body);
+      lines.push('');
+    }
+  }
+
+  return `${lines.join('\n').trimEnd()}\n`;
+}

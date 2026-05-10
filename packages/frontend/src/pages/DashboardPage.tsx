@@ -106,6 +106,9 @@ interface RecentAgentChat {
   agentAvatarIcon: string | null;
   agentAvatarBgColor: string | null;
   agentAvatarLogoColor: string | null;
+  workspaceMode?: 'shared' | 'subfolder';
+  workspaceRelativePath?: string;
+  workspaceSeedMode?: string;
 }
 
 const STAT_CARDS = [

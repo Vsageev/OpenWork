@@ -90,6 +90,9 @@ function ensureProjectSettings(store: JsonStore): void {
   store.insert('settings', {
     id: 'project',
     defaultAgentKeyId: null,
+    fallbackModel: null,
+    fallbackModelId: null,
+    autoConvertLargePastedTextToAttachment: true,
   });
 }
 

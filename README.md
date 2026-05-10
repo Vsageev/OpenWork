@@ -50,6 +50,7 @@ pnpm dev
 ```
 
 - **Frontend:** https://localhost:5173
+- **Landing:** http://localhost:5319
 - **Backend API:** http://localhost:3847
 - **Swagger docs:** http://localhost:3847/docs
 
@@ -59,6 +60,7 @@ pnpm dev
 packages/
   backend/     Fastify API server, JSON file store
   frontend/    React 19 SPA, Vite, React Router
+  landing/     Public OpenWork landing page
   shared/      Shared TypeScript types
   widget/      Embeddable web form & chat widgets
 scripts/       Dev utility scripts (certs, stale process check — see docs/RUNBOOK.md)
@@ -112,19 +114,20 @@ Usage example:
 
 ## Key Commands
 
-| Command                  | Description                                |
-| ------------------------ | ------------------------------------------ |
-| `pnpm dev`               | Start all dev servers in parallel           |
-| `pnpm dev:backend`       | Start backend only                          |
-| `pnpm dev:frontend`      | Start frontend only                         |
-| `pnpm build`             | Build all packages                          |
-| `pnpm lint`              | Lint all packages                           |
-| `pnpm typecheck`         | Type-check all packages                     |
-| `pnpm docker:full`       | Start everything in Docker                  |
-| `pnpm docker:full:stop`  | Stop Docker containers                      |
-| `pnpm docker:down`       | Stop and remove Docker containers           |
-| `pnpm db:bootstrap`      | Bootstrap backend JSON data for a fresh environment |
-| `pnpm certs:generate`    | Generate local HTTPS certs via mkcert       |
+| Command                 | Description                                         |
+| ----------------------- | --------------------------------------------------- |
+| `pnpm dev`              | Start all dev servers in parallel                   |
+| `pnpm dev:backend`      | Start backend only                                  |
+| `pnpm dev:frontend`     | Start frontend only                                 |
+| `pnpm dev:landing`      | Start landing page only                             |
+| `pnpm build`            | Build all packages                                  |
+| `pnpm lint`             | Lint all packages                                   |
+| `pnpm typecheck`        | Type-check all packages                             |
+| `pnpm docker:full`      | Start everything in Docker                          |
+| `pnpm docker:full:stop` | Stop Docker containers                              |
+| `pnpm docker:down`      | Stop and remove Docker containers                   |
+| `pnpm db:bootstrap`     | Bootstrap backend JSON data for a fresh environment |
+| `pnpm certs:generate`   | Generate local HTTPS certs via mkcert               |
 
 ## Features
 
@@ -145,11 +148,11 @@ Run `pnpm db:bootstrap` from the repo root, or `cd packages/backend && pnpm db:b
 
 **Test accounts:**
 
-| Email                     | Password     |
-| ------------------------- | ------------ |
-| `admin@openwork.local`    | `admin123`   |
-| `manager@openwork.local`  | `manager123` |
-| `agent1@openwork.local`   | `agent123`   |
+| Email                    | Password     |
+| ------------------------ | ------------ |
+| `admin@openwork.local`   | `admin123`   |
+| `manager@openwork.local` | `manager123` |
+| `agent1@openwork.local`  | `agent123`   |
 
 ## Docker (full stack)
 

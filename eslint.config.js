@@ -22,7 +22,7 @@ export default tseslint.config(
 
   // Frontend files
   {
-    files: ['packages/frontend/src/**/*.{ts,tsx}'],
+    files: ['packages/{frontend,landing}/src/**/*.{ts,tsx}'],
     plugins: {
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,

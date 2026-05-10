@@ -1,0 +1,158 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockFind = vi.fn();
+const mockGetById = vi.fn();
+const mockUpdate = vi.fn();
+
+vi.mock('../db/index.js', () => ({
+  store: {
+    find: (col: string, predicate: (record: Record<string, unknown>) => boolean) =>
+      mockFind(col, predicate),
+    getById: (col: string, id: string) => mockGetById(col, id),
+    update: (col: string, id: string, patch: Record<string, unknown>) =>
+      mockUpdate(col, id, patch),
+  },
+}));
+
+import { getConversationAttachmentDiskPaths } from './agent-chat.js';
+
+const CONV_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+describe('getConversationAttachmentDiskPaths', () => {
+  let recordsByCollection: Record<string, Array<Record<string, unknown>>>;
+
+  beforeEach(() => {
+    recordsByCollection = {
+      conversations: [{ id: CONV_ID, metadata: null }],
+      messages: [],
+    };
+
+    mockFind.mockImplementation(
+      (col: string, predicate: (record: Record<string, unknown>) => boolean) =>
+        (recordsByCollection[col] ?? []).filter((record) => predicate(record)),
+    );
+    mockGetById.mockImplementation((col: string, id: string) =>
+      (recordsByCollection[col] ?? []).find((record) => record.id === id) ?? null,
+    );
+    mockUpdate.mockReset();
+
+    vi.spyOn(fs, 'existsSync').mockImplementation((targetPath) => {
+      const normalized =
+        typeof targetPath === 'string' ? targetPath : targetPath.toString();
+      return !normalized.includes('missing');
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockFind.mockReset();
+    mockGetById.mockReset();
+    mockUpdate.mockReset();
+  });
+
+  it('includes attachments from every attachment-bearing message in a linear conversation', () => {
+    recordsByCollection.messages = [
+      {
+        id: 'm1',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        createdAt: '2026-05-07T10:00:00.000Z',
+        attachments: null,
+      },
+      {
+        id: 'm2',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        createdAt: '2026-05-07T10:01:00.000Z',
+        attachments: [
+          { storagePath: '/chat-uploads/pasted-text-1.txt', type: 'file' },
+          { storagePath: '/chat-uploads/image-1.png', type: 'image' },
+        ],
+      },
+      {
+        id: 'm3',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        createdAt: '2026-05-07T10:02:00.000Z',
+        attachments: null,
+      },
+      {
+        id: 'm4',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        createdAt: '2026-05-07T10:03:00.000Z',
+        attachments: [
+          { storagePath: '/chat-uploads/pasted-text-2.txt', type: 'file' },
+          { storagePath: '/chat-uploads/pasted-text-1.txt', type: 'file' },
+          { storagePath: '/chat-uploads/missing.txt', type: 'file' },
+        ],
+      },
+    ];
+
+    const result = getConversationAttachmentDiskPaths(CONV_ID);
+
+    expect(result.imagePaths.map((entry) => path.basename(entry))).toEqual(['image-1.png']);
+    expect(result.filePaths.map((entry) => path.basename(entry))).toEqual([
+      'pasted-text-1.txt',
+      'pasted-text-2.txt',
+    ]);
+  });
+
+  it('limits attachments to the selected branch path when a leaf message is specified', () => {
+    recordsByCollection.messages = [
+      {
+        id: 'u1',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: null,
+        previousUserMessageId: null,
+        createdAt: '2026-05-07T10:00:00.000Z',
+        attachments: [{ storagePath: '/chat-uploads/root.txt', type: 'file' }],
+      },
+      {
+        id: 'a1',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        parentId: 'u1',
+        createdAt: '2026-05-07T10:01:00.000Z',
+        attachments: [{ storagePath: '/chat-uploads/reply.txt', type: 'file' }],
+      },
+      {
+        id: 'u2a',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: 'a1',
+        previousUserMessageId: 'u1',
+        createdAt: '2026-05-07T10:02:00.000Z',
+        attachments: [{ storagePath: '/chat-uploads/branch-a.txt', type: 'file' }],
+      },
+      {
+        id: 'r2a',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        parentId: 'u2a',
+        createdAt: '2026-05-07T10:03:00.000Z',
+        attachments: null,
+      },
+      {
+        id: 'u2b',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: 'a1',
+        previousUserMessageId: 'u1',
+        createdAt: '2026-05-07T10:04:00.000Z',
+        attachments: [{ storagePath: '/chat-uploads/branch-b.txt', type: 'file' }],
+      },
+    ];
+
+    const result = getConversationAttachmentDiskPaths(CONV_ID, 'r2a');
+
+    expect(result.filePaths.map((entry) => path.basename(entry))).toEqual([
+      'root.txt',
+      'reply.txt',
+      'branch-a.txt',
+    ]);
+  });
+});

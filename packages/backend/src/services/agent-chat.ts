@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { store } from '../db/index.js';
@@ -12,8 +13,13 @@ import {
   prepareAgentWorkspaceAccess,
   resolveCliExecutable,
 } from './agents.js';
-import { resolveAgentWorkspacePath } from './agent-workspaces.js';
-import { listAgentEnvVars, listRuntimeAgentEnvVarBindings } from './agent-env-vars.js';
+import {
+  ensureConversationSubfolderWorkspace,
+  resolveAgentExecutionRootFromRecord,
+  resolveAgentWorkspacePathFromRecord,
+  resolveSubfolderProcessCwd,
+} from './agent-workspaces.js';
+import { listRuntimeAgentEnvVarBindings } from './agent-env-vars.js';
 import { createAgentRun, completeAgentRun } from './agent-runs.js';
 import { getFallbackModelConfig } from './project-settings.js';
 
@@ -378,6 +384,57 @@ function parseMetadata(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+export type ConversationWorkspaceMode = 'shared' | 'subfolder';
+
+/**
+ * Exposes workspace fields for API clients. Conversations without persisted workspace metadata
+ * are treated as shared (legacy and default).
+ */
+export function parseConversationWorkspaceFields(raw: unknown): {
+  workspaceMode: ConversationWorkspaceMode;
+  workspaceRelativePath?: string;
+  workspaceSeedMode?: string;
+} {
+  const meta = parseMetadata(raw);
+  if (meta?.workspaceMode === 'subfolder') {
+    return {
+      workspaceMode: 'subfolder',
+      workspaceRelativePath:
+        typeof meta.workspaceRelativePath === 'string' ? meta.workspaceRelativePath : undefined,
+      workspaceSeedMode:
+        typeof meta.workspaceSeedMode === 'string' ? meta.workspaceSeedMode : 'symlink',
+    };
+  }
+  return { workspaceMode: 'shared' };
+}
+
+function ensureConversationWorkspaceMetadata(
+  agentId: string,
+  conversation: Record<string, unknown> | null | undefined,
+): {
+  workspaceMode: ConversationWorkspaceMode;
+  workspaceRelativePath?: string;
+  workspaceSeedMode?: string;
+} {
+  const parsed = parseConversationWorkspaceFields(conversation?.metadata);
+  if (!conversation || typeof conversation.id !== 'string') return parsed;
+  if (parsed.workspaceMode === 'subfolder') return parsed;
+
+  const agent = getAgent(agentId);
+  if (agent?.separateFolderPerChat !== true) return parsed;
+
+  const meta = parseMetadata(conversation.metadata) ?? {};
+  const nextMeta = {
+    ...meta,
+    agentId,
+    workspaceMode: 'subfolder',
+    workspaceRelativePath: `conversations/${conversation.id}`,
+    workspaceSeedMode: 'symlink',
+  };
+  store.update('conversations', conversation.id, { metadata: JSON.stringify(nextMeta) });
+  return parseConversationWorkspaceFields(nextMeta);
+}
+
 function isBackgroundTriggerConversationRecord(r: Record<string, unknown>): boolean {
   const meta = parseMetadata(r.metadata);
   if (!meta) return false;
@@ -424,6 +481,7 @@ export function listAgentConversations(agentId: string, limit = 50, offset = 0) 
     const isBusy = busy || hasPendingExecutionItems(agentId, conversationId);
     return {
       ...conv,
+      ...parseConversationWorkspaceFields(conv.metadata),
       isBusy,
       queuedCount,
       hasFailed,
@@ -444,6 +502,7 @@ export function getAgentConversation(agentId: string, conversationId: string) {
 
   return {
     ...conversation,
+    ...parseConversationWorkspaceFields(conversation.metadata),
     isBusy,
     queuedCount,
     hasFailed,
@@ -488,6 +547,7 @@ export function listRecentAgentConversations(limit = 10) {
       agentAvatarIcon: agent.avatarIcon ?? null,
       agentAvatarBgColor: agent.avatarBgColor ?? null,
       agentAvatarLogoColor: agent.avatarLogoColor ?? null,
+      ...parseConversationWorkspaceFields(conv.metadata),
     };
   });
 
@@ -590,7 +650,19 @@ export function searchAgentMessages(query: string, limit = 20) {
  * Create a new conversation for an agent.
  */
 export function createAgentConversation(agentId: string, subject?: string) {
-  return store.insert('conversations', {
+  const agent = getAgent(agentId);
+  const useSubfolder = agent?.separateFolderPerChat === true;
+  const conversationId = crypto.randomUUID();
+  const meta: Record<string, unknown> = {
+    agentId,
+  };
+  if (useSubfolder) {
+    meta.workspaceMode = 'subfolder';
+    meta.workspaceRelativePath = `conversations/${conversationId}`;
+    meta.workspaceSeedMode = 'symlink';
+  }
+  const created = store.insert('conversations', {
+    id: conversationId,
     contactId: 'system',
     channelType: 'agent',
     status: 'open',
@@ -598,8 +670,22 @@ export function createAgentConversation(agentId: string, subject?: string) {
     externalId: null,
     isUnread: false,
     lastMessageAt: null,
-    metadata: JSON.stringify({ agentId }),
+    metadata: JSON.stringify(meta),
   });
+  if (useSubfolder) {
+    const agent = getAgent(agentId);
+    if (!agent) {
+      throw new Error('Agent not found');
+    }
+    const agentRecord = agent as unknown as Record<string, unknown>;
+    const contextRoot = resolveAgentWorkspacePathFromRecord(agentRecord, agentId);
+    const executionRoot = resolveAgentExecutionRootFromRecord(agentRecord, agentId);
+    ensureConversationSubfolderWorkspace(contextRoot, executionRoot, conversationId);
+  }
+  return {
+    ...created,
+    ...parseConversationWorkspaceFields(created.metadata),
+  };
 }
 
 /**
@@ -828,6 +914,96 @@ export function getActiveMessagePath(conversationId: string): TreePathMessage[] 
   }
 
   return path;
+}
+
+function compareConversationMessagesByCreatedAt(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): number {
+  const createdAtDelta =
+    new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime();
+  if (createdAtDelta !== 0) return createdAtDelta;
+  return String(a.id).localeCompare(String(b.id));
+}
+
+function getOutboundAnchorForInboundMessage(
+  conversationId: string,
+  message: Record<string, unknown>,
+  messagesById: Map<string, Record<string, unknown>>,
+): string | null {
+  let parentId = (message.parentId as string | null) ?? null;
+  while (parentId) {
+    const parent = messagesById.get(parentId);
+    if (!parent) break;
+    if (parent.direction === 'outbound') {
+      return parentId;
+    }
+    parentId = (parent.parentId as string | null) ?? null;
+  }
+  return findPreviousOutboundAncestor(
+    conversationId,
+    (message.parentId as string | null) ?? null,
+  );
+}
+
+/**
+ * Serialize every message in a conversation (all branches), with sibling metadata
+ * matching the active-path API shape.
+ */
+export function serializeAllConversationMessageEntries(
+  conversationId: string,
+): Record<string, unknown>[] {
+  const allMessages = listConversationMessages(conversationId);
+  if (allMessages.length === 0) return [];
+
+  const messagesById = new Map<string, Record<string, unknown>>(
+    allMessages.map((m) => [String(m.id), m]),
+  );
+  const childrenMap = buildChildrenMap(allMessages);
+  const userMessages = allMessages.filter((message) => message.direction === 'outbound');
+  const userVariantsByPreviousMessageId = new Map<string | null, Record<string, unknown>[]>();
+  for (const message of userMessages) {
+    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+      conversationId,
+      message,
+    );
+    const variants = userVariantsByPreviousMessageId.get(previousUserMessageId);
+    if (variants) variants.push(message);
+    else userVariantsByPreviousMessageId.set(previousUserMessageId, [message]);
+  }
+  for (const [, variants] of userVariantsByPreviousMessageId) {
+    variants.sort(compareConversationMessagesByCreatedAt);
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  for (const msg of allMessages) {
+    let siblings: Record<string, unknown>[];
+    if (msg.direction === 'outbound') {
+      const prevId = getPreviousUserMessageIdForConversationMessage(conversationId, msg);
+      siblings = userVariantsByPreviousMessageId.get(prevId) ?? [msg];
+    } else {
+      const anchorUserId = getOutboundAnchorForInboundMessage(conversationId, msg, messagesById);
+      siblings = anchorUserId
+        ? getSelectableReplyChildren(childrenMap, anchorUserId)
+        : [msg];
+      if (siblings.length === 0) {
+        siblings = [msg];
+      }
+    }
+
+    const enriched = withSelectedSiblingMetadata(msg, siblings) as TreePathMessage;
+    const { _siblingIndex, _siblingCount, _siblingIds, ...rest } = enriched;
+    rows.push({
+      ...rest,
+      previousUserMessageId: getPreviousUserMessageIdForConversationMessage(conversationId, msg),
+      siblingIndex: _siblingIndex,
+      siblingCount: _siblingCount,
+      siblingIds: _siblingIds,
+    });
+  }
+
+  rows.sort(compareConversationMessagesByCreatedAt);
+  return rows;
 }
 
 function getMessagePathToLeaf(conversationId: string, leafMessageId: string): TreePathMessage[] {
@@ -1559,8 +1735,8 @@ interface ConversationAttachmentDiskPaths {
   filePaths: string[];
 }
 
-/** Returns disk paths for attachments in the most recent attachment message of the active path. */
-function getConversationAttachmentDiskPaths(
+/** Returns disk paths for attachments across the full active path in chronological order. */
+export function getConversationAttachmentDiskPaths(
   conversationId: string,
   leafMessageId?: string,
 ): ConversationAttachmentDiskPaths {
@@ -1570,24 +1746,19 @@ function getConversationAttachmentDiskPaths(
       ? getActiveMessagePath(conversationId)
       : listConversationMessages(conversationId);
 
-  const attachmentMsgs = activePath
-    .filter((msg) => parseAttachments(msg.attachments).length > 0)
-    .reverse();
-
-  if (attachmentMsgs.length === 0) {
-    return { imagePaths: [], filePaths: [] };
-  }
-
-  const latest = attachmentMsgs[0];
-  const attachments = parseAttachments(latest.attachments);
   const imagePaths: string[] = [];
   const filePaths: string[] = [];
-  for (const att of attachments) {
-    if (typeof att.storagePath !== 'string') continue;
-    const diskPath = storageDiskPath(att.storagePath);
-    if (!fs.existsSync(diskPath)) continue;
-    if (att.type === 'image') imagePaths.push(diskPath);
-    else filePaths.push(diskPath);
+  const seenStoragePaths = new Set<string>();
+  for (const message of activePath) {
+    const attachments = parseAttachments(message.attachments);
+    for (const att of attachments) {
+      if (typeof att.storagePath !== 'string' || seenStoragePaths.has(att.storagePath)) continue;
+      seenStoragePaths.add(att.storagePath);
+      const diskPath = storageDiskPath(att.storagePath);
+      if (!fs.existsSync(diskPath)) continue;
+      if (att.type === 'image') imagePaths.push(diskPath);
+      else filePaths.push(diskPath);
+    }
   }
   return { imagePaths, filePaths };
 }
@@ -1719,27 +1890,6 @@ function buildTriggerContext(
   }
   lines.push('End Trigger Context', '');
   return `${lines.join('\n')}\n`;
-}
-
-function buildEnvVarContextBlock(agentId: string): string {
-  const envVars = listAgentEnvVars(agentId).filter((entry) => entry.isActive);
-  if (envVars.length === 0) return '';
-
-  const lines = [
-    'Environment Variable Context',
-    'These env vars are configured for this agent and available in the runtime environment.',
-    'Use them only when needed. Never print full secret values in responses.',
-  ];
-
-  for (const entry of envVars) {
-    lines.push(`- ${entry.key}`);
-    if (entry.description) {
-      lines.push(`  Description: ${entry.description}`);
-    }
-  }
-
-  lines.push('End Environment Variable Context');
-  return lines.join('\n');
 }
 
 function buildChildEnv(
@@ -2156,14 +2306,6 @@ function hasPendingExecutionItems(agentId: string, conversationId: string): bool
   );
 }
 
-function getPendingQueueCount(agentId: string, conversationId: string): number {
-  return store.count(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) =>
-      r.agentId === agentId && r.conversationId === conversationId && r.status === 'queued',
-  );
-}
-
 function getQueuedAppendPromptCount(agentId: string, conversationId: string): number {
   return store.count(
     AGENT_CHAT_QUEUE_COLLECTION,
@@ -2353,11 +2495,46 @@ function attachToProcess(options: AttachOptions): RunHandle {
 // runAgentProcess — spawns detached, writes to files
 // ---------------------------------------------------------------------------
 
+/**
+ * Working directory for an agent CLI process: repo-backed agents execute from the repository
+ * root, while the agent folder remains the source of AGENTS/skills context. Subfolder-mode chats
+ * use `conversations/<id>/` under that execution root (materialized before spawn).
+ */
+export function resolveAgentChatProcessWorkingDirectory(
+  agentId: string,
+  conversationId: string | undefined,
+): string {
+  const agent = getAgent(agentId);
+  if (!agent) {
+    throw new Error('Agent not found');
+  }
+  const agentRecord = agent as unknown as Record<string, unknown>;
+  const executionRoot = resolveAgentExecutionRootFromRecord(agentRecord, agentId);
+  if (!conversationId) return executionRoot;
+  const conv = store.getById('conversations', conversationId);
+  const { workspaceMode, workspaceRelativePath } = ensureConversationWorkspaceMetadata(
+    agentId,
+    conv,
+  );
+  if (workspaceMode !== 'subfolder') return executionRoot;
+  const agentWorkspaceRoot = resolveAgentWorkspacePathFromRecord(agentRecord, agentId);
+  ensureConversationSubfolderWorkspace(agentWorkspaceRoot, executionRoot, conversationId);
+  return resolveSubfolderProcessCwd(
+    executionRoot,
+    conversationId,
+    workspaceMode,
+    workspaceRelativePath,
+  );
+}
+
 async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
   // Wait for a global concurrency slot before spawning
   await waitForConcurrencySlot();
 
-  const workDir = resolveAgentWorkspacePath(options.agentId);
+  const workDir = resolveAgentChatProcessWorkingDirectory(
+    options.agentId,
+    options.triggerRef?.conversationId,
+  );
   const { bin, args, stdinData } = buildCliCommand({
     model: options.agent.model,
     modelId: options.agent.modelId,

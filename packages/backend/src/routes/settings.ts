@@ -159,6 +159,62 @@ export async function settingsRoutes(app: FastifyInstance) {
     },
   );
 
+  // GET /api/settings/chat
+  typedApp.get(
+    '/api/settings/chat',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Settings'],
+        summary: 'Get chat composer settings',
+      },
+    },
+    async () => {
+      const settings = getProjectSettings();
+      return {
+        autoAttachOversizedPasteAsTextFile: settings.autoAttachOversizedPasteAsTextFile,
+      };
+    },
+  );
+
+  // PATCH /api/settings/chat
+  typedApp.patch(
+    '/api/settings/chat',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Settings'],
+        summary: 'Update chat composer settings',
+        body: z
+          .object({
+            autoAttachOversizedPasteAsTextFile: z.boolean().optional(),
+            autoConvertLargePastedTextToAttachment: z.boolean().optional(),
+          })
+          .strict(),
+      },
+    },
+    async (request) => {
+      const updated = updateProjectSettings({
+        ...(request.body.autoAttachOversizedPasteAsTextFile !== undefined
+          ? {
+              autoAttachOversizedPasteAsTextFile:
+                request.body.autoAttachOversizedPasteAsTextFile,
+            }
+          : request.body.autoConvertLargePastedTextToAttachment !== undefined
+            ? {
+                autoAttachOversizedPasteAsTextFile:
+                  request.body.autoConvertLargePastedTextToAttachment,
+              }
+          : {}),
+      });
+
+      return {
+        autoAttachOversizedPasteAsTextFile:
+          updated.autoAttachOversizedPasteAsTextFile,
+      };
+    },
+  );
+
   // PATCH /api/settings/rate-limits
   typedApp.patch(
     '/api/settings/rate-limits',

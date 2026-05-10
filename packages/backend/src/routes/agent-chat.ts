@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
@@ -35,7 +37,9 @@ import {
   editMessageAndBranch,
   switchBranch,
   getPreviousUserMessageIdForConversationMessage,
+  serializeAllConversationMessageEntries,
   AgentChatError,
+  resolveAgentChatProcessWorkingDirectory,
 } from '../services/agent-chat.js';
 import { listAgentRuns } from '../services/agent-runs.js';
 import { ApiError } from '../utils/api-errors.js';
@@ -139,6 +143,28 @@ function rethrowAgentChatError(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof AgentChatError) throw toAgentChatApiError(error);
   throw error;
+}
+
+function revealPathInFileManager(diskPath: string) {
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    const stat = fs.statSync(diskPath);
+    if (stat.isDirectory()) {
+      spawn('open', [diskPath], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('open', ['-R', diskPath], { detached: true, stdio: 'ignore' }).unref();
+    }
+    return;
+  }
+
+  if (platform === 'win32') {
+    spawn('explorer', [`/select,${diskPath}`], { detached: true, stdio: 'ignore' }).unref();
+    return;
+  }
+
+  const stat = fs.statSync(diskPath);
+  const dir = stat.isDirectory() ? diskPath : path.dirname(diskPath);
+  spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
 }
 
 export async function agentChatRoutes(app: FastifyInstance) {
@@ -252,6 +278,40 @@ export async function agentChatRoutes(app: FastifyInstance) {
     },
   );
 
+  typedApp.post(
+    '/api/agents/:id/chat/conversations/:conversationId/reveal-folder',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Reveal a conversation subfolder in the OS file manager',
+        params: z.object({ id: z.string(), conversationId: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.conversationId, request.params.id);
+
+      const conversation = getAgentConversation(request.params.id, request.params.conversationId);
+      if (!conversation) {
+        throw ApiError.notFound('conversation_not_found', 'Conversation not found');
+      }
+      if (conversation.workspaceMode !== 'subfolder') {
+        throw ApiError.conflict(
+          'conversation_folder_unavailable',
+          'This conversation does not use a dedicated subfolder',
+        );
+      }
+
+      const diskPath = resolveAgentChatProcessWorkingDirectory(
+        request.params.id,
+        request.params.conversationId,
+      );
+      revealPathInFileManager(diskPath);
+      return reply.status(204).send();
+    },
+  );
+
   // Rename a conversation
   typedApp.patch(
     '/api/agents/:id/chat/conversations/:conversationId',
@@ -326,7 +386,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
         params: z.object({ id: z.string() }),
         querystring: z.object({
           conversationId: z.string(),
-          limit: z.coerce.number().int().min(1).max(200).default(100),
+          scope: z.enum(['active', 'all']).default('active'),
+          limit: z.coerce.number().int().min(1).max(2000).default(100),
           offset: z.coerce.number().int().min(0).default(0),
         }),
       },
@@ -335,7 +396,10 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireAgentExists(request.params.id);
       requireConversationExists(request.query.conversationId, request.params.id);
 
-      const entries = serializeActivePathEntries(request.query.conversationId);
+      const entries =
+        request.query.scope === 'all'
+          ? serializeAllConversationMessageEntries(request.query.conversationId)
+          : serializeActivePathEntries(request.query.conversationId);
       const { limit, offset } = request.query;
       const paged = entries.slice(offset, offset + limit);
       return reply.send({ total: entries.length, limit, offset, entries: paged });

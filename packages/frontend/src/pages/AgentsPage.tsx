@@ -107,6 +107,7 @@ import { useWorkspace } from '../stores/WorkspaceContext';
 import styles from './AgentsPage.module.css';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import {
+  buildAgentChatMarkdownExport,
   buildAgentConversationViewModel,
   getBranchTargetIdByOffset,
   queueItemsLabel,
@@ -143,6 +144,10 @@ interface AgentDefaultsResponse {
   defaultAgentKeyId: string | null;
 }
 
+interface ChatComposerSettingsResponse {
+  autoAttachOversizedPasteAsTextFile: boolean;
+}
+
 interface CronJob {
   id: string;
   cron: string;
@@ -177,6 +182,7 @@ interface Agent {
   lastActivity: string | null;
   capabilities: string[];
   skipPermissions?: boolean;
+  separateFolderPerChat?: boolean;
   cronJobs?: CronJob[];
   groupId: string | null;
   avatarIcon: string;
@@ -242,6 +248,11 @@ interface ChatConversation {
   hasFailed?: boolean;
   updatedAt: string;
   createdAt: string;
+  /** Persisted in conversation metadata; missing on legacy conversations = shared. */
+  metadata?: string | null;
+  workspaceMode?: 'shared' | 'subfolder';
+  workspaceRelativePath?: string;
+  workspaceSeedMode?: string;
 }
 
 interface ConversationBootstrapRequest {
@@ -263,6 +274,10 @@ interface MessageSearchResult {
   matchLength: number;
   direction: string;
   createdAt: string;
+}
+
+interface MessageSearchResponse {
+  entries: MessageSearchResult[];
 }
 
 interface ChatAttachment {
@@ -395,12 +410,15 @@ type ReplyComposerEditingProp =
 interface ReplyComposerProps {
   streaming: boolean;
   editingMessage?: ReplyComposerEditingProp | null;
+  autoAttachOversizedPasteAsTextFile: boolean;
   onSendAttachments: (caption: string, files: File[]) => Promise<void>;
   onSendText: (prompt: string) => Promise<void>;
 }
 
 const MAX_STAGED_ATTACHMENTS = 10;
 const AGENT_CHAT_DRAFT_STORAGE_KEY = 'openwork_agent_chat_global_draft';
+const OVERSIZED_PASTED_TEXT_MIN_CHARS = 12000;
+const PASTED_TEXT_ATTACHMENT_PREFIX = 'pasted-text';
 
 export function getChatMessageEditableAttachments(
   message: Pick<ChatMessage, 'attachments'>,
@@ -479,9 +497,29 @@ function formatBytes(value: number): string {
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function formatPastedTextAttachmentTimestamp(date: Date): string {
+  const year = date.getUTCFullYear().toString().padStart(4, '0');
+  const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+  const day = date.getUTCDate().toString().padStart(2, '0');
+  const hours = date.getUTCHours().toString().padStart(2, '0');
+  const minutes = date.getUTCMinutes().toString().padStart(2, '0');
+  const seconds = date.getUTCSeconds().toString().padStart(2, '0');
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function createPastedTextAttachmentName(now: Date = new Date()): string {
+  const timestamp = formatPastedTextAttachmentTimestamp(now);
+  const uniqueSuffix =
+    typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+      : Math.random().toString(36).slice(2, 10).padEnd(8, '0');
+  return `${PASTED_TEXT_ATTACHMENT_PREFIX}-${timestamp}-${uniqueSuffix}.txt`;
+}
+
 export const ReplyComposer = memo(function ReplyComposer({
   streaming,
   editingMessage = null,
+  autoAttachOversizedPasteAsTextFile,
   onSendAttachments,
   onSendText,
 }: ReplyComposerProps) {
@@ -784,11 +822,38 @@ export const ReplyComposer = memo(function ReplyComposer({
   const handlePaste = useCallback(
     (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
       const files = getImagesFromClipboardData(e.clipboardData);
-      if (files.length === 0) return;
+      if (files.length > 0) {
+        e.preventDefault();
+        stageImages(files);
+        return;
+      }
+
+      if (!autoAttachOversizedPasteAsTextFile || isEditingQueueItem) return;
+
+      const pastedText = e.clipboardData.getData('text/plain');
+      if (pastedText.length < OVERSIZED_PASTED_TEXT_MIN_CHARS) return;
+      if (totalAttachmentCount >= MAX_STAGED_ATTACHMENTS) {
+        toast.error(`Max ${MAX_STAGED_ATTACHMENTS} attachments`);
+        return;
+      }
+
       e.preventDefault();
-      stageImages(files);
+      const fileName = createPastedTextAttachmentName();
+      stageFiles([
+        new File([pastedText], fileName, {
+          type: 'text/plain',
+          lastModified: Date.now(),
+        }),
+      ]);
+      toast.success(`Oversized pasted text was attached as ${fileName}`);
     },
-    [stageImages],
+    [
+      autoAttachOversizedPasteAsTextFile,
+      isEditingQueueItem,
+      stageFiles,
+      stageImages,
+      totalAttachmentCount,
+    ],
   );
 
   const handleDragOver = useCallback((e: ReactDragEvent) => {
@@ -1209,6 +1274,27 @@ async function downloadStorageFile(storagePath: string, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
+function downloadTextFile(fileName: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function buildAgentChatExportBasename(subject: string | null): string {
+  const raw = (subject?.trim() || 'agent-chat')
+    .replace(/[/\\?%*:|"<>#]/g, '-')
+    .replace(/\s+/g, ' ');
+  const trimmed = raw.trim().slice(0, 72) || 'agent-chat';
+  const stamp = new Date().toISOString().slice(0, 10);
+  return `${trimmed}-${stamp}`;
+}
+
 function ChatFileAttachment({ attachment }: { attachment: ChatAttachment }) {
   const [downloading, setDownloading] = useState(false);
 
@@ -1500,6 +1586,7 @@ interface AgentSidebarItemProps {
   onCleanConversations: (agentId: string) => void;
   onCreateConversation: (agentId: string) => void;
   onSelectConversation: (agentId: string, conversationId: string) => void;
+  onRevealConversationFolder: (agentId: string, conversationId: string) => void;
   onRenameConversation: (agentId: string, conversation: ChatConversation) => void;
   onDeleteConversation: (agentId: string, conversationId: string) => void;
 }
@@ -1518,6 +1605,7 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   onCleanConversations,
   onCreateConversation,
   onSelectConversation,
+  onRevealConversationFolder,
   onRenameConversation,
   onDeleteConversation,
 }: AgentSidebarItemProps) {
@@ -1654,41 +1742,65 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
                     {conversation.subject || 'New conversation'}
                   </div>
                 </div>
-                {queuedCount > 0 && (
-                  <span className={styles.convQueueBadge} title={queueItemsLabel(queuedCount)}>
-                    <Clock size={9} />
-                    {queuedCount}
+                <div className={styles.convItemTail}>
+                  {queuedCount > 0 && (
+                    <span className={styles.convQueueBadge} title={queueItemsLabel(queuedCount)}>
+                      <Clock size={9} />
+                      {queuedCount}
+                    </span>
+                  )}
+                  {hasFailed && (
+                    <span className={styles.convFailedBadge} title="Latest active branch failed">
+                      <AlertTriangle size={10} />
+                      Failed
+                    </span>
+                  )}
+                  {conversation.workspaceMode === 'subfolder' && (
+                    <span
+                      className={styles.convWorkspaceBadge}
+                      title="Dedicated conversation subfolder"
+                    >
+                      <Folder size={9} />
+                      Subfolder
+                    </span>
+                  )}
+                  {conversation.workspaceMode === 'subfolder' && (
+                    <button
+                      className={styles.convItemAction}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRevealConversationFolder(agent.id, conversation.id);
+                      }}
+                      aria-label="Open conversation subfolder"
+                      title="Open conversation subfolder"
+                    >
+                      <FolderOpen size={13} />
+                    </button>
+                  )}
+                  <span className={styles.convItemTime}>
+                    {relativeTime(conversation.lastMessageAt || conversation.createdAt)}
                   </span>
-                )}
-                {hasFailed && (
-                  <span className={styles.convFailedBadge} title="Latest active branch failed">
-                    <AlertTriangle size={10} />
-                    Failed
-                  </span>
-                )}
-                <span className={styles.convItemTime}>
-                  {relativeTime(conversation.lastMessageAt || conversation.createdAt)}
-                </span>
-                <button
-                  className={styles.convItemAction}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRenameConversation(agent.id, conversation);
-                  }}
-                  aria-label="Rename conversation"
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  className={`${styles.convItemAction} ${styles.convItemDelete}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteConversation(agent.id, conversation.id);
-                  }}
-                  aria-label="Delete conversation"
-                >
-                  <Trash2 size={13} />
-                </button>
+                  <button
+                    className={styles.convItemAction}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRenameConversation(agent.id, conversation);
+                    }}
+                    aria-label="Rename conversation"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    className={`${styles.convItemAction} ${styles.convItemDelete}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteConversation(agent.id, conversation.id);
+                    }}
+                    aria-label="Delete conversation"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
               </div>
             );
           })}
@@ -1735,7 +1847,8 @@ function areChatConversationListsEqual(a: ChatConversation[], b: ChatConversatio
       Boolean(a[i].isBusy) !== Boolean(b[i].isBusy) ||
       Number(a[i].queuedCount ?? 0) !== Number(b[i].queuedCount ?? 0) ||
       Boolean(a[i].hasFailed) !== Boolean(b[i].hasFailed) ||
-      a[i].updatedAt !== b[i].updatedAt
+      a[i].updatedAt !== b[i].updatedAt ||
+      a[i].workspaceMode !== b[i].workspaceMode
     ) {
       return false;
     }
@@ -1773,6 +1886,22 @@ function areConversationBootstrapRequestsEqual(
   b: ConversationBootstrapRequest | null,
 ): boolean {
   return a?.agentId === b?.agentId && a?.conversationId === b?.conversationId;
+}
+
+function renderMessageSearchSnippet(result: MessageSearchResult) {
+  const start = Math.max(0, result.matchStart);
+  const end = Math.min(result.snippet.length, start + Math.max(0, result.matchLength));
+  const before = result.snippet.slice(0, start);
+  const match = result.snippet.slice(start, end);
+  const after = result.snippet.slice(end);
+
+  return (
+    <>
+      {before}
+      {match ? <mark className={styles.messageSearchMark}>{match}</mark> : null}
+      {after}
+    </>
+  );
 }
 
 const RUN_HANDOFF_MS = 6000;
@@ -2166,6 +2295,7 @@ export function AgentsPage() {
   const [messageSearchLoading, setMessageSearchLoading] = useState(false);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const highlightClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageSearchRequestTokenRef = useRef(0);
 
   useEffect(() => {
     const nextRequest = readConversationBootstrapRequest(searchParams);
@@ -2295,6 +2425,8 @@ export function AgentsPage() {
       return false;
     }
   });
+  const [autoAttachOversizedPasteAsTextFile, setAutoAttachOversizedPasteAsTextFile] =
+    useState(true);
 
   function toggleAutoCollapse() {
     setAutoCollapse((prev) => {
@@ -2403,6 +2535,16 @@ export function AgentsPage() {
   activeConvIdRef.current = activeConvId;
   convsByAgentRef.current = convsByAgent;
   pendingConversationKeysRef.current = pendingConversationKeys;
+
+  useEffect(() => {
+    api<ChatComposerSettingsResponse>('/settings/chat')
+      .then((data) => {
+        setAutoAttachOversizedPasteAsTextFile(data.autoAttachOversizedPasteAsTextFile);
+      })
+      .catch(() => {
+        // Keep the default enabled behavior if settings are temporarily unavailable.
+      });
+  }, []);
 
   const setActiveConversation = useCallback(
     (agentId: string | null, conversationId: string | null) => {
@@ -3407,6 +3549,48 @@ export function AgentsPage() {
     void markConversationRead(activeAgentId, activeConvId);
   }, [activeAgentId, activeConvId, markConversationRead]);
 
+  useEffect(() => {
+    if (!highlightedMessageId || visibleMessages.length === 0) return;
+    if (!visibleMessages.some((message) => message.id === highlightedMessageId)) return;
+
+    const rafId = window.requestAnimationFrame(() => {
+      const container = messagesRef.current;
+      if (!container) return;
+      const escapedMessageId =
+        typeof window.CSS?.escape === 'function'
+          ? window.CSS.escape(highlightedMessageId)
+          : highlightedMessageId;
+      const target = container.querySelector<HTMLElement>(
+        `[data-message-id="${escapedMessageId}"]`,
+      );
+      if (!target) return;
+      forceScrollToBottomRef.current = false;
+      shouldStickToBottomRef.current = false;
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+
+    if (highlightClearTimerRef.current) {
+      clearTimeout(highlightClearTimerRef.current);
+    }
+    highlightClearTimerRef.current = setTimeout(() => {
+      setHighlightedMessageId((current) => (current === highlightedMessageId ? null : current));
+      highlightClearTimerRef.current = null;
+    }, 2500);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [highlightedMessageId, visibleMessages]);
+
+  useEffect(
+    () => () => {
+      if (highlightClearTimerRef.current) {
+        clearTimeout(highlightClearTimerRef.current);
+      }
+    },
+    [],
+  );
+
   // Sync cron jobs state when settings modal opens
   useEffect(() => {
     if (settingsAgent) {
@@ -3505,6 +3689,19 @@ export function AgentsPage() {
       markConversationRead,
       setActiveConversation,
     ],
+  );
+
+  const handleSelectMessageSearchResult = useCallback(
+    async (result: MessageSearchResult) => {
+      if (highlightClearTimerRef.current) {
+        clearTimeout(highlightClearTimerRef.current);
+        highlightClearTimerRef.current = null;
+      }
+      setHighlightedMessageId(null);
+      await selectConversation(result.agentId, result.conversationId);
+      setHighlightedMessageId(result.messageId);
+    },
+    [selectConversation],
   );
 
   /* ── Create conversation ── */
@@ -3616,6 +3813,16 @@ export function AgentsPage() {
       conversationId: conversation.id,
       value: conversation.subject || '',
     });
+  }, []);
+
+  const revealConversationFolder = useCallback(async (agentId: string, conversationId: string) => {
+    try {
+      await api(`/agents/${agentId}/chat/conversations/${conversationId}/reveal-folder`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to open conversation folder');
+    }
   }, []);
 
   const closeRenameConversation = useCallback(() => {
@@ -4490,6 +4697,19 @@ export function AgentsPage() {
     }
   }
 
+  async function handleSetSeparateFolderPerChat(agent: Agent, value: boolean) {
+    try {
+      const updated = await api<Agent>(`/agents/${agent.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ separateFolderPerChat: value }),
+      });
+      setAgents((prev) => prev.map((a) => (a.id === agent.id ? updated : a)));
+      if (settingsAgent?.id === agent.id) setSettingsAgent(updated);
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : 'Failed to update setting');
+    }
+  }
+
   function toggleGroupCollapse(id: string) {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -4791,11 +5011,50 @@ export function AgentsPage() {
   /* ── Derived data ── */
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
   const deferredSearch = useDeferredValue(search);
+  const normalizedSearch = deferredSearch.trim().toLowerCase();
+  const showMessageSearchSection = normalizedSearch.length >= 2;
+
+  useEffect(() => {
+    const query = deferredSearch.trim();
+    const requestToken = ++messageSearchRequestTokenRef.current;
+
+    if (query.length < 2) {
+      setMessageSearchLoading(false);
+      setMessageSearchResults([]);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setMessageSearchLoading(true);
+      void api<MessageSearchResponse>(
+        `/agent-chat/search?${new URLSearchParams({
+          q: query,
+          limit: '20',
+        }).toString()}`,
+      )
+        .then((data) => {
+          if (requestToken !== messageSearchRequestTokenRef.current) return;
+          setMessageSearchResults(data.entries);
+        })
+        .catch(() => {
+          if (requestToken !== messageSearchRequestTokenRef.current) return;
+          setMessageSearchResults([]);
+        })
+        .finally(() => {
+          if (requestToken !== messageSearchRequestTokenRef.current) return;
+          setMessageSearchLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [deferredSearch]);
+
   const filteredAgents = useMemo(() => {
-    const normalizedSearch = deferredSearch.trim().toLowerCase();
     if (!normalizedSearch) return agents;
     return agents.filter((agent) => agent.name.toLowerCase().includes(normalizedSearch));
-  }, [agents, deferredSearch]);
+  }, [agents, normalizedSearch]);
   const sortedAgentEnvVars = useMemo(() => {
     const sorted = [...agentEnvVars].sort((a, b) => {
       if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
@@ -4828,6 +5087,35 @@ export function AgentsPage() {
   const handleOpenAgentSettings = useCallback((agent: Agent) => {
     setSettingsAgent(agent);
   }, []);
+
+  const handleExportAgentChatMarkdown = useCallback(async () => {
+    if (!activeAgentId || !activeConvId || !activeAgent) return;
+    if (visibleMessages.length === 0) {
+      toast.error('Nothing to export yet');
+      return;
+    }
+    try {
+      const data = await api<{ entries: ChatMessage[] }>(
+        `/agents/${activeAgentId}/chat/messages?conversationId=${activeConvId}&scope=all&limit=2000`,
+      );
+      if (data.entries.length === 0) {
+        toast.error('Nothing to export yet');
+        return;
+      }
+      const conv = (convsByAgent[activeAgentId] || []).find((c) => c.id === activeConvId);
+      const md = buildAgentChatMarkdownExport({
+        agentName: activeAgent.name,
+        conversationSubject: conv?.subject ?? null,
+        messages: data.entries,
+        includeAllBranches: true,
+      });
+      const base = buildAgentChatExportBasename(conv?.subject ?? null);
+      downloadTextFile(`${base}.md`, md, 'text/markdown;charset=utf-8');
+      toast.success('Exported chat as Markdown (all branches)');
+    } catch {
+      toast.error('Failed to export chat');
+    }
+  }, [activeAgent, activeAgentId, activeConvId, convsByAgent, visibleMessages.length]);
 
   /* ── Skills manager helpers ── */
 
@@ -5247,7 +5535,7 @@ export function AgentsPage() {
               <Search size={14} className={styles.searchIcon} />
               <input
                 className={styles.searchInput}
-                placeholder="Search agents..."
+                placeholder="Search agents and messages..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -5257,119 +5545,176 @@ export function AgentsPage() {
           <div className={styles.agentList}>
             {loading ? (
               <div className={styles.sidebarEmpty}>Loading agents...</div>
-            ) : filteredAgents.length === 0 ? (
-              <div className={styles.sidebarEmpty}>
-                {search ? 'No agents match your search' : 'No agents yet'}
-              </div>
             ) : (
               <>
-                {/* Render grouped agents */}
-                {groups.map((group) => {
-                  const groupAgents = groupedAgents[group.id] || [];
-                  if (groupAgents.length === 0 && search.trim()) return null;
-                  const isCollapsed = collapsedGroups.has(group.id);
-                  return (
-                    <div key={group.id} className={styles.sidebarGroup}>
-                      <div
-                        className={styles.sidebarGroupHeader}
-                        onClick={() => toggleGroupCollapse(group.id)}
-                      >
-                        <ChevronRight
-                          size={14}
-                          className={`${styles.sidebarGroupChevron} ${!isCollapsed ? styles.sidebarGroupChevronOpen : ''}`}
-                        />
-                        <span className={styles.sidebarGroupName}>{group.name}</span>
-                        <span className={styles.sidebarGroupCount}>{groupAgents.length}</span>
-                        <button
-                          className={styles.sidebarGroupAddBtn}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openCreate(group.id);
-                          }}
-                          title="Add agent to group"
-                        >
-                          <Plus size={13} />
-                        </button>
-                      </div>
-                      {!isCollapsed &&
-                        groupAgents.map((agent) => (
-                          <AgentSidebarItem
-                            key={agent.id}
-                            agent={agent}
-                            conversations={convsByAgent[agent.id] || []}
-                            collapsed={isAgentCollapsed(agent.id)}
-                            isActive={activeAgentId === agent.id}
-                            activeConversationId={activeAgentId === agent.id ? activeConvId : null}
-                            groupsEnabled={groups.length > 0}
-                            pendingConversationKeys={pendingConversationKeys}
-                            onToggleCollapse={toggleAgentCollapse}
-                            onOpenContextMenu={handleOpenAgentContextMenu}
-                            onOpenSettings={handleOpenAgentSettings}
-                            onCleanConversations={cleanConversations}
-                            onCreateConversation={createConversation}
-                            onSelectConversation={selectConversation}
-                            onRenameConversation={openRenameConversation}
-                            onDeleteConversation={deleteConversation}
-                          />
-                        ))}
-                    </div>
-                  );
-                })}
-                {/* Ungrouped agents */}
-                {(() => {
-                  const ungrouped = groupedAgents['__ungrouped__'] || [];
-                  if (ungrouped.length === 0) return null;
-                  const showHeader = groups.length > 0;
-                  const isCollapsed = collapsedGroups.has('__ungrouped__');
-                  return (
-                    <div className={styles.sidebarGroup}>
-                      {showHeader && (
-                        <div
-                          className={styles.sidebarGroupHeader}
-                          onClick={() => toggleGroupCollapse('__ungrouped__')}
-                        >
-                          <ChevronRight
-                            size={14}
-                            className={`${styles.sidebarGroupChevron} ${!isCollapsed ? styles.sidebarGroupChevronOpen : ''}`}
-                          />
-                          <span className={styles.sidebarGroupName}>Ungrouped</span>
-                          <span className={styles.sidebarGroupCount}>{ungrouped.length}</span>
-                          <button
-                            className={styles.sidebarGroupAddBtn}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openCreate();
-                            }}
-                            title="Add agent"
+                {filteredAgents.length === 0 ? (
+                  <div className={styles.sidebarEmpty}>
+                    {search ? 'No agents match your search' : 'No agents yet'}
+                  </div>
+                ) : (
+                  <>
+                    {/* Render grouped agents */}
+                    {groups.map((group) => {
+                      const groupAgents = groupedAgents[group.id] || [];
+                      if (groupAgents.length === 0 && search.trim()) return null;
+                      const isCollapsed = collapsedGroups.has(group.id);
+                      return (
+                        <div key={group.id} className={styles.sidebarGroup}>
+                          <div
+                            className={styles.sidebarGroupHeader}
+                            onClick={() => toggleGroupCollapse(group.id)}
                           >
-                            <Plus size={13} />
-                          </button>
+                            <ChevronRight
+                              size={14}
+                              className={`${styles.sidebarGroupChevron} ${!isCollapsed ? styles.sidebarGroupChevronOpen : ''}`}
+                            />
+                            <span className={styles.sidebarGroupName}>{group.name}</span>
+                            <span className={styles.sidebarGroupCount}>{groupAgents.length}</span>
+                            <button
+                              className={styles.sidebarGroupAddBtn}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openCreate(group.id);
+                              }}
+                              title="Add agent to group"
+                            >
+                              <Plus size={13} />
+                            </button>
+                          </div>
+                          {!isCollapsed &&
+                            groupAgents.map((agent) => (
+                              <AgentSidebarItem
+                                key={agent.id}
+                                agent={agent}
+                                conversations={convsByAgent[agent.id] || []}
+                                collapsed={isAgentCollapsed(agent.id)}
+                                isActive={activeAgentId === agent.id}
+                                activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                                groupsEnabled={groups.length > 0}
+                                pendingConversationKeys={pendingConversationKeys}
+                                onToggleCollapse={toggleAgentCollapse}
+                                onOpenContextMenu={handleOpenAgentContextMenu}
+                                onOpenSettings={handleOpenAgentSettings}
+                                onCleanConversations={cleanConversations}
+                                onCreateConversation={createConversation}
+                                onSelectConversation={selectConversation}
+                                onRevealConversationFolder={revealConversationFolder}
+                                onRenameConversation={openRenameConversation}
+                                onDeleteConversation={deleteConversation}
+                              />
+                            ))}
                         </div>
+                      );
+                    })}
+                    {/* Ungrouped agents */}
+                    {(() => {
+                      const ungrouped = groupedAgents['__ungrouped__'] || [];
+                      if (ungrouped.length === 0) return null;
+                      const showHeader = groups.length > 0;
+                      const isCollapsed = collapsedGroups.has('__ungrouped__');
+                      return (
+                        <div className={styles.sidebarGroup}>
+                          {showHeader && (
+                            <div
+                              className={styles.sidebarGroupHeader}
+                              onClick={() => toggleGroupCollapse('__ungrouped__')}
+                            >
+                              <ChevronRight
+                                size={14}
+                                className={`${styles.sidebarGroupChevron} ${!isCollapsed ? styles.sidebarGroupChevronOpen : ''}`}
+                              />
+                              <span className={styles.sidebarGroupName}>Ungrouped</span>
+                              <span className={styles.sidebarGroupCount}>{ungrouped.length}</span>
+                              <button
+                                className={styles.sidebarGroupAddBtn}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openCreate();
+                                }}
+                                title="Add agent"
+                              >
+                                <Plus size={13} />
+                              </button>
+                            </div>
+                          )}
+                          {(!showHeader || !isCollapsed) &&
+                            ungrouped.map((agent) => (
+                              <AgentSidebarItem
+                                key={agent.id}
+                                agent={agent}
+                                conversations={convsByAgent[agent.id] || []}
+                                collapsed={isAgentCollapsed(agent.id)}
+                                isActive={activeAgentId === agent.id}
+                                activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                                groupsEnabled={groups.length > 0}
+                                pendingConversationKeys={pendingConversationKeys}
+                                onToggleCollapse={toggleAgentCollapse}
+                                onOpenContextMenu={handleOpenAgentContextMenu}
+                                onOpenSettings={handleOpenAgentSettings}
+                                onCleanConversations={cleanConversations}
+                                onCreateConversation={createConversation}
+                                onSelectConversation={selectConversation}
+                                onRevealConversationFolder={revealConversationFolder}
+                                onRenameConversation={openRenameConversation}
+                                onDeleteConversation={deleteConversation}
+                              />
+                            ))}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+
+                {showMessageSearchSection && (
+                  <div className={styles.messageSearchSection}>
+                    <div className={styles.messageSearchHeader}>
+                      <span className={styles.messageSearchHeaderLabel}>Messages</span>
+                      {!messageSearchLoading && (
+                        <span className={styles.messageSearchHeaderCount}>
+                          {messageSearchResults.length}
+                        </span>
                       )}
-                      {(!showHeader || !isCollapsed) &&
-                        ungrouped.map((agent) => (
-                          <AgentSidebarItem
-                            key={agent.id}
-                            agent={agent}
-                            conversations={convsByAgent[agent.id] || []}
-                            collapsed={isAgentCollapsed(agent.id)}
-                            isActive={activeAgentId === agent.id}
-                            activeConversationId={activeAgentId === agent.id ? activeConvId : null}
-                            groupsEnabled={groups.length > 0}
-                            pendingConversationKeys={pendingConversationKeys}
-                            onToggleCollapse={toggleAgentCollapse}
-                            onOpenContextMenu={handleOpenAgentContextMenu}
-                            onOpenSettings={handleOpenAgentSettings}
-                            onCleanConversations={cleanConversations}
-                            onCreateConversation={createConversation}
-                            onSelectConversation={selectConversation}
-                            onRenameConversation={openRenameConversation}
-                            onDeleteConversation={deleteConversation}
-                          />
-                        ))}
                     </div>
-                  );
-                })()}
+                    {messageSearchLoading ? (
+                      <div className={styles.sidebarEmpty}>Searching messages...</div>
+                    ) : messageSearchResults.length === 0 ? (
+                      <div className={styles.sidebarEmpty}>No messages match your search</div>
+                    ) : (
+                      messageSearchResults.map((result) => (
+                        <button
+                          key={result.messageId}
+                          type="button"
+                          className={`${styles.messageSearchResult} ${
+                            highlightedMessageId === result.messageId
+                              ? styles.messageSearchResultActive
+                              : ''
+                          }`}
+                          onClick={() => void handleSelectMessageSearchResult(result)}
+                        >
+                          <AgentAvatar
+                            icon={result.agentAvatarIcon || 'spark'}
+                            bgColor={result.agentAvatarBgColor || '#1a1a2e'}
+                            logoColor={result.agentAvatarLogoColor || '#e94560'}
+                            size={28}
+                          />
+                          <div className={styles.messageSearchBody}>
+                            <div className={styles.messageSearchTopRow}>
+                              <span className={styles.messageSearchAgentName}>
+                                {result.agentName}
+                              </span>
+                              <span className={styles.messageSearchSubject}>
+                                {result.conversationSubject || 'Untitled chat'}
+                              </span>
+                            </div>
+                            <div className={styles.messageSearchSnippet}>
+                              {renderMessageSearchSnippet(result)}
+                            </div>
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -5415,6 +5760,17 @@ export function AgentsPage() {
                       Files
                     </button>
                   </div>
+                  <Tooltip label="Export full conversation as Markdown (all branches)">
+                    <button
+                      type="button"
+                      className={styles.iconBtn}
+                      onClick={handleExportAgentChatMarkdown}
+                      aria-label="Export full conversation as Markdown (all branches)"
+                      disabled={visibleMessages.length === 0}
+                    >
+                      <Download size={15} />
+                    </button>
+                  </Tooltip>
                   <Tooltip label="Agent settings">
                     <button
                       className={styles.iconBtn}
@@ -5473,7 +5829,8 @@ export function AgentsPage() {
                                 msg.direction === 'outbound'
                                   ? styles.messageRowUser
                                   : styles.messageRowAgent
-                              }`}
+                              } ${highlightedMessageId === msg.id ? styles.messageRowHighlight : ''}`}
+                              data-message-id={msg.id}
                             >
                               <div className={styles.messageContent}>
                                 {/* Branch navigator */}
@@ -6010,6 +6367,7 @@ export function AgentsPage() {
                             }
                         : null
                     }
+                    autoAttachOversizedPasteAsTextFile={autoAttachOversizedPasteAsTextFile}
                     onSendAttachments={sendAttachmentMessage}
                     onSendText={sendTextMessage}
                   />
@@ -6712,7 +7070,7 @@ export function AgentsPage() {
                             )
                           }
                         >
-                          <option value="">None</option>
+                          <option value="">Default</option>
                           <option value="low">Low</option>
                           <option value="medium">Medium</option>
                           <option value="high">High</option>
@@ -6777,7 +7135,7 @@ export function AgentsPage() {
                   <div className={styles.settingsGridItem}>
                     <div className={styles.settingsGridLabel}>
                       <FolderOpen size={13} />
-                      Agent workspace
+                      Agent folder
                     </div>
                     <div className={styles.settingsGridValue}>
                       <code className={`${styles.settingsCode} ${styles.settingsPathCode}`}>
@@ -6785,6 +7143,27 @@ export function AgentsPage() {
                       </code>
                     </div>
                   </div>
+                </div>
+
+                <div className={styles.settingsToggleRow}>
+                  <div className={styles.settingsToggleCopy}>
+                    <div className={styles.settingsToggleLabel}>Separate folder per chat</div>
+                    <div className={styles.settingsToggleHint}>
+                      When enabled, chat conversations run inside a subfolder of this agent folder.
+                    </div>
+                  </div>
+                  <label className={styles.toggleSwitch}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(settingsAgent.separateFolderPerChat)}
+                      aria-label="Separate folder per chat"
+                      onChange={(e) =>
+                        void handleSetSeparateFolderPerChat(settingsAgent, e.target.checked)
+                      }
+                    />
+                    <span className={styles.toggleTrack} />
+                    <span className={styles.toggleKnob} />
+                  </label>
                 </div>
               </div>
 

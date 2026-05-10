@@ -42,7 +42,7 @@ Agent presentation and grouping helpers:
 - `PATCH /api/agents/:id/chat/conversations/:conversationId`
 - `PATCH /api/agents/:id/chat/conversations/:conversationId/read`
 - `DELETE /api/agents/:id/chat/conversations/:conversationId`
-- `GET /api/agents/:id/chat/messages`
+- `GET /api/agents/:id/chat/messages` — `conversationId` required; optional `scope=active|all` (default `active`; `all` returns every message on every branch), `limit` (max 2000), `offset`
 - `POST /api/agents/:id/chat/messages`
 - `POST /api/agents/:id/chat/message`
 - `GET /api/agents/:id/chat/conversations/:cid/queue`

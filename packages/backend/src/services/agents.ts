@@ -533,6 +533,8 @@ export interface AgentRecord {
   apiKeyPrefix: string;
   capabilities: string[];
   skipPermissions: boolean;
+  /** When true, new chat conversations use a dedicated workspace subfolder (per toggle change). */
+  separateFolderPerChat: boolean;
   cronJobs: CronJob[];
   skillIds: string[];
   groupId: string | null;
@@ -657,6 +659,7 @@ function asAgent(rec: Record<string, unknown>): AgentRecord {
     ),
     workspacePath: resolveAgentWorkspacePathFromRecord(rec),
     skipPermissions: Boolean(rec.skipPermissions),
+    separateFolderPerChat: rec.separateFolderPerChat === true,
     cronJobs: Array.isArray(rec.cronJobs) ? rec.cronJobs : [],
     skillIds: Array.isArray(rec.skillIds) ? rec.skillIds : [],
     avatarIcon: typeof rec.avatarIcon === 'string' ? rec.avatarIcon : 'spark',
@@ -900,6 +903,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
       apiKeyPrefix: params.apiKeyPrefix,
       capabilities: params.capabilities,
       skipPermissions: params.skipPermissions ?? false,
+      separateFolderPerChat: false,
       groupId: params.groupId ?? null,
       workspaceApiKey: wsKey.rawKey,
       workspaceApiKeyId: wsKeyId,
@@ -1002,6 +1006,7 @@ export async function updateAgent(
       | 'thinkingLevel'
       | 'status'
       | 'skipPermissions'
+      | 'separateFolderPerChat'
       | 'cronJobs'
       | 'groupId'
       | 'avatarIcon'
@@ -1027,6 +1032,8 @@ export async function updateAgent(
   if (data.thinkingLevel !== undefined) patch.thinkingLevel = data.thinkingLevel;
   if (data.status !== undefined) patch.status = data.status;
   if (data.skipPermissions !== undefined) patch.skipPermissions = data.skipPermissions;
+  if (data.separateFolderPerChat !== undefined)
+    patch.separateFolderPerChat = data.separateFolderPerChat;
   if (data.cronJobs !== undefined) patch.cronJobs = data.cronJobs;
   if (data.groupId !== undefined) patch.groupId = data.groupId;
   if (data.avatarIcon !== undefined) patch.avatarIcon = data.avatarIcon;
