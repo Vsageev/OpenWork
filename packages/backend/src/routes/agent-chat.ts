@@ -184,7 +184,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const result = listRecentAgentConversations(request.query.limit);
+      const result = await listRecentAgentConversations(request.query.limit);
       return reply.send(result);
     },
   );
@@ -204,7 +204,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const result = searchAgentMessages(request.query.q, request.query.limit);
+      const result = await searchAgentMessages(request.query.q, request.query.limit);
       return reply.send(result);
     },
   );
@@ -426,24 +426,24 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireAgentExists(request.params.id);
       requireConversationExists(request.body.conversationId, request.params.id);
 
+      const running = await listAgentRuns({
+        status: 'running',
+        agentId: request.params.id,
+        conversationId: request.body.conversationId,
+        limit: 1,
+      });
+      const activeRun = running.entries[0];
+
       const message = saveAgentConversationMessage({
         conversationId: request.body.conversationId,
         direction: 'inbound',
         content: request.body.content,
         type: request.body.isFinal ? 'text' : 'system',
-        metadata: (() => {
-          const activeRun = listAgentRuns({
-            status: 'running',
-            agentId: request.params.id,
-            conversationId: request.body.conversationId,
-            limit: 1,
-          }).entries[0];
-          return {
-            agentChatUpdate: true,
-            isFinal: Boolean(request.body.isFinal),
-            runId: activeRun?.id ?? null,
-          };
-        })(),
+        metadata: {
+          agentChatUpdate: true,
+          isFinal: Boolean(request.body.isFinal),
+          runId: activeRun?.id ?? null,
+        },
       });
 
       return reply.status(201).send(message);

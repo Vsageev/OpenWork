@@ -96,11 +96,12 @@ export async function buildApp() {
     ...(https ? { https } : {}),
   });
 
-  // Initialize JSON store before anything else
+  // Initialize PostgreSQL persistence before anything else.
   await store.init();
 
   // Run one-time data migrations, then seed built-in skills
   seedBuiltinSkills();
+  await store.flush();
 
   await app.register(sensible);
   await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
@@ -112,6 +113,9 @@ export async function buildApp() {
   registerSecurityMiddleware(app);
   registerErrorHandler(app);
   registerIdempotency(app);
+  app.addHook('preSerialization', async () => {
+    await store.flush();
+  });
 
   // Plugins
   await registerSwagger(app);
@@ -164,16 +168,16 @@ export async function buildApp() {
   }
 
   // Apply persisted rate-limit settings to the in-memory limiter
-  initRateLimiterFromSettings();
+  await initRateLimiterFromSettings();
 
   // Restore Telegram webhooks for bots using backend-managed ngrok tunnels.
   await restoreManagedTelegramWebhooks();
 
   // Initialize agent cron jobs
-  initAllCronJobs();
+  await initAllCronJobs();
 
   // Initialize board cron template jobs
-  initAllBoardCronJobs();
+  await initAllBoardCronJobs();
 
   // Gracefully stop cron schedulers during shutdown
   app.addHook('onClose', () => {
@@ -185,10 +189,10 @@ export async function buildApp() {
 
   // Clean old run logs, then reconcile running records (re-attach or mark dead)
   cleanupOldRunLogs();
-  reconcileRunsOnStartup((run) => reattachRunningProcess(run));
+  await reconcileRunsOnStartup((run) => reattachRunningProcess(run));
   recoverCompletedChatRunsOnStartup();
-  initializeAgentChatQueue({ preserveActiveProcessing: true });
-  initializeAgentBatchQueue({ preserveActiveProcessing: true });
+  await initializeAgentChatQueue({ preserveActiveProcessing: true });
+  await initializeAgentBatchQueue({ preserveActiveProcessing: true });
 
   return app;
 }

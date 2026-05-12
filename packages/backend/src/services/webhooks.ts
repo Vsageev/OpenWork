@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { store } from '../db/index.js';
+import {
+  getWebhookRecordById,
+  listActiveWebhooksForEvent,
+  listWebhooksNative,
+} from '../db/repositories/webhooks-repository.js';
 import { createAuditLog } from './audit-log.js';
 
 export interface WebhookListQuery {
@@ -30,23 +35,16 @@ export async function listWebhooks(query: WebhookListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
 
-  const predicate = (r: Record<string, unknown>) => {
-    if (query.isActive !== undefined && r.isActive !== query.isActive) return false;
-    if (query.search && !(r.url as string)?.toLowerCase().includes(query.search.toLowerCase())) return false;
-    return true;
-  };
-
-  const all = store.find('webhooks', predicate)
-    .sort((a, b) => new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime());
-
-  const total = all.length;
-  const entries = all.slice(offset, offset + limit);
-
-  return { entries, total };
+  return listWebhooksNative({
+    isActive: query.isActive,
+    search: query.search,
+    limit,
+    offset,
+  });
 }
 
 export async function getWebhookById(id: string) {
-  return store.getById('webhooks', id) ?? null;
+  return (await getWebhookRecordById(id)) ?? null;
 }
 
 /**
@@ -54,12 +52,7 @@ export async function getWebhookById(id: string) {
  * Used by the webhook delivery service to know which endpoints to call.
  */
 export async function getActiveWebhooksByEvent(event: string) {
-  const all = store.find('webhooks', (r) => r.isActive === true);
-
-  return all.filter((w) => {
-    const events = w.events as string[];
-    return events.includes(event) || events.includes('*');
-  });
+  return listActiveWebhooksForEvent(event);
 }
 
 export async function createWebhook(

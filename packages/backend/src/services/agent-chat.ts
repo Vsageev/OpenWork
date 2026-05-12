@@ -3,6 +3,26 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { store } from '../db/index.js';
+import {
+  AGENT_CHAT_QUEUE_COLLECTION,
+  countQueuedAppendPromptsForConversation,
+  countRunningAgentRunsWithLivePid,
+  deleteChatQueueItemsForConversation,
+  deleteTerminalChatQueueItemsBeyondRetention,
+  findChatQueueItemProcessingForRunId,
+  findLivePersistedChatRuns,
+  listChatQueueItemsWithStatusNative,
+  listConversationChatQueueItems,
+} from '../db/repositories/agent-execution-repository.js';
+import {
+  deleteAllMessageDraftsForConversation,
+} from '../db/repositories/message-drafts-repository.js';
+import {
+  compareMessagesChronologically,
+  deleteAllMessagesForConversation,
+  listMessagesByConversationId,
+} from '../db/repositories/messages-repository.js';
+import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import { env } from '../config/env.js';
 import { extractFinalResponseText } from '../lib/agent-output.js';
 import { allocatePort, releasePort } from '../lib/port-allocator.js';
@@ -26,7 +46,6 @@ import { getFallbackModelConfig } from './project-settings.js';
 const STORAGE_DIR = path.resolve(env.DATA_DIR, 'storage');
 
 export const RUNS_DIR = path.resolve(env.DATA_DIR, 'agent-runs');
-const AGENT_CHAT_QUEUE_COLLECTION = 'agentChatQueue';
 const AGENT_CHAT_QUEUE_RETRY_BASE_MS = 1000;
 const AGENT_CHAT_QUEUE_RETRY_MAX_MS = 30000;
 const AGENT_CHAT_QUEUE_DEFAULT_MAX_ATTEMPTS = 4;
@@ -204,11 +223,7 @@ function rateLimitBackoffMs(attempt: number): number {
 }
 
 export function getGlobalRunningAgentCount(): number {
-  const livePersistedRuns = store.count(
-    'agent_runs',
-    (r: Record<string, unknown>) =>
-      r.status === 'running' && typeof r.pid === 'number' && isPidAlive(r.pid as number),
-  );
+  const livePersistedRuns = countRunningAgentRunsWithLivePid(isPidAlive);
   return Math.max(globalRunningCount, livePersistedRuns);
 }
 
@@ -457,11 +472,12 @@ function isAgentConversation(r: Record<string, unknown>, agentId: string): boole
  * List all conversations belonging to an agent, sorted by lastMessageAt desc.
  */
 export function listAgentConversations(agentId: string, limit = 50, offset = 0) {
-  const all = store.find(
-    'conversations',
-    (r: Record<string, unknown>) =>
-      isAgentConversation(r, agentId) && !isBackgroundTriggerConversationRecord(r),
-  );
+  const all = store
+    .getAll('conversations')
+    .filter(
+      (r: Record<string, unknown>) =>
+        isAgentConversation(r, agentId) && !isBackgroundTriggerConversationRecord(r),
+    );
 
   const sorted = all.sort((a, b) => {
     const aTime = a.lastMessageAt ? new Date(a.lastMessageAt as string).getTime() : 0;
@@ -513,11 +529,11 @@ export function getAgentConversation(agentId: string, conversationId: string) {
  * List recent agent chat conversations across ALL agents, sorted by lastMessageAt desc.
  * Returns agent metadata alongside each conversation.
  */
-export function listRecentAgentConversations(limit = 10) {
-  const agents = listAgents();
+export async function listRecentAgentConversations(limit = 10) {
+  const agents = await listAgents();
   const agentMap = new Map(agents.map((a) => [a.id, a]));
 
-  const all = store.find('conversations', (r: Record<string, unknown>) => {
+  const all = store.getAll('conversations').filter((r: Record<string, unknown>) => {
     if (r.channelType !== 'agent') return false;
     if (isBackgroundTriggerConversationRecord(r)) return false;
     const meta = parseMetadata(r.metadata);
@@ -559,17 +575,17 @@ export function listRecentAgentConversations(limit = 10) {
  * Returns matches with snippet + agent/conversation metadata so UI can preview
  * and jump to the exact message in its conversation.
  */
-export function searchAgentMessages(query: string, limit = 20) {
+export async function searchAgentMessages(query: string, limit = 20) {
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return { entries: [] };
   const lowerQuery = normalizedQuery.toLowerCase();
 
-  const agents = listAgents();
+  const agents = await listAgents();
   const agentMap = new Map(agents.map((a) => [a.id, a]));
 
   // Build map of conversationId -> { agentId, conversation }
   const convMap = new Map<string, { agentId: string; conversation: Record<string, unknown> }>();
-  for (const conv of store.find('conversations', (r) => r.channelType === 'agent')) {
+  for (const conv of store.getAll('conversations').filter((r) => r.channelType === 'agent')) {
     if (isBackgroundTriggerConversationRecord(conv)) continue;
     const meta = parseMetadata(conv.metadata);
     const agentId = meta?.agentId as string | undefined;
@@ -708,14 +724,8 @@ export function validateConversationOwnership(
  * Delete a conversation and all its messages.
  */
 export function deleteAgentConversation(conversationId: string) {
-  store.deleteWhere(
-    'messages',
-    (r: Record<string, unknown>) => r.conversationId === conversationId,
-  );
-  store.deleteWhere(
-    'messageDrafts',
-    (r: Record<string, unknown>) => r.conversationId === conversationId,
-  );
+  deleteAllMessagesForConversation(conversationId);
+  deleteAllMessageDraftsForConversation(conversationId);
   clearConversationQueue(conversationId);
   return store.delete('conversations', conversationId);
 }
@@ -742,20 +752,17 @@ export function markAgentConversationRead(conversationId: string) {
  * Check if a conversation has tree-mode enabled (any message has parentId set).
  */
 function isTreeEnabledConversation(conversationId: string): boolean {
-  const msgs = store.find(
-    'messages',
-    (r: Record<string, unknown>) => r.conversationId === conversationId && r.parentId != null,
+  return (
+    listMessagesByConversationId(conversationId, {
+      order: 'asc',
+      limit: 1,
+      where: (r) => r.parentId != null,
+    }).length > 0
   );
-  return msgs.length > 0;
 }
 
 function listConversationMessages(conversationId: string): Record<string, unknown>[] {
-  return store
-    .find('messages', (r: Record<string, unknown>) => r.conversationId === conversationId)
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime(),
-    );
+  return listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<string, unknown>[];
 }
 
 function buildChildrenMap(
@@ -850,12 +857,7 @@ function setActiveBranches(conversationId: string, activeBranches: Record<string
 function ensureConversationTree(conversationId: string): void {
   if (isTreeEnabledConversation(conversationId)) return;
 
-  const allMessages = store
-    .find('messages', (r: Record<string, unknown>) => r.conversationId === conversationId)
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime(),
-    );
+  const allMessages = listMessagesByConversationId(conversationId, { order: 'asc' });
 
   let prevId: string | null = null;
   for (const msg of allMessages) {
@@ -916,15 +918,6 @@ export function getActiveMessagePath(conversationId: string): TreePathMessage[] 
   return path;
 }
 
-function compareConversationMessagesByCreatedAt(
-  a: Record<string, unknown>,
-  b: Record<string, unknown>,
-): number {
-  const createdAtDelta =
-    new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime();
-  if (createdAtDelta !== 0) return createdAtDelta;
-  return String(a.id).localeCompare(String(b.id));
-}
 
 function getOutboundAnchorForInboundMessage(
   conversationId: string,
@@ -972,7 +965,7 @@ export function serializeAllConversationMessageEntries(
     else userVariantsByPreviousMessageId.set(previousUserMessageId, [message]);
   }
   for (const [, variants] of userVariantsByPreviousMessageId) {
-    variants.sort(compareConversationMessagesByCreatedAt);
+    variants.sort(compareMessagesChronologically);
   }
 
   const rows: Record<string, unknown>[] = [];
@@ -1002,7 +995,7 @@ export function serializeAllConversationMessageEntries(
     });
   }
 
-  rows.sort(compareConversationMessagesByCreatedAt);
+  rows.sort(compareMessagesChronologically);
   return rows;
 }
 
@@ -1145,14 +1138,15 @@ function resolvePreviousUserMessageId(
     return previousUserMessageId;
   }
 
-  const pendingQueuedMessage = store.findOne(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (record: Record<string, unknown>) =>
-      record.conversationId === conversationId &&
-      record.queuedMessageId === previousUserMessageId &&
-      getQueueItemMode(record) === 'append_prompt' &&
-      (record.status === 'queued' || record.status === 'processing'),
-  );
+  const pendingQueuedMessage = store
+    .getAll(AGENT_CHAT_QUEUE_COLLECTION)
+    .find(
+      (record: Record<string, unknown>) =>
+        record.conversationId === conversationId &&
+        record.queuedMessageId === previousUserMessageId &&
+        getQueueItemMode(record) === 'append_prompt' &&
+        (record.status === 'queued' || record.status === 'processing'),
+    );
   if (pendingQueuedMessage) {
     return previousUserMessageId;
   }
@@ -1892,10 +1886,10 @@ function buildTriggerContext(
   return `${lines.join('\n')}\n`;
 }
 
-function buildChildEnv(
+async function buildChildEnv(
   agentId: string,
   agent: { apiKeyId: string; workspaceApiKey: string | null },
-): Record<string, string | undefined> {
+): Promise<Record<string, string | undefined>> {
   const childEnv: Record<string, string | undefined> = { ...process.env };
   for (const key of OPENWORK_CHILD_ENV_BLOCKLIST) {
     if (key in childEnv) {
@@ -1907,7 +1901,7 @@ function buildChildEnv(
   delete childEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
 
   if (agent.apiKeyId) {
-    const apiKey = store.getById('apiKeys', agent.apiKeyId);
+    const apiKey = await getApiKeyRecord(agent.apiKeyId);
     if (apiKey) {
       childEnv.ANTHROPIC_API_KEY = childEnv.ANTHROPIC_API_KEY || '';
       childEnv.OPENAI_API_KEY = childEnv.OPENAI_API_KEY || '';
@@ -1921,7 +1915,7 @@ function buildChildEnv(
     childEnv.WORKSPACE_API_KEY = agent.workspaceApiKey;
   }
 
-  for (const entry of listRuntimeAgentEnvVarBindings(agentId)) {
+  for (const entry of await listRuntimeAgentEnvVarBindings(agentId)) {
     childEnv[entry.key] = entry.value;
   }
 
@@ -1940,19 +1934,13 @@ function markAgentLastActivity(agentId: string) {
 }
 
 function listAgentApiUpdates(conversationId: string, runStartedAt: number) {
-  return store
-    .find(
-      'messages',
-      (r: Record<string, unknown>) =>
-        r.conversationId === conversationId &&
-        r.direction === 'inbound' &&
-        new Date(r.createdAt as string).getTime() >= runStartedAt &&
-        parseMetadata(r.metadata)?.agentChatUpdate === true,
-    )
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime(),
-    );
+  return listMessagesByConversationId(conversationId, {
+    order: 'asc',
+    where: (r) =>
+      r.direction === 'inbound' &&
+      new Date(String(r.createdAt)).getTime() >= runStartedAt &&
+      parseMetadata(r.metadata)?.agentChatUpdate === true,
+  }) as Record<string, unknown>[];
 }
 
 function findFinalAgentApiMessage(messages: Record<string, unknown>[]) {
@@ -1962,18 +1950,11 @@ function findFinalAgentApiMessage(messages: Record<string, unknown>[]) {
 }
 
 function listConversationInboundMessages(conversationId: string, sinceMs: number) {
-  return store
-    .find(
-      'messages',
-      (r: Record<string, unknown>) =>
-        r.conversationId === conversationId &&
-        r.direction === 'inbound' &&
-        new Date(r.createdAt as string).getTime() >= sinceMs,
-    )
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime(),
-    );
+  return listMessagesByConversationId(conversationId, {
+    order: 'asc',
+    where: (r) =>
+      r.direction === 'inbound' && new Date(String(r.createdAt)).getTime() >= sinceMs,
+  }) as Record<string, unknown>[];
 }
 
 function findExistingFinalMessageFromRun(
@@ -2124,11 +2105,11 @@ function persistCompletedCardAssignmentComment(params: {
 }): void {
   const { cardId, agentId, runId, runStartedAtMs, stdout } = params;
   try {
-    const dupByRun = store.find(
-      'cardComments',
-      (r: Record<string, unknown>) =>
-        r.cardId === cardId && r.agentRunId === runId,
-    );
+    const dupByRun = store
+      .getAll('cardComments')
+      .filter(
+        (r: Record<string, unknown>) => r.cardId === cardId && r.agentRunId === runId,
+      );
     if (dupByRun.length > 0) return;
 
     let content = extractFinalResponseText(stdout).trim();
@@ -2138,16 +2119,13 @@ function persistCompletedCardAssignmentComment(params: {
     }
 
     const since = Number.isFinite(runStartedAtMs) ? runStartedAtMs : 0;
-    const manualDup = store.find(
-      'cardComments',
-      (r: Record<string, unknown>) => {
-        if (r.cardId !== cardId || r.authorId !== agentId) return false;
-        if (r.agentRunId) return false;
-        const t = new Date(r.createdAt as string).getTime();
-        if (!Number.isFinite(t) || t < since) return false;
-        return String(r.content || '').trim() === content;
-      },
-    );
+    const manualDup = store.getAll('cardComments').filter((r: Record<string, unknown>) => {
+      if (r.cardId !== cardId || r.authorId !== agentId) return false;
+      if (r.agentRunId) return false;
+      const t = new Date(r.createdAt as string).getTime();
+      if (!Number.isFinite(t) || t < since) return false;
+      return String(r.content || '').trim() === content;
+    });
     if (manualDup.length > 0) return;
 
     store.insert('cardComments', {
@@ -2200,23 +2178,15 @@ function hasLivePersistedChatRun(
   conversationId: string,
   targetMessageId?: string | null,
 ): boolean {
-  return store
-    .find(
-      'agent_runs',
-      (r: Record<string, unknown>) =>
-        r.status === 'running' &&
-        r.triggerType === 'chat' &&
-        r.agentId === agentId &&
-        r.conversationId === conversationId,
-    )
-    .some((run) => {
-      const pid = typeof run.pid === 'number' ? (run.pid as number) : null;
-      if (!pid || !isPidAlive(pid)) return false;
-      if (targetMessageId === undefined) return true;
-      const responseParentId =
-        typeof run.responseParentId === 'string' ? (run.responseParentId as string) : null;
-      return responseParentId === (targetMessageId ?? null);
-    });
+  const runs = findLivePersistedChatRuns(
+    targetMessageId === undefined
+      ? { agentId, conversationId }
+      : { agentId, conversationId, targetMessageId },
+  );
+  return runs.some((run) => {
+    const pid = typeof run.pid === 'number' ? (run.pid as number) : null;
+    return !!(pid && isPidAlive(pid));
+  });
 }
 
 function hasRunningProcessForTargetMessage(
@@ -2261,15 +2231,7 @@ function listConversationQueueItems(
   agentId: string,
   conversationId: string,
 ): Record<string, unknown>[] {
-  return store
-    .find(
-      AGENT_CHAT_QUEUE_COLLECTION,
-      (r: Record<string, unknown>) => r.agentId === agentId && r.conversationId === conversationId,
-    )
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        parseIsoDateMs(a.createdAt) - parseIsoDateMs(b.createdAt),
-    );
+  return listConversationChatQueueItems(agentId, conversationId) as Record<string, unknown>[];
 }
 
 function sanitizeQueueItemForChat(item: Record<string, unknown>): Record<string, unknown> {
@@ -2307,14 +2269,7 @@ function hasPendingExecutionItems(agentId: string, conversationId: string): bool
 }
 
 function getQueuedAppendPromptCount(agentId: string, conversationId: string): number {
-  return store.count(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) =>
-      r.agentId === agentId &&
-      r.conversationId === conversationId &&
-      r.status === 'queued' &&
-      getQueueItemMode(r) === 'append_prompt',
-  );
+  return countQueuedAppendPromptsForConversation(agentId, conversationId);
 }
 
 function conversationHasActiveExecutionFailure(agentId: string, conversationId: string): boolean {
@@ -2437,7 +2392,9 @@ function attachToProcess(options: AttachOptions): RunHandle {
     markAgentLastActivity(agentId);
     const hasError = !stdout.trim();
     const errorMsg = hasError ? stderr.trim() || 'Process exited' : null;
-    completeAgentRun(runId, errorMsg, { stdout, stderr });
+    void completeAgentRun(runId, errorMsg, { stdout, stderr }).catch((err) => {
+      console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, err);
+    });
 
     if (handle.onExit) {
       handle.onExit({ code: hasError ? 1 : 0, stdout, stderr, runStartedAt });
@@ -2543,7 +2500,7 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
     imagePaths: options.imagePaths,
     filePaths: options.filePaths,
   });
-  const childEnv = buildChildEnv(options.agentId, options.agent);
+  const childEnv = await buildChildEnv(options.agentId, options.agent);
 
   // Allocate a random port so the agent's project never conflicts with others
   const projectPort = await allocatePort();
@@ -2598,7 +2555,7 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
     fs.closeSync(stderrFd);
     releasePort(projectPort);
     releaseConcurrencySlot();
-    completeAgentRun(runId, (err as Error).message);
+    await completeAgentRun(runId, (err as Error).message);
     options.onSpawnError(err as Error);
     return runId;
   }
@@ -2649,7 +2606,9 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
       runningProcesses.delete(options.runKey);
     }
     releaseConcurrencySlot();
-    completeAgentRun(runId, err.message, { stderr: err.message });
+    void completeAgentRun(runId, err.message, { stderr: err.message }).catch((e) => {
+      console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, e);
+    });
     options.onSpawnError(err);
   });
 
@@ -2790,8 +2749,8 @@ function readRunStdout(run: Record<string, unknown>): string {
 
 export function recoverCompletedChatRunsOnStartup(): number {
   const completedChatRuns = store
-    .find(
-      'agent_runs',
+    .getAll('agent_runs')
+    .filter(
       (r: Record<string, unknown>) =>
         r.triggerType === 'chat' &&
         r.status === 'completed' &&
@@ -2909,15 +2868,15 @@ function spawnChatProcess(
   const responseParentId = options?.responseParentId ?? null;
   const targetMessageId = options?.targetMessageId ?? null;
 
-  void prepareAgentWorkspaceAccess(agentId)
-    .then((agent) => {
+  void Promise.all([prepareAgentWorkspaceAccess(agentId), getFallbackModelConfig()])
+    .then(([agent, globalFallback]) => {
       if (!agent) {
         callbacks.onError('Agent not found');
         return;
       }
 
       // If this is a fallback retry, override agent model with global fallback settings
-      const effectiveAgent = isFallback ? applyFallbackModel(agent) : agent;
+      const effectiveAgent = isFallback ? applyFallbackModel(agent, globalFallback) : agent;
       if (isFallback && !effectiveAgent) {
         callbacks.onError('Fallback model is not configured');
         return;
@@ -2951,7 +2910,7 @@ function spawnChatProcess(
           if ((code ?? 1) !== 0 && !stdout.trim()) {
             // Primary model failed — attempt fallback if configured and not already a fallback
             if (!isFallback) {
-              const fallback = getFallbackModelConfig();
+              const fallback = globalFallback;
               if (fallback) {
                 const errMsg = stderr.trim() || `Process exited with code ${code}`;
                 console.log(
@@ -2996,7 +2955,7 @@ function spawnChatProcess(
         onSpawnError: (err) => {
           // Primary model spawn failed — attempt fallback
           if (!isFallback) {
-            const fallback = getFallbackModelConfig();
+            const fallback = globalFallback;
             if (fallback) {
               console.log(
                 `[agent-chat] Primary model spawn failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
@@ -3027,13 +2986,13 @@ function spawnChatProcess(
  */
 function applyFallbackModel(
   agent: NonNullable<Awaited<ReturnType<typeof prepareAgentWorkspaceAccess>>>,
+  projectFallback: { model: string; modelId: string | null } | null,
 ): typeof agent | null {
-  const fallback = getFallbackModelConfig();
-  if (!fallback) return null;
+  if (!projectFallback?.model) return null;
   return {
     ...agent,
-    model: fallback.model,
-    modelId: fallback.modelId,
+    model: projectFallback.model,
+    modelId: projectFallback.modelId,
   };
 }
 
@@ -3177,10 +3136,7 @@ export function canRespondToMessageStartImmediately(
 }
 
 function clearConversationQueue(conversationId: string) {
-  store.deleteWhere(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) => r.conversationId === conversationId,
-  );
+  deleteChatQueueItemsForConversation(conversationId);
 
   for (const [key, entry] of queueDrainTimers) {
     const [, queuedConversationId] = key.split(':');
@@ -3375,8 +3331,8 @@ function findProcessingQueueItemForRun(
   runStartedAt: number,
 ): Record<string, unknown> | null {
   const processingItems = store
-    .find(
-      AGENT_CHAT_QUEUE_COLLECTION,
+    .getAll(AGENT_CHAT_QUEUE_COLLECTION)
+    .filter(
       (r: Record<string, unknown>) =>
         r.agentId === agentId && r.conversationId === conversationId && r.status === 'processing',
     )
@@ -3569,87 +3525,136 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
   queueProcessors.add(key);
   try {
     while (true) {
-      const queueItems = listConversationQueueItems(agentId, conversationId);
-      const now = Date.now();
-      const readyItems = queueItems.filter((item) =>
-        canStartQueuedItemNow(agentId, conversationId, queueItems, item, now),
-      );
+      type ChatClaim = {
+        readyItemId: string;
+        readyItem: Record<string, unknown>;
+        mode: QueueExecutionMode;
+        prompt: string;
+        targetMessageId: string | null;
+      };
 
-      if (readyItems.length === 0) {
-        const hasQueuedItems = queueItems.some((item) => item.status === 'queued');
-        if (!hasQueuedItems) {
-          clearQueueDrainTimerForKey(key);
+      const txResult = await store.transaction(async () => {
+        await store.lockAgentChatQueueConversation(agentId, conversationId);
+        const queueItems = listConversationQueueItems(agentId, conversationId) as Record<
+          string,
+          unknown
+        >[];
+        const now = Date.now();
+        const readyItems = queueItems.filter((item) =>
+          canStartQueuedItemNow(agentId, conversationId, queueItems, item, now),
+        );
+
+        if (readyItems.length === 0) {
+          const hasQueuedItems = queueItems.some((item) => item.status === 'queued');
+          return { kind: 'idle' as const, hasQueuedItems };
+        }
+
+        const claims: ChatClaim[] = [];
+        for (const readyItem of readyItems) {
+          if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
+            return { kind: 'global_limit' as const, claims };
+          }
+
+          const readyItemId = readyItem.id as string;
+          const attempts = Number(readyItem.attempts ?? 0);
+          const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
+          const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
+          const targetMessageId =
+            typeof readyItem.targetMessageId === 'string'
+              ? (readyItem.targetMessageId as string)
+              : null;
+
+          if (mode === 'append_prompt' && !prompt) {
+            store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              nextAttemptAt: null,
+              runId: null,
+              errorMessage: 'Queued prompt is empty',
+            });
+            continue;
+          }
+          if (mode === 'respond_to_message' && !targetMessageId) {
+            store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              nextAttemptAt: null,
+              runId: null,
+              errorMessage: 'Queued branch target is missing',
+            });
+            continue;
+          }
+
+          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+            status: 'processing',
+            attempts: attempts + 1,
+            startedAt: new Date().toISOString(),
+            runId: null,
+            errorMessage: null,
+            completedAt: null,
+            usedFallback: false,
+            fallbackModel: null,
+          });
+
+          const latest =
+            store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId) ??
+            ({
+              ...readyItem,
+              status: 'processing',
+              attempts: attempts + 1,
+            } as Record<string, unknown>);
+          claims.push({ readyItemId, readyItem: latest, mode, prompt, targetMessageId });
+        }
+
+        return { kind: 'claimed' as const, claims };
+      });
+
+        if (txResult.kind === 'idle') {
+          if (!txResult.hasQueuedItems) {
+            clearQueueDrainTimerForKey(key);
+            return;
+          }
+          const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
+          scheduleQueueDrain(
+            agentId,
+            conversationId,
+            nextDelayMs === null ? 1000 : Math.max(nextDelayMs, 1000),
+          );
           return;
         }
 
-        const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
-        scheduleQueueDrain(
-          agentId,
-          conversationId,
-          nextDelayMs === null ? 1000 : Math.max(nextDelayMs, 1000),
-        );
-        return;
-      }
-
-      for (const readyItem of readyItems) {
-        if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
+        if (txResult.kind === 'global_limit') {
+          for (const c of txResult.claims) {
+            void processQueueItem(
+              c.readyItemId,
+              c.readyItem,
+              agentId,
+              conversationId,
+              c.mode,
+              c.prompt,
+              c.targetMessageId,
+            ).finally(() => {
+              scheduleQueueDrain(agentId, conversationId, 0);
+            });
+          }
           scheduleQueueDrain(agentId, conversationId, 2000);
           return;
         }
 
-        const readyItemId = readyItem.id as string;
-        const attempts = Number(readyItem.attempts ?? 0);
-        const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
-        const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
-        const targetMessageId =
-          typeof readyItem.targetMessageId === 'string'
-            ? (readyItem.targetMessageId as string)
-            : null;
-
-        if (mode === 'append_prompt' && !prompt) {
-          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-            status: 'failed',
-            completedAt: new Date().toISOString(),
-            nextAttemptAt: null,
-            runId: null,
-            errorMessage: 'Queued prompt is empty',
+        for (const c of txResult.claims) {
+          void processQueueItem(
+            c.readyItemId,
+            c.readyItem,
+            agentId,
+            conversationId,
+            c.mode,
+            c.prompt,
+            c.targetMessageId,
+          ).finally(() => {
+            scheduleQueueDrain(agentId, conversationId, 0);
           });
-          continue;
         }
-        if (mode === 'respond_to_message' && !targetMessageId) {
-          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-            status: 'failed',
-            completedAt: new Date().toISOString(),
-            nextAttemptAt: null,
-            runId: null,
-            errorMessage: 'Queued branch target is missing',
-          });
-          continue;
-        }
-
-        store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-          status: 'processing',
-          attempts: attempts + 1,
-          startedAt: new Date().toISOString(),
-          runId: null,
-          errorMessage: null,
-          completedAt: null,
-          usedFallback: false,
-          fallbackModel: null,
-        });
-
-        void processQueueItem(
-          readyItemId,
-          readyItem,
-          agentId,
-          conversationId,
-          mode,
-          prompt,
-          targetMessageId,
-        ).finally(() => {
-          scheduleQueueDrain(agentId, conversationId, 0);
-        });
-      }
+        continue;
     }
   } finally {
     queueProcessors.delete(key);
@@ -3657,14 +3662,10 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
 }
 
 function pruneChatQueueHistory() {
-  const now = Date.now();
-  store.deleteWhere(AGENT_CHAT_QUEUE_COLLECTION, (r: Record<string, unknown>) => {
-    if (r.status !== 'completed' && r.status !== 'failed' && r.status !== 'cancelled') {
-      return false;
-    }
-    const completedAtMs = parseIsoDateMs(r.completedAt);
-    if (!Number.isFinite(completedAtMs)) return false;
-    return now - completedAtMs > AGENT_CHAT_QUEUE_RETENTION_MS;
+  deleteTerminalChatQueueItemsBeyondRetention({
+    terminalStatuses: ['completed', 'failed', 'cancelled'],
+    retentionMs: AGENT_CHAT_QUEUE_RETENTION_MS,
+    nowMs: Date.now(),
   });
 }
 
@@ -3676,10 +3677,7 @@ export function cancelProcessingQueueItemForRun(
   runId: string,
   errorMessage = 'Cancelled by user',
 ): boolean {
-  const item = store.find(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) => r.status === 'processing' && r.runId === runId,
-  )[0];
+  const item = findChatQueueItemProcessingForRunId(runId);
   if (!item || typeof item.id !== 'string') return false;
 
   markQueueItemCancelledByUser(item.id, errorMessage);
@@ -3693,13 +3691,10 @@ export interface InitializeAgentChatQueueOptions {
   preserveActiveProcessing?: boolean;
 }
 
-export function initializeAgentChatQueue(options: InitializeAgentChatQueueOptions = {}) {
+export async function initializeAgentChatQueue(options: InitializeAgentChatQueueOptions = {}) {
   const { preserveActiveProcessing = false } = options;
   const nowIso = new Date().toISOString();
-  const interruptedItems = store.find(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) => r.status === 'processing',
-  );
+  const interruptedItems = await listChatQueueItemsWithStatusNative('processing');
 
   for (const item of interruptedItems) {
     const hasKeys = typeof item.agentId === 'string' && typeof item.conversationId === 'string';
@@ -3726,10 +3721,7 @@ export function initializeAgentChatQueue(options: InitializeAgentChatQueueOption
 
   pruneChatQueueHistory();
 
-  const pendingItems = store.find(
-    AGENT_CHAT_QUEUE_COLLECTION,
-    (r: Record<string, unknown>) => r.status === 'queued',
-  );
+  const pendingItems = await listChatQueueItemsWithStatusNative('queued');
   const keys = new Set<string>();
   for (const item of pendingItems) {
     if (typeof item.agentId !== 'string' || typeof item.conversationId !== 'string') continue;
@@ -3994,12 +3986,12 @@ export function executeCronTask(agentId: string, job: { id: string; prompt: stri
     `${triggerContext}` +
     `You have been triggered by a scheduled cron job.\n` +
     `This is a background automation run, not a chat conversation. Do not call /api/agents/:id/chat/messages.\n` +
-    `Use OpenWork API endpoints for all platform state changes. Do not edit platform JSON data files directly (boards.json, cards.json, tasks.json, collections.json, agents.json, users.json, etc.).\n\n` +
+    `Use OpenWork API endpoints for all platform state changes. Do not edit platform persistence files or database artifacts directly.\n\n` +
     `**Task:** ${job.prompt}\n\n` +
     `Complete this task.`;
 
-  void prepareAgentWorkspaceAccess(agentId)
-    .then((agent) => {
+  void Promise.all([prepareAgentWorkspaceAccess(agentId), getFallbackModelConfig()])
+    .then(([agent, globalFallback]) => {
       if (!agent) return;
 
       const spawnCronRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
@@ -4013,7 +4005,7 @@ export function executeCronTask(agentId: string, job: { id: string; prompt: stri
           triggerRef: { cronJobId: job.id },
           onExit: ({ code, stdout, stderr }) => {
             if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
-              const fallbackAgent = applyFallbackModel(agent);
+              const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 const errMsg = stderr.trim() || `Process exited with code ${code}`;
                 console.log(
@@ -4030,7 +4022,7 @@ export function executeCronTask(agentId: string, job: { id: string; prompt: stri
           },
           onSpawnError: (err) => {
             if (!isFallback) {
-              const fallbackAgent = applyFallbackModel(agent);
+              const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 console.log(
                   `[agent-chat] Cron job ${job.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
@@ -4097,8 +4089,8 @@ export function executeCardTask(
       `${descriptionLine}\n\n` +
       `Complete this task.`;
 
-  void prepareAgentWorkspaceAccess(agentId)
-    .then((agent) => {
+  void Promise.all([prepareAgentWorkspaceAccess(agentId), getFallbackModelConfig()])
+    .then(([agent, globalFallback]) => {
       if (!agent) {
         callbacks.onError('Agent not found');
         return;
@@ -4121,7 +4113,7 @@ export function executeCardTask(
           },
           onExit: ({ code, stdout, stderr, runStartedAt }) => {
             if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
-              const fallbackAgent = applyFallbackModel(agent);
+              const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 const errMsg = stderr.trim() || `Process exited with code ${code}`;
                 console.log(
@@ -4151,7 +4143,7 @@ export function executeCardTask(
           },
           onSpawnError: (err) => {
             if (!isFallback) {
-              const fallbackAgent = applyFallbackModel(agent);
+              const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 console.log(
                   `[agent-chat] Card task ${card.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,

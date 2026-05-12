@@ -1,18 +1,23 @@
-import path from 'node:path';
+import { databaseConfig } from '../config/database.js';
 import { env } from '../config/env.js';
-import { JsonStore } from './json-store.js';
+import { store } from './connection.js';
+import { runPostgresMigrations } from './run-postgres-migrations.js';
+import type { Store } from './store.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
 
 function findByField(
-  store: JsonStore,
+  store: Store,
   collection: string,
   field: string,
   value: unknown,
 ): Record<string, unknown> | null {
-  return store.findOne(collection, (r) => r[field] === value);
+  for (const r of store.getAll(collection)) {
+    if (r[field] === value) return r;
+  }
+  return null;
 }
 
-async function ensureUsers(store: JsonStore) {
+async function ensureUsers(store: Store) {
   const specs = [
     {
       email: 'admin@workspace.local',
@@ -83,7 +88,7 @@ async function ensureUsers(store: JsonStore) {
   return users;
 }
 
-function ensureProjectSettings(store: JsonStore): void {
+function ensureProjectSettings(store: Store): void {
   const existing = store.getById('settings', 'project');
   if (existing) return;
 
@@ -96,7 +101,7 @@ function ensureProjectSettings(store: JsonStore): void {
   });
 }
 
-function ensureRateLimitSettings(store: JsonStore): void {
+function ensureRateLimitSettings(store: Store): void {
   const existing = store.getById('settings', 'rate-limits');
   if (existing) return;
 
@@ -108,10 +113,10 @@ function ensureRateLimitSettings(store: JsonStore): void {
 }
 
 function ensureGeneralCollection(
-  store: JsonStore,
+  store: Store,
   createdById: string,
 ): Record<string, unknown> {
-  const existing = store.findOne('collections', (r) => r.isGeneral === true);
+  const existing = store.getAll('collections').find((r) => r.isGeneral === true);
   if (existing) return existing;
 
   return store.insert('collections', {
@@ -123,7 +128,7 @@ function ensureGeneralCollection(
 }
 
 function ensureDefaultBoard(
-  store: JsonStore,
+  store: Store,
   createdById: string,
   defaultCollectionId: string,
 ): Record<string, unknown> {
@@ -161,12 +166,12 @@ function ensureDefaultBoard(
 }
 
 function ensureWorkspace(
-  store: JsonStore,
+  store: Store,
   userId: string,
   boardId: string,
   collectionId: string,
 ): void {
-  const existing = store.findOne('workspaces', (r) => r.userId === userId);
+  const existing = store.getAll('workspaces').find((r) => r.userId === userId);
   if (existing) return;
 
   store.insert('workspaces', {
@@ -179,7 +184,9 @@ function ensureWorkspace(
 }
 
 async function bootstrap() {
-  const store = new JsonStore(path.resolve(env.DATA_DIR));
+  console.log('Applying Postgres migrations (Drizzle)...');
+  await runPostgresMigrations(databaseConfig);
+
   await store.init();
 
   console.log('Bootstrapping workspace data...');

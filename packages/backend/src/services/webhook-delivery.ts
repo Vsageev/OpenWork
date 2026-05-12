@@ -1,6 +1,10 @@
 import { createHmac } from 'node:crypto';
 import { store } from '../db/index.js';
-import { eventBus, type AppEventName, type AppEventMap } from './event-bus.js';
+import {
+  getWebhookDeliveryRecordById,
+  listWebhookDeliveriesNative,
+} from '../db/repositories/webhooks-repository.js';
+import { eventBus, type AppEventName } from './event-bus.js';
 import { getActiveWebhooksByEvent } from './webhooks.js';
 
 // ---------------------------------------------------------------------------
@@ -55,9 +59,6 @@ async function deliver(
   }
 
   const start = Date.now();
-  let responseStatus: number | null = null;
-  let responseBody: string | null = null;
-
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -76,8 +77,8 @@ async function deliver(
 
     clearTimeout(timeout);
 
-    responseStatus = res.status;
-    responseBody = (await res.text()).slice(0, 2048);
+    const responseStatus = res.status;
+    const responseBody = (await res.text()).slice(0, 2048);
 
     const durationMs = Date.now() - start;
 
@@ -154,8 +155,12 @@ async function processRetries(): Promise<void> {
   try {
     const now = new Date();
     const due = store
-      .find('webhookDeliveries', (r) =>
-        r.status === 'pending' && r.nextRetryAt != null && new Date(r.nextRetryAt as string).getTime() <= now.getTime(),
+      .getAll('webhookDeliveries')
+      .filter(
+        (r) =>
+          r.status === 'pending' &&
+          r.nextRetryAt != null &&
+          new Date(r.nextRetryAt as string).getTime() <= now.getTime(),
       )
       .slice(0, 50);
 
@@ -249,7 +254,13 @@ async function dispatchEvent(event: AppEventName, payload: Record<string, unknow
 
   await Promise.allSettled(
     activeWebhooks.map((webhook) =>
-      deliver(webhook.id as string, webhook.url as string, webhook.secret as string, event, payload),
+      deliver(
+        webhook.id as string,
+        webhook.url as string,
+        webhook.secret as string,
+        event,
+        payload,
+      ),
     ),
   );
 }
@@ -270,24 +281,17 @@ export async function listDeliveries(query: DeliveryListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
 
-  const predicate = (r: Record<string, unknown>) => {
-    if (query.webhookId && r.webhookId !== query.webhookId) return false;
-    if (query.event && r.event !== query.event) return false;
-    if (query.status && r.status !== query.status) return false;
-    return true;
-  };
-
-  const all = store.find('webhookDeliveries', predicate)
-    .sort((a, b) => new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime());
-
-  const total = all.length;
-  const entries = all.slice(offset, offset + limit);
-
-  return { entries, total };
+  return listWebhookDeliveriesNative({
+    webhookId: query.webhookId,
+    event: query.event,
+    status: query.status,
+    limit,
+    offset,
+  });
 }
 
 export async function getDeliveryById(id: string) {
-  return store.getById('webhookDeliveries', id) ?? null;
+  return (await getWebhookDeliveryRecordById(id)) ?? null;
 }
 
 export async function retryDelivery(id: string) {
@@ -302,5 +306,5 @@ export async function retryDelivery(id: string) {
     completedAt: null,
   });
 
-  return getDeliveryById(id);
+  return await getDeliveryById(id);
 }

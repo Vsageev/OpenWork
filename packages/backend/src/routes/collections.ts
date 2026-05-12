@@ -95,7 +95,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     async (request, reply) => {
       let ids: string[] | undefined;
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        const workspace = await getWorkspaceById(request.query.workspaceId);
         if (workspace) {
           ids = workspace.collectionIds;
         }
@@ -236,7 +236,7 @@ export async function collectionRoutes(app: FastifyInstance) {
         params: z.object({ id: z.uuid() }),
         body: z.object({
           agentId: z.string(),
-          prompt: z.string().min(1).max(10000),
+          prompt: z.string().max(10000).optional(),
           maxParallel: z.number().int().min(1).max(20).optional(),
           cardIds: z.array(z.uuid()).min(1).optional(),
           cardFilters: agentBatchCardFiltersSchema.optional(),
@@ -325,7 +325,7 @@ export async function collectionRoutes(app: FastifyInstance) {
         return reply.notFound('Batch run not found');
       }
 
-      const cancelled = cancelAgentBatchRun(request.params.runId);
+      const cancelled = await cancelAgentBatchRun(request.params.runId);
       return reply.send(cancelled ?? run);
     },
   );
@@ -452,7 +452,7 @@ export async function collectionRoutes(app: FastifyInstance) {
         return reply.notFound('Batch run not found');
       }
 
-      const cancelled = cancelAgentBatchRun(request.params.runId);
+      const cancelled = await cancelAgentBatchRun(request.params.runId);
       return reply.send(cancelled ?? run);
     },
   );

@@ -3,13 +3,15 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockFind = vi.fn();
+const mockGetAll = vi.fn();
 const mockGetById = vi.fn();
 const mockUpdate = vi.fn();
 
-vi.mock('../db/index.js', () => ({
+vi.mock('../db/connection.js', () => ({
   store: {
     find: (col: string, predicate: (record: Record<string, unknown>) => boolean) =>
       mockFind(col, predicate),
+    getAll: (col: string) => mockGetAll(col),
     getById: (col: string, id: string) => mockGetById(col, id),
     update: (col: string, id: string, patch: Record<string, unknown>) =>
       mockUpdate(col, id, patch),
@@ -33,6 +35,7 @@ describe('getConversationAttachmentDiskPaths', () => {
       (col: string, predicate: (record: Record<string, unknown>) => boolean) =>
         (recordsByCollection[col] ?? []).filter((record) => predicate(record)),
     );
+    mockGetAll.mockImplementation((col: string) => [...(recordsByCollection[col] ?? [])]);
     mockGetById.mockImplementation((col: string, id: string) =>
       (recordsByCollection[col] ?? []).find((record) => record.id === id) ?? null,
     );
@@ -48,6 +51,7 @@ describe('getConversationAttachmentDiskPaths', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     mockFind.mockReset();
+    mockGetAll.mockReset();
     mockGetById.mockReset();
     mockUpdate.mockReset();
   });

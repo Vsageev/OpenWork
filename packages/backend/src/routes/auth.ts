@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { store } from '../db/index.js';
+import { findUserByEmailLower, getUserRecordById } from '../db/repositories/users-repository.js';
 import {
   hashPassword,
   verifyPassword,
@@ -68,10 +69,7 @@ export async function authRoutes(app: FastifyInstance) {
       throw ApiError.badRequest('weak_password', passwordCheck.errors.join('. '), 'Password must be at least 8 characters with uppercase, lowercase, number, and special character');
     }
 
-    const existing = store.findOne(
-      'users',
-      (u) => typeof u.email === 'string' && u.email.toLowerCase() === email,
-    );
+    const existing = await findUserByEmailLower(email);
 
     if (existing) {
       throw ApiError.conflict('duplicate_email', 'User with this email already exists', 'Use POST /api/auth/login to sign in instead');
@@ -79,7 +77,7 @@ export async function authRoutes(app: FastifyInstance) {
 
     const passwordHash = await hashPassword(password);
 
-    const user = store.insert('users', {
+    const user = await store.insert('users', {
       email,
       passwordHash,
       firstName,
@@ -108,10 +106,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.post('/api/auth/login', { config: { rateLimit: authRateLimitConfig() }, schema: { tags: ['Auth'], summary: 'Login', body: loginBody } }, async (request, reply) => {
     const { email, password } = request.body;
 
-    const user = store.findOne(
-      'users',
-      (u) => typeof u.email === 'string' && u.email.toLowerCase() === email,
-    );
+    const user = await findUserByEmailLower(email);
 
     if (!user) {
       throw ApiError.unauthorized('invalid_credentials', 'Invalid email or password');
@@ -193,7 +188,7 @@ export async function authRoutes(app: FastifyInstance) {
       throw ApiError.unauthorized('invalid_2fa_token', 'Invalid two-factor token');
     }
 
-    const user = store.getById('users', payload.sub);
+    const user = await getUserRecordById(payload.sub);
 
     if (!user || !user.isActive || !user.totpEnabled || !user.totpSecret) {
       throw ApiError.unauthorized('2fa_not_configured', 'Two-factor authentication not configured', 'Enable 2FA first via POST /api/auth/2fa/setup');
@@ -264,7 +259,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.get('/api/auth/me', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Get current user' } }, async (request, reply) => {
     const { sub } = request.user;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
 
     if (!user) {
       throw ApiError.unauthorized('user_not_found', 'User not found', 'The JWT subject references a user that no longer exists');
@@ -301,7 +296,7 @@ export async function authRoutes(app: FastifyInstance) {
     const { sub } = request.user;
     const { currentPassword, newPassword } = request.body;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
     if (!user) {
       throw ApiError.unauthorized('user_not_found', 'User not found');
     }
@@ -317,7 +312,7 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     const newHash = await hashPassword(newPassword);
-    store.update('users', sub, { passwordHash: newHash });
+    await store.update('users', sub, { passwordHash: newHash });
 
     await createAuditLog({
       userId: sub,
@@ -348,13 +343,13 @@ export async function authRoutes(app: FastifyInstance) {
       throw ApiError.badRequest('no_updates', 'No fields to update');
     }
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
     if (!user) {
       throw ApiError.unauthorized('user_not_found', 'User not found');
     }
 
-    store.update('users', sub, updates);
-    const updated = store.getById('users', sub);
+    await store.update('users', sub, updates);
+    const updated = await getUserRecordById(sub);
 
     await createAuditLog({
       userId: sub,
@@ -384,7 +379,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.post('/api/auth/2fa/setup', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Begin TOTP 2FA setup' } }, async (request, reply) => {
     const { sub } = request.user;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
 
     if (!user) {
       throw ApiError.unauthorized('user_not_found', 'User not found');
@@ -398,7 +393,7 @@ export async function authRoutes(app: FastifyInstance) {
     const otpauthUri = generateTotpUri(secret, user.email as string);
 
     // Store the secret temporarily (not yet enabled)
-    store.update('users', sub, { totpSecret: secret });
+    await store.update('users', sub, { totpSecret: secret });
 
     return reply.send({
       secret,
@@ -410,7 +405,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.post('/api/auth/2fa/confirm', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Confirm TOTP 2FA setup', body: totpTokenBody } }, async (request, reply) => {
     const { sub } = request.user;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
 
     if (!user || !user.totpSecret) {
       throw ApiError.badRequest('2fa_setup_not_initiated', 'TOTP setup has not been initiated', 'Call POST /api/auth/2fa/setup first to generate a secret');
@@ -447,7 +442,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.post('/api/auth/2fa/disable', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Disable TOTP 2FA', body: disableTotpBody } }, async (request, reply) => {
     const { sub } = request.user;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
 
     if (!user) {
       throw ApiError.unauthorized('user_not_found', 'User not found');
@@ -480,7 +475,7 @@ export async function authRoutes(app: FastifyInstance) {
   typedApp.post('/api/auth/2fa/recovery-codes', { onRequest: [app.authenticate], schema: { tags: ['Auth'], summary: 'Regenerate recovery codes' } }, async (request, reply) => {
     const { sub } = request.user;
 
-    const user = store.getById('users', sub);
+    const user = await getUserRecordById(sub);
 
     if (!user || !user.totpEnabled) {
       throw ApiError.badRequest('2fa_not_enabled', 'Two-factor authentication is not enabled', 'Enable 2FA first via POST /api/auth/2fa/setup and POST /api/auth/2fa/confirm');

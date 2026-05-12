@@ -21,6 +21,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:store-contract": "pnpm --filter backend test:store-contract",
     "test:reports": "vitest run packages/backend/test/agent-runs.routes.test.ts",
     "verify": "pnpm typecheck && pnpm test && node scripts/verify-public-pages.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm format:check",

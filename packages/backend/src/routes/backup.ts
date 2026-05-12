@@ -25,7 +25,10 @@ export async function backupRoutes(app: FastifyInstance) {
     '/api/backups',
     {
       onRequest: [app.authenticate, requirePermission('backups:create')],
-      schema: { tags: ['Backup'], summary: 'Create a backup' },
+      schema: {
+        tags: ['Backup'],
+        summary: 'Create a backup (pg_dump + JSON collection mirrors when tools available)',
+      },
     },
     async (_req, reply) => {
       const result = await createBackup();
@@ -126,7 +129,7 @@ export async function backupRoutes(app: FastifyInstance) {
       onRequest: [app.authenticate, requirePermission('backups:create')],
       schema: {
         tags: ['Backup'],
-        summary: 'Restore from a named backup',
+        summary: 'Restore from a named backup using postgres.dump',
         params: backupNameParam,
       },
     },

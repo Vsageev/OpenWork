@@ -9,11 +9,13 @@ Administrative and operational endpoints for monitoring and maintenance.
 
 ## Backup lifecycle
 
-- `POST /api/backups`
+Runtime persistence is PostgreSQL (`DATABASE_URL`). See `docs/DEVELOPMENT.md` — Admin HTTP backups:
+
+- `POST /api/backups` — `pg_dump` custom file when client tools are available, plus JSON collection mirrors and manifest.
 - `GET /api/backups`
-- `POST /api/backups/import`
-- `GET /api/backups/:name/download`
-- `POST /api/backups/:name/restore`
+- `POST /api/backups/import` — writes a JSON-only backup tree for archival inspection; take a new `POST /api/backups` snapshot for restore-capable `postgres.dump`.
+- `GET /api/backups/:name/download` — JSON bundle of collections only.
+- `POST /api/backups/:name/restore` — `pg_restore` from `postgres.dump` in that backup (requires that file).
 - `DELETE /api/backups/prune`
 - `DELETE /api/backups/:name`
 

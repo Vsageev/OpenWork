@@ -1,11 +1,20 @@
 import { store } from '../db/index.js';
+import {
+  AGENT_BATCH_RUN_ITEMS_COLLECTION,
+  AGENT_BATCH_RUNS_COLLECTION,
+  deleteBatchRunItemsForRun,
+  findBatchRunItemsQueuedOrProcessingNative,
+  findBatchRunItemsWithStatusNative,
+  findBatchRunsEligibleForHistoryPrune,
+  findTerminalBatchRuns,
+  listAgentBatchRunsMatching,
+  listOrderedBatchRunItemsForRun,
+} from '../db/repositories/agent-execution-repository.js';
 import { ApiError } from '../utils/api-errors.js';
 import { getAgent } from './agents.js';
 import { executeCardTask } from './agent-chat.js';
 import { killAgentRun } from './agent-runs.js';
 
-const AGENT_BATCH_RUN_COLLECTION = 'agentBatchRuns';
-const AGENT_BATCH_ITEM_COLLECTION = 'agentBatchRunItems';
 const AGENT_BATCH_DEFAULT_MAX_PARALLEL = 3;
 const AGENT_BATCH_MAX_PARALLEL_LIMIT = 20;
 const AGENT_BATCH_RETRY_BASE_MS = 1000;
@@ -57,7 +66,7 @@ export interface EnqueueAgentBatchRunOptions {
   sourceId: string;
   sourceName?: string | null;
   agentId: string;
-  prompt: string;
+  prompt?: string;
   maxParallel?: number;
   cards: AgentBatchCardSnapshot[];
   stages?: AgentBatchStageInput[];
@@ -396,14 +405,7 @@ function getItemRetryDelayMs(attempt: number): number {
 }
 
 function listItemsForRun(runId: string): Record<string, unknown>[] {
-  return store
-    .find(AGENT_BATCH_ITEM_COLLECTION, (r: Record<string, unknown>) => r.runId === runId)
-    .sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
-      const orderA = Number(a.order ?? Number.MAX_SAFE_INTEGER);
-      const orderB = Number(b.order ?? Number.MAX_SAFE_INTEGER);
-      if (orderA !== orderB) return orderA - orderB;
-      return parseIsoDateMs(a.createdAt) - parseIsoDateMs(b.createdAt);
-    });
+  return listOrderedBatchRunItemsForRun(runId) as Record<string, unknown>[];
 }
 
 function countItemsByStatus(
@@ -451,7 +453,7 @@ function computeRunStatus(
 }
 
 function refreshRunStats(runId: string): Record<string, unknown> | null {
-  const run = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+  const run = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
   if (!run) return null;
 
   const counts = countItemsByStatus(runId);
@@ -481,7 +483,7 @@ function refreshRunStats(runId: string): Record<string, unknown> | null {
     patch.finishedAt = isFullySettled ? (run.finishedAt ?? new Date().toISOString()) : null;
   }
 
-  return store.update(AGENT_BATCH_RUN_COLLECTION, runId, patch);
+  return store.update(AGENT_BATCH_RUNS_COLLECTION, runId, patch);
 }
 
 function getNextReadyDelayMs(runId: string): number | null {
@@ -533,7 +535,7 @@ function scheduleRunDrain(runId: string, delayMs: number) {
 }
 
 function markItemCompleted(itemId: string) {
-  store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
     status: 'completed',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
@@ -542,7 +544,7 @@ function markItemCompleted(itemId: string) {
 }
 
 function markItemCancelled(itemId: string, errorMessage = 'Cancelled by user') {
-  store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
     status: 'cancelled',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
@@ -551,7 +553,7 @@ function markItemCancelled(itemId: string, errorMessage = 'Cancelled by user') {
 }
 
 function markItemSkipped(itemId: string, errorMessage: string) {
-  store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
     status: 'skipped',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
@@ -569,7 +571,7 @@ function retryOrFailItem(
 
   if (attemptsUsed < maxAttempts) {
     const retryDelayMs = getItemRetryDelayMs(attemptsUsed);
-    store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+    store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
       status: 'queued',
       completedAt: null,
       errorMessage,
@@ -579,7 +581,7 @@ function retryOrFailItem(
     return;
   }
 
-  store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
     status: 'failed',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
@@ -587,8 +589,8 @@ function retryOrFailItem(
   });
 }
 
-function reconcileProcessingItems(runId: string) {
-  const run = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+async function reconcileProcessingItems(runId: string) {
+  const run = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
   if (!run) return;
 
   const now = Date.now();
@@ -602,7 +604,7 @@ function reconcileProcessingItems(runId: string) {
 
     if (runCancelled) {
       if (agentRunId) {
-        killAgentRun(agentRunId);
+        await killAgentRun(agentRunId);
       }
       markItemCancelled(itemId);
       continue;
@@ -663,40 +665,35 @@ function skipBlockedQueuedItems(runId: string) {
   }
 }
 
-function startBatchItem(runId: string, item: Record<string, unknown>) {
-  const latestRun = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
-  if (!latestRun) return;
+/** Returns true when the item is marked processing and a card task should be dispatched. */
+function markBatchItemProcessing(runId: string, item: Record<string, unknown>): boolean {
+  const latestRun = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
+  if (!latestRun) return false;
   if (latestRun.status === 'cancelled') {
     markItemCancelled(item.id as string);
-    return;
+    return false;
   }
 
   const itemId = item.id as string;
   const attempts = Number(item.attempts ?? 0);
   const agentId =
     typeof latestRun.agentId === 'string' && latestRun.agentId ? latestRun.agentId : null;
-  const prompt =
-    typeof latestRun.prompt === 'string' && latestRun.prompt.trim()
-      ? latestRun.prompt.trim()
-      : null;
   const cardId = typeof item.cardId === 'string' ? item.cardId : null;
   const cardName = typeof item.cardName === 'string' ? item.cardName : null;
   const cardCollectionId =
     typeof item.cardCollectionId === 'string' ? item.cardCollectionId : null;
-  const cardDescription =
-    typeof item.cardDescription === 'string' ? item.cardDescription : null;
 
-  if (!agentId || !prompt || !cardId || !cardName || !cardCollectionId) {
-    store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  if (!agentId || !cardId || !cardName || !cardCollectionId) {
+    store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
       status: 'failed',
       completedAt: new Date().toISOString(),
       nextAttemptAt: null,
       errorMessage: 'Batch item is missing required fields',
     });
-    return;
+    return false;
   }
 
-  store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, {
+  store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, {
     status: 'processing',
     attempts: attempts + 1,
     startedAt: new Date().toISOString(),
@@ -705,10 +702,33 @@ function startBatchItem(runId: string, item: Record<string, unknown>) {
     errorMessage: null,
     agentRunId: null,
   });
-  store.update(AGENT_BATCH_RUN_COLLECTION, runId, {
+  store.update(AGENT_BATCH_RUNS_COLLECTION, runId, {
     status: 'running',
     startedAt: latestRun.startedAt ?? new Date().toISOString(),
   });
+
+  return true;
+}
+
+function dispatchBatchCardTaskFromItem(runId: string, itemId: string) {
+  const latestRun = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
+  const item = store.getById(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId);
+  if (!latestRun || !item || item.status !== 'processing') return;
+
+  const agentId =
+    typeof latestRun.agentId === 'string' && latestRun.agentId ? latestRun.agentId : null;
+  const prompt =
+    typeof latestRun.prompt === 'string' && latestRun.prompt.trim()
+      ? latestRun.prompt.trim()
+      : undefined;
+  const cardId = typeof item.cardId === 'string' ? item.cardId : null;
+  const cardName = typeof item.cardName === 'string' ? item.cardName : null;
+  const cardCollectionId =
+    typeof item.cardCollectionId === 'string' ? item.cardCollectionId : null;
+  const cardDescription =
+    typeof item.cardDescription === 'string' ? item.cardDescription : null;
+
+  if (!agentId || !cardId || !cardName || !cardCollectionId) return;
 
   executeCardTask(
     agentId,
@@ -720,12 +740,12 @@ function startBatchItem(runId: string, item: Record<string, unknown>) {
     },
     {
       onRunCreated: (agentRunId) => {
-        const latest = store.getById(AGENT_BATCH_ITEM_COLLECTION, itemId);
+        const latest = store.getById(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId);
         if (!latest || latest.status !== 'processing') return;
-        store.update(AGENT_BATCH_ITEM_COLLECTION, itemId, { agentRunId });
+        store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId, { agentRunId });
       },
       onDone: () => {
-        const latest = store.getById(AGENT_BATCH_ITEM_COLLECTION, itemId);
+        const latest = store.getById(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId);
         if (!latest || latest.status !== 'processing') {
           scheduleRunDrain(runId, 0);
           return;
@@ -734,13 +754,13 @@ function startBatchItem(runId: string, item: Record<string, unknown>) {
         scheduleRunDrain(runId, 0);
       },
       onError: (err) => {
-        const latest = store.getById(AGENT_BATCH_ITEM_COLLECTION, itemId);
+        const latest = store.getById(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemId);
         if (!latest || latest.status !== 'processing') {
           scheduleRunDrain(runId, 0);
           return;
         }
 
-        const latestRunRecord = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+        const latestRunRecord = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
         if (!latestRunRecord) return;
         if (latestRunRecord.status === 'cancelled') {
           markItemCancelled(itemId);
@@ -756,76 +776,105 @@ function startBatchItem(runId: string, item: Record<string, unknown>) {
   );
 }
 
+function startBatchItem(runId: string, item: Record<string, unknown>) {
+  if (!markBatchItemProcessing(runId, item)) return;
+  dispatchBatchCardTaskFromItem(runId, item.id as string);
+}
+
 async function drainBatchRun(runId: string): Promise<void> {
   if (runProcessors.has(runId)) return;
   runProcessors.add(runId);
 
   try {
     while (true) {
-      const run = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+      const run = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
       if (!run) {
         clearRunDrainTimer(runId);
         return;
       }
 
-      reconcileProcessingItems(runId);
+      await reconcileProcessingItems(runId);
       skipBlockedQueuedItems(runId);
-      const refreshedRun = refreshRunStats(runId);
-      if (!refreshedRun) {
+
+      const phase = await store.transaction(async () => {
+        await store.lockAgentBatchRunScope(runId);
+        const lockedRun = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
+        if (!lockedRun) return { kind: 'missing' as const };
+
+        let refreshedRun = refreshRunStats(runId);
+        if (!refreshedRun) return { kind: 'missing' as const };
+
+        if (refreshedRun.status === 'cancelled') {
+          for (const item of listItemsForRun(runId)) {
+            if (item.status === 'queued') {
+              markItemCancelled(item.id as string);
+            }
+          }
+          refreshedRun = refreshRunStats(runId) ?? refreshedRun;
+          const processingCount = Number(refreshedRun.processing ?? 0);
+          return { kind: 'cancelled' as const, processingCount };
+        }
+
+        const maxParallel = normalizeMaxParallel(refreshedRun.maxParallel);
+        const processingCount = Number(refreshedRun.processing ?? 0);
+        const availableSlots = Math.max(0, maxParallel - processingCount);
+        if (availableSlots <= 0) {
+          return { kind: 'throttle' as const, delayMs: 1000 };
+        }
+
+        const allItems = listItemsForRun(runId);
+        const itemsById = new Map(allItems.map((item) => [item.id as string, item]));
+        const readyItems = allItems.filter((item) => {
+          if (item.status !== 'queued') return false;
+          if (describeDependencyState(item, itemsById).kind !== 'ready') return false;
+          const nextAttemptAtMs = parseIsoDateMs(item.nextAttemptAt);
+          return !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= Date.now();
+        });
+
+        if (readyItems.length === 0) {
+          const latestRun = refreshRunStats(runId);
+          const stillProcessing = Number(latestRun?.processing ?? 0);
+          const nextDelayMs = getNextReadyDelayMs(runId);
+          return { kind: 'idle' as const, nextDelayMs, stillProcessing };
+        }
+
+        const itemIds: string[] = [];
+        for (const item of readyItems.slice(0, availableSlots)) {
+          if (markBatchItemProcessing(runId, item)) {
+            itemIds.push(item.id as string);
+          }
+        }
+        refreshRunStats(runId);
+        return { kind: 'work' as const, itemIds };
+      });
+
+      if (phase.kind === 'missing') {
         clearRunDrainTimer(runId);
         return;
       }
-
-      if (refreshedRun.status === 'cancelled') {
-        const queuedItems = listItemsForRun(runId).filter((item) => item.status === 'queued');
-        for (const item of queuedItems) {
-          markItemCancelled(item.id as string);
-        }
-        const finalRun = refreshRunStats(runId);
-        const processingCount = Number(finalRun?.processing ?? 0);
-        if (processingCount > 0) {
+      if (phase.kind === 'cancelled') {
+        if (phase.processingCount > 0) scheduleRunDrain(runId, 1000);
+        else clearRunDrainTimer(runId);
+        return;
+      }
+      if (phase.kind === 'throttle') {
+        scheduleRunDrain(runId, phase.delayMs);
+        return;
+      }
+      if (phase.kind === 'idle') {
+        if (phase.nextDelayMs !== null) {
+          scheduleRunDrain(runId, phase.nextDelayMs);
+        } else if (phase.stillProcessing > 0) {
           scheduleRunDrain(runId, 1000);
         } else {
           clearRunDrainTimer(runId);
         }
         return;
       }
-
-      const maxParallel = normalizeMaxParallel(refreshedRun.maxParallel);
-      const processingCount = Number(refreshedRun.processing ?? 0);
-      const availableSlots = Math.max(0, maxParallel - processingCount);
-
-      if (availableSlots <= 0) {
-        scheduleRunDrain(runId, 1000);
-        return;
+      for (const itemId of phase.itemIds) {
+        dispatchBatchCardTaskFromItem(runId, itemId);
       }
-
-      const allItems = listItemsForRun(runId);
-      const itemsById = new Map(allItems.map((item) => [item.id as string, item]));
-      const readyItems = allItems.filter((item) => {
-        if (item.status !== 'queued') return false;
-        if (describeDependencyState(item, itemsById).kind !== 'ready') return false;
-        const nextAttemptAtMs = parseIsoDateMs(item.nextAttemptAt);
-        return !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= Date.now();
-      });
-
-      if (readyItems.length === 0) {
-        const latestRun = refreshRunStats(runId);
-        const stillProcessing = Number(latestRun?.processing ?? 0);
-        const nextDelayMs = getNextReadyDelayMs(runId);
-        if (nextDelayMs !== null) {
-          scheduleRunDrain(runId, nextDelayMs);
-        } else if (stillProcessing > 0) {
-          scheduleRunDrain(runId, 1000);
-        } else {
-          clearRunDrainTimer(runId);
-        }
-        return;
-      }
-
-      for (const item of readyItems.slice(0, availableSlots)) {
-        startBatchItem(runId, item);
-      }
+      continue;
     }
   } finally {
     runProcessors.delete(runId);
@@ -833,51 +882,37 @@ async function drainBatchRun(runId: string): Promise<void> {
 }
 
 export function cleanupFinishedBatchRuns(): number {
-  const finishedRuns = store.find(AGENT_BATCH_RUN_COLLECTION, (r: Record<string, unknown>) => {
-    return r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled';
-  });
+  const finishedRuns = findTerminalBatchRuns();
 
   for (const run of finishedRuns) {
     const runId = run.id as string;
-    store.deleteWhere(
-      AGENT_BATCH_ITEM_COLLECTION,
-      (item: Record<string, unknown>) => item.runId === runId,
-    );
+    deleteBatchRunItemsForRun(runId);
     clearRunDrainTimer(runId);
-    store.delete(AGENT_BATCH_RUN_COLLECTION, runId);
+    store.delete(AGENT_BATCH_RUNS_COLLECTION, runId);
   }
 
   return finishedRuns.length;
 }
 
 function pruneBatchHistory() {
-  const now = Date.now();
-  const staleRuns = store.find(AGENT_BATCH_RUN_COLLECTION, (r: Record<string, unknown>) => {
-    if (r.status !== 'completed' && r.status !== 'failed' && r.status !== 'cancelled') return false;
-    const finishedAtMs = parseIsoDateMs(r.finishedAt);
-    if (!Number.isFinite(finishedAtMs)) return false;
-    return now - finishedAtMs > AGENT_BATCH_HISTORY_RETENTION_MS;
+  const staleRuns = findBatchRunsEligibleForHistoryPrune({
+    retentionMs: AGENT_BATCH_HISTORY_RETENTION_MS,
+    nowMs: Date.now(),
   });
 
   for (const run of staleRuns) {
     const runId = run.id as string;
-    store.deleteWhere(
-      AGENT_BATCH_ITEM_COLLECTION,
-      (item: Record<string, unknown>) => item.runId === runId,
-    );
+    deleteBatchRunItemsForRun(runId);
     clearRunDrainTimer(runId);
-    store.delete(AGENT_BATCH_RUN_COLLECTION, runId);
+    store.delete(AGENT_BATCH_RUNS_COLLECTION, runId);
   }
 }
 
-export function initializeAgentBatchQueue(options: { preserveActiveProcessing?: boolean } = {}) {
+export async function initializeAgentBatchQueue(options: { preserveActiveProcessing?: boolean } = {}) {
   const { preserveActiveProcessing = false } = options;
   pruneBatchHistory();
 
-  const processingItems = store.find(
-    AGENT_BATCH_ITEM_COLLECTION,
-    (r: Record<string, unknown>) => r.status === 'processing',
-  );
+  const processingItems = await findBatchRunItemsWithStatusNative('processing');
 
   for (const item of processingItems) {
     const runId = typeof item.runId === 'string' ? item.runId : null;
@@ -915,10 +950,7 @@ export function initializeAgentBatchQueue(options: { preserveActiveProcessing?: 
   }
 
   const runIds = new Set<string>();
-  const pendingItems = store.find(
-    AGENT_BATCH_ITEM_COLLECTION,
-    (r: Record<string, unknown>) => r.status === 'queued' || r.status === 'processing',
-  );
+  const pendingItems = await findBatchRunItemsQueuedOrProcessingNative();
   for (const item of pendingItems) {
     if (typeof item.runId !== 'string') continue;
     runIds.add(item.runId);
@@ -931,13 +963,10 @@ export function initializeAgentBatchQueue(options: { preserveActiveProcessing?: 
 }
 
 export function enqueueAgentBatchRun(options: EnqueueAgentBatchRunOptions): AgentBatchStartResult {
-  const { sourceType, sourceId, sourceName = null, agentId, prompt, cards } = options;
+  const { sourceType, sourceId, sourceName = null, agentId, prompt = '', cards } = options;
   const maxParallel = normalizeMaxParallel(options.maxParallel);
   const trimmedPrompt = prompt.trim();
 
-  if (!trimmedPrompt) {
-    throw new Error('Prompt is required');
-  }
   const agent = getAgent(agentId);
   if (!agent) {
     throw new Error('Agent not found');
@@ -966,7 +995,7 @@ export function enqueueAgentBatchRun(options: EnqueueAgentBatchRunOptions): Agen
     throw ApiError.badRequest('invalid_batch_dependencies', message);
   }
 
-  const run = store.insert(AGENT_BATCH_RUN_COLLECTION, {
+  const run = store.insert(AGENT_BATCH_RUNS_COLLECTION, {
     sourceType,
     sourceId,
     sourceName,
@@ -1010,7 +1039,7 @@ export function enqueueAgentBatchRun(options: EnqueueAgentBatchRunOptions): Agen
     errorMessage: null,
     agentRunId: null,
   }));
-  const insertedItems = store.insertMany(AGENT_BATCH_ITEM_COLLECTION, itemsToInsert);
+  const insertedItems = store.insertMany(AGENT_BATCH_RUN_ITEMS_COLLECTION, itemsToInsert);
   const itemIdByCardId = new Map(
     insertedItems.map((item) => [item.cardId as string, item.id as string]),
   );
@@ -1021,7 +1050,7 @@ export function enqueueAgentBatchRun(options: EnqueueAgentBatchRunOptions): Agen
         (dependencyCardId) => itemIdByCardId.get(dependencyCardId) as string,
       ) ?? [];
     if (dependencyIds.length === 0) continue;
-    store.update(AGENT_BATCH_ITEM_COLLECTION, item.id as string, {
+    store.update(AGENT_BATCH_RUN_ITEMS_COLLECTION, item.id as string, {
       dependsOnItemIds: dependencyIds,
       blockingMode: resolvedDependencies.blockingModeByCardId.get(cardId) ?? 'all_success',
     });
@@ -1042,11 +1071,10 @@ export function enqueueAgentBatchRun(options: EnqueueAgentBatchRunOptions): Agen
 export function listAgentBatchRuns(options: ListAgentBatchRunsOptions = {}) {
   const { sourceType, sourceId, agentId, status, limit = 50, offset = 0 } = options;
 
-  const all = store.find(AGENT_BATCH_RUN_COLLECTION, (r: Record<string, unknown>) => {
-    if (sourceType && r.sourceType !== sourceType) return false;
-    if (sourceId && r.sourceId !== sourceId) return false;
-    if (agentId && r.agentId !== agentId) return false;
-    return true;
+  const all = listAgentBatchRunsMatching({
+    sourceType,
+    sourceId,
+    agentId,
   });
 
   const refreshed = all.map((run) => refreshRunStats(run.id as string) ?? run);
@@ -1073,7 +1101,7 @@ export function listAgentBatchRuns(options: ListAgentBatchRunsOptions = {}) {
 }
 
 export function getAgentBatchRun(runId: string): Record<string, unknown> | null {
-  return refreshRunStats(runId) ?? store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+  return refreshRunStats(runId) ?? store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
 }
 
 export function listAgentBatchRunItems(
@@ -1081,7 +1109,7 @@ export function listAgentBatchRunItems(
   options: ListAgentBatchRunItemsOptions = {},
 ) {
   const { status, limit = 100, offset = 0 } = options;
-  const run = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+  const run = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
   if (!run) return { entries: [], total: 0 };
 
   const all = listItemsForRun(runId).filter((item) => {
@@ -1103,18 +1131,18 @@ export function listAgentBatchRunItems(
   return { entries, total: all.length };
 }
 
-export function cancelAgentBatchRun(
+export async function cancelAgentBatchRun(
   runId: string,
   reason = 'Cancelled by user',
-): Record<string, unknown> | null {
-  const run = store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+): Promise<Record<string, unknown> | null> {
+  const run = store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
   if (!run) return null;
 
   if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
     return refreshRunStats(runId) ?? run;
   }
 
-  store.update(AGENT_BATCH_RUN_COLLECTION, runId, {
+  store.update(AGENT_BATCH_RUNS_COLLECTION, runId, {
     status: 'cancelled',
     errorMessage: reason,
   });
@@ -1129,12 +1157,12 @@ export function cancelAgentBatchRun(
     const agentRunId =
       typeof item.agentRunId === 'string' && item.agentRunId ? item.agentRunId : null;
     if (agentRunId) {
-      killAgentRun(agentRunId);
+      await killAgentRun(agentRunId);
     } else {
       markItemCancelled(item.id as string, reason);
     }
   }
 
   scheduleRunDrain(runId, 0);
-  return refreshRunStats(runId) ?? store.getById(AGENT_BATCH_RUN_COLLECTION, runId);
+  return refreshRunStats(runId) ?? store.getById(AGENT_BATCH_RUNS_COLLECTION, runId);
 }

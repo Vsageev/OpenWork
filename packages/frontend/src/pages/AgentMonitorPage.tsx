@@ -840,7 +840,8 @@ export function AgentMonitorPage() {
   const [loading, setLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
-  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [expandedActiveRunId, setExpandedActiveRunId] = useState<string | null>(null);
+  const [expandedHistoryRunId, setExpandedHistoryRunId] = useState<string | null>(null);
   const [killingRunId, setKillingRunId] = useState<string | null>(null);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [activeBatchRuns, setActiveBatchRuns] = useState<AgentBatchRun[]>([]);
@@ -1076,7 +1077,7 @@ export function AgentMonitorPage() {
       return;
     }
 
-    setExpandedRunId(null);
+    setExpandedHistoryRunId(null);
     fetchHistory({
       status: statusFilter,
       triggerType: triggerFilter,
@@ -1086,11 +1087,13 @@ export function AgentMonitorPage() {
 
   useEffect(() => {
     if (!targetRunId) return;
-    setExpandedRunId(targetRunId);
 
-    const exists =
-      activeRuns.some((run) => run.id === targetRunId) ||
-      historyRuns.some((run) => run.id === targetRunId);
+    const existsInActive = activeRuns.some((run) => run.id === targetRunId);
+    const existsInHistory = historyRuns.some((run) => run.id === targetRunId);
+    if (existsInActive) setExpandedActiveRunId(targetRunId);
+    if (existsInHistory) setExpandedHistoryRunId(targetRunId);
+
+    const exists = existsInActive || existsInHistory;
     if (exists) return;
 
     let cancelled = false;
@@ -1099,9 +1102,11 @@ export function AgentMonitorPage() {
         if (cancelled) return;
         seedAgentAvatars([run]);
         if (run.status === 'running') {
+          setExpandedActiveRunId(run.id);
           setActiveRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
           return;
         }
+        setExpandedHistoryRunId(run.id);
         setHistoryRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
         setHistoryTotal((prev) => prev + 1);
       })
@@ -1236,8 +1241,9 @@ export function AgentMonitorPage() {
     setAgentFilter('all');
   };
 
-  const toggleExpand = (e: React.MouseEvent, runId: string) => {
+  const toggleExpand = (e: React.MouseEvent, runId: string, section: 'active' | 'history') => {
     e.stopPropagation();
+    const setExpandedRunId = section === 'active' ? setExpandedActiveRunId : setExpandedHistoryRunId;
     setExpandedRunId((prev) => (prev === runId ? null : runId));
   };
 
@@ -1336,10 +1342,10 @@ export function AgentMonitorPage() {
               <div key={run.id} className={styles.runEntry}>
                 <div
                   className={`${styles.runRow} ${styles.activeRunRow}`}
-                  onClick={(e) => toggleExpand(e, run.id)}
+                  onClick={(e) => toggleExpand(e, run.id, 'active')}
                 >
                   <span className={styles.expandToggle}>
-                    {expandedRunId === run.id
+                    {expandedActiveRunId === run.id
                       ? <ChevronDown size={14} />
                       : <ChevronRight size={14} />}
                   </span>
@@ -1374,7 +1380,7 @@ export function AgentMonitorPage() {
                     <X size={13} />
                   </button>
                 </div>
-                {expandedRunId === run.id && <RunLogPanel runId={run.id} runStatus={run.status} />}
+                {expandedActiveRunId === run.id && <RunLogPanel runId={run.id} runStatus={run.status} />}
               </div>
             ))}
           </div>
@@ -1689,11 +1695,11 @@ export function AgentMonitorPage() {
               <div key={run.id} className={styles.runEntry}>
                 <div
                   className={styles.runRow}
-                  onClick={(e) => toggleExpand(e, run.id)}
+                  onClick={(e) => toggleExpand(e, run.id, 'history')}
                   title={run.errorMessage || undefined}
                 >
                   <span className={styles.expandToggle}>
-                    {expandedRunId === run.id
+                    {expandedHistoryRunId === run.id
                       ? <ChevronDown size={14} />
                       : <ChevronRight size={14} />}
                   </span>
@@ -1726,7 +1732,7 @@ export function AgentMonitorPage() {
                   </span>
                   <TriggerLink run={run} navigate={navigate} />
                 </div>
-                {expandedRunId === run.id && <RunLogPanel runId={run.id} runStatus={run.status} />}
+                {expandedHistoryRunId === run.id && <RunLogPanel runId={run.id} runStatus={run.status} />}
               </div>
             ))}
             {historyRuns.length < historyTotal && (

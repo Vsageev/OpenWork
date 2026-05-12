@@ -130,7 +130,10 @@ interface TelegramUpdate {
 /**
  * Verify that the incoming request has a valid webhook secret header.
  */
-export function verifyWebhookSecret(headerSecret: string | undefined, botSecret: string | null): boolean {
+export function verifyWebhookSecret(
+  headerSecret: string | undefined,
+  botSecret: string | null,
+): boolean {
   if (!botSecret) return false;
   return headerSecret === botSecret;
 }
@@ -311,7 +314,8 @@ function parseInboundMessage(msg: TelegramMessage): ParsedMessage {
     };
     return {
       type: 'text',
-      content: `Shared contact: ${msg.contact.first_name} ${msg.contact.last_name ?? ''} (${msg.contact.phone_number})`.trim(),
+      content:
+        `Shared contact: ${msg.contact.first_name} ${msg.contact.last_name ?? ''} (${msg.contact.phone_number})`.trim(),
       attachments: null,
       metadata,
     };
@@ -369,7 +373,9 @@ async function syncContactFromTelegram(
 async function findOrCreateContact(telegramUser: TelegramUser) {
   const telegramUserId = String(telegramUser.id);
 
-  const directMatch = store.findOne('contacts', (r: any) => r.telegramId === telegramUserId);
+  const directMatch = store
+    .getAll('contacts')
+    .find((r: Record<string, unknown>) => r.telegramId === telegramUserId);
   if (directMatch) {
     return syncContactFromTelegram(directMatch, telegramUser);
   }
@@ -381,10 +387,10 @@ async function findOrCreateContact(telegramUser: TelegramUser) {
     source: 'telegram',
     telegramId: telegramUserId,
     notes: buildTelegramNotes(telegramUser),
-  }) as any;
+  });
 
   eventBus.emit('contact_created', {
-    contactId: contact.id,
+    contactId: String(contact.id),
     contact: contact as unknown as Record<string, unknown>,
   });
 
@@ -400,9 +406,9 @@ async function findOrCreateConversation(
   contactId: string,
   contact?: Record<string, unknown>,
 ) {
-  const existing = store.findOne('conversations', r =>
-    r.channelType === 'telegram' && r.externalId === chatId,
-  );
+  const existing = store
+    .getAll('conversations')
+    .find((r) => r.channelType === 'telegram' && r.externalId === chatId);
 
   if (existing) return { conversation: existing, isNew: false };
 
@@ -566,16 +572,16 @@ async function handleCallbackQuery(
   const chatId = String(callbackQuery.message.chat.id);
 
   // Find the conversation for this chat
-  const conversation = store.findOne('conversations', r =>
-    r.channelType === 'telegram' && r.externalId === chatId,
-  );
+  const conversation = store
+    .getAll('conversations')
+    .find((r) => r.channelType === 'telegram' && r.externalId === chatId);
 
   if (!conversation) {
     return { ok: true };
   }
 
   // Find or create contact from the user who clicked
-  const contact = await findOrCreateContact(callbackQuery.from);
+  await findOrCreateContact(callbackQuery.from);
 
   // Store the button click as an inbound system message
   const message = await sendMessage({

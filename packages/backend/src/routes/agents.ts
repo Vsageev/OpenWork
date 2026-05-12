@@ -6,6 +6,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
 import { store } from '../db/index.js';
+import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import cron from 'node-cron';
 import {
   checkCliStatus,
@@ -107,7 +108,7 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      let all = listAgents();
+      let all = await listAgents();
 
       if (request.query.workspaceId) {
         const workspace = await getWorkspaceById(request.query.workspaceId);
@@ -314,7 +315,7 @@ export async function agentRoutes(app: FastifyInstance) {
 
       let resolvedApiKeyId = apiKeyId;
       if (!resolvedApiKeyId) {
-        resolvedApiKeyId = getProjectDefaultAgentKeyId() ?? undefined;
+        resolvedApiKeyId = (await getProjectDefaultAgentKeyId()) ?? undefined;
       }
 
       if (!resolvedApiKeyId) {
@@ -324,7 +325,7 @@ export async function agentRoutes(app: FastifyInstance) {
       }
 
       // Look up the API key to populate derived fields
-      const apiKey = store.getById('apiKeys', resolvedApiKeyId);
+      const apiKey = await getApiKeyRecord(resolvedApiKeyId);
       if (!apiKey || apiKey.isActive === false) {
         return reply.badRequest('API key not found');
       }
@@ -466,7 +467,7 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      let groups = listAgentGroups();
+      let groups = await listAgentGroups();
 
       if (request.query.workspaceId) {
         const workspace = await getWorkspaceById(request.query.workspaceId);
@@ -493,7 +494,7 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const group = createAgentGroup(request.body.name);
+      const group = await createAgentGroup(request.body.name);
       return reply.status(201).send(group);
     },
   );
@@ -530,7 +531,7 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const deleted = deleteAgentGroup(request.params.id);
+      const deleted = await deleteAgentGroup(request.params.id);
       if (!deleted) return reply.notFound('Agent group not found');
       return reply.status(204).send();
     },

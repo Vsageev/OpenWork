@@ -5,6 +5,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { store } from '../db/index.js';
 import { createApiKey, deleteApiKey, validateApiKey } from './api-keys.js';
+import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
+import { deleteRefreshTokensForUserId } from '../db/repositories/refresh-tokens-repository.js';
+import {
+  listAgentGroupRecordsOrdered,
+  listAgentIdsWithGroupId,
+  listAgentRecordsByApiKeyId,
+  listAgentRecordsOrdered,
+  listAllAgentRecordIds,
+  maxAgentGroupOrder,
+} from '../db/repositories/agents-query-repository.js';
+import { findSkillRecordByNameLower } from '../db/repositories/skills-repository.js';
 import { deleteAgentEnvVarsByAgentId } from './agent-env-vars.js';
 import { stopAllAgentCronJobs } from './agent-cron.js';
 import type { CronJob } from './agent-cron.js';
@@ -362,19 +373,13 @@ function asAgentGroup(rec: Record<string, unknown>): AgentGroupRecord {
   } as unknown as AgentGroupRecord;
 }
 
-export function listAgentGroups(): AgentGroupRecord[] {
-  return store
-    .getAll('agentGroups')
-    .map(asAgentGroup)
-    .sort((a, b) => a.order - b.order);
+export async function listAgentGroups(): Promise<AgentGroupRecord[]> {
+  const rows = await listAgentGroupRecordsOrdered();
+  return rows.map(asAgentGroup);
 }
 
-export function createAgentGroup(name: string): AgentGroupRecord {
-  const all = store.getAll('agentGroups');
-  const maxOrder = all.reduce(
-    (max, r) => Math.max(max, typeof r.order === 'number' ? r.order : 0),
-    -1,
-  );
+export async function createAgentGroup(name: string): Promise<AgentGroupRecord> {
+  const maxOrder = await maxAgentGroupOrder();
   const record = store.insert('agentGroups', {
     id: randomUUID(),
     name,
@@ -394,19 +399,18 @@ export function updateAgentGroup(
   return updated ? asAgentGroup(updated) : null;
 }
 
-export function deleteAgentGroup(id: string): boolean {
+export async function deleteAgentGroup(id: string): Promise<boolean> {
   const group = store.getById('agentGroups', id);
   if (!group) return false;
-  // Unassign agents from this group
-  const agents = store.find('agents', (r: Record<string, unknown>) => r.groupId === id);
-  for (const agent of agents) {
-    store.update('agents', agent.id as string, { groupId: null });
+  const agentIds = await listAgentIdsWithGroupId(id);
+  for (const agentId of agentIds) {
+    store.update('agents', agentId, { groupId: null });
   }
   store.delete('agentGroups', id);
   return true;
 }
 
-export function reorderAgentGroups(ids: string[]): AgentGroupRecord[] {
+export async function reorderAgentGroups(ids: string[]): Promise<AgentGroupRecord[]> {
   for (let i = 0; i < ids.length; i++) {
     store.update('agentGroups', ids[i], { order: i });
   }
@@ -827,12 +831,12 @@ async function createAgentServiceUser(
   });
 }
 
-function normalizeAgentServiceUser(
+async function normalizeAgentServiceUser(
   userId: string,
   agentId: string,
   agentName: string,
-): Record<string, unknown> {
-  const updated = store.update('users', userId, {
+): Promise<Record<string, unknown>> {
+  const updated = await store.update('users', userId, {
     email: agentServiceEmail(agentId),
     firstName: agentName,
     lastName: '',
@@ -886,7 +890,7 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
     wsKeyId = (wsKey as Record<string, unknown>).id as string;
 
     // Step 3: Insert agent record
-    const record = store.insert('agents', {
+    const record = await store.insert('agents', {
       id: agentId,
       name: params.name,
       description: params.description,
@@ -950,11 +954,8 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
 
     // Step 5: Auto-attach default skills from preset
     if (preset.defaultSkills.length > 0) {
-      const allSkills = store.getAll('skills');
       for (const skillName of preset.defaultSkills) {
-        const skill = allSkills.find(
-          (s) => (s.name as string).toLowerCase() === skillName.toLowerCase(),
-        );
+        const skill = await findSkillRecordByNameLower(skillName.toLowerCase());
         if (skill) {
           try {
             attachSkillToAgent(agentId, skill.id as string);
@@ -972,10 +973,10 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
       await deleteApiKey(wsKeyId).catch(() => {});
     }
     if (serviceUserId) {
-      store.delete('users', serviceUserId);
+      await store.delete('users', serviceUserId);
     }
     if (agentId) {
-      store.delete('agents', agentId);
+      await store.delete('agents', agentId);
     }
     const dir = workspacePath;
     if (workspaceInitialized && fs.existsSync(dir)) {
@@ -985,8 +986,9 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
   }
 }
 
-export function listAgents(): AgentRecord[] {
-  return store.getAll('agents').map(asAgent);
+export async function listAgents(): Promise<AgentRecord[]> {
+  const rows = await listAgentRecordsOrdered();
+  return rows.map(asAgent);
 }
 
 export function getAgent(id: string): AgentRecord | null {
@@ -1040,7 +1042,7 @@ export async function updateAgent(
   if (data.avatarBgColor !== undefined) patch.avatarBgColor = data.avatarBgColor;
   if (data.avatarLogoColor !== undefined) patch.avatarLogoColor = data.avatarLogoColor;
   if (data.apiKeyId !== undefined) {
-    const apiKey = store.getById('apiKeys', data.apiKeyId);
+    const apiKey = await getApiKeyRecord(data.apiKeyId);
     if (!apiKey || apiKey.isActive === false) {
       throw new Error('API key not found');
     }
@@ -1051,7 +1053,7 @@ export async function updateAgent(
     patch.capabilities = normalizePermissionList(apiKey.permissions);
   }
 
-  const updated = store.update('agents', id, patch);
+  const updated = await store.update('agents', id, patch);
   if (!updated) return null;
 
   if (data.model !== undefined) {
@@ -1066,7 +1068,7 @@ export async function updateAgent(
   if (data.name !== undefined) {
     const serviceUserId = updated.serviceUserId as string | null | undefined;
     if (serviceUserId) {
-      normalizeAgentServiceUser(serviceUserId, id, data.name);
+      await normalizeAgentServiceUser(serviceUserId, id, data.name);
     }
   }
 
@@ -1090,46 +1092,50 @@ export async function deleteAgent(id: string): Promise<boolean> {
     await deleteApiKey(agent.workspaceApiKeyId as string).catch(() => {});
   }
 
-  const serviceUserId = agent.serviceUserId as string | null | undefined;
-  if (serviceUserId) {
-    store.update('users', serviceUserId, { isActive: false, type: 'agent', agentId: id });
-    store.deleteWhere('refreshTokens', (r: Record<string, unknown>) => r.userId === serviceUserId);
-  }
-
-  // Close related conversations and preserve agent name in metadata
-  const agentConversations = store.find('conversations', (r: Record<string, unknown>) => {
-    if (r.channelType !== 'agent') return false;
-    try {
-      const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
-      return meta?.agentId === id;
-    } catch {
-      return false;
+  await store.transaction(async () => {
+    const serviceUserId = agent.serviceUserId as string | null | undefined;
+    if (serviceUserId) {
+      await store.update('users', serviceUserId, { isActive: false, type: 'agent', agentId: id });
+      await deleteRefreshTokensForUserId(serviceUserId);
     }
+
+    // Close related conversations and preserve agent name in metadata
+    const agentConversations = store
+      .getAll('conversations')
+      .filter((r: Record<string, unknown>) => {
+        if (r.channelType !== 'agent') return false;
+        try {
+          const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
+          return meta?.agentId === id;
+        } catch {
+          return false;
+        }
+      });
+
+    for (const conv of agentConversations) {
+      let meta: Record<string, unknown> = {};
+      try {
+        meta =
+          typeof conv.metadata === 'string'
+            ? JSON.parse(conv.metadata)
+            : ((conv.metadata as Record<string, unknown>) ?? {});
+      } catch {
+        /* ignore */
+      }
+
+      meta.agentDeleted = true;
+      meta.agentName = agent.name;
+
+      await store.update('conversations', conv.id as string, {
+        status: 'closed',
+        closedAt: new Date().toISOString(),
+        metadata: JSON.stringify(meta),
+      });
+    }
+
+    await deleteAgentEnvVarsByAgentId(id);
+    await store.delete('agents', id);
   });
-
-  for (const conv of agentConversations) {
-    let meta: Record<string, unknown> = {};
-    try {
-      meta =
-        typeof conv.metadata === 'string'
-          ? JSON.parse(conv.metadata)
-          : ((conv.metadata as Record<string, unknown>) ?? {});
-    } catch {
-      /* ignore */
-    }
-
-    meta.agentDeleted = true;
-    meta.agentName = agent.name;
-
-    store.update('conversations', conv.id as string, {
-      status: 'closed',
-      closedAt: new Date().toISOString(),
-      metadata: JSON.stringify(meta),
-    });
-  }
-
-  store.delete('agents', id);
-  deleteAgentEnvVarsByAgentId(id);
 
   // Remove workspace folder
   if (fs.existsSync(workspaceDir)) {
@@ -1153,12 +1159,12 @@ async function syncAgentWorkspaceAccess(
     : null;
 
   const serviceUser = directServiceUser
-    ? normalizeAgentServiceUser(directServiceUser.id as string, agentId, agentName)
+    ? await normalizeAgentServiceUser(directServiceUser.id as string, agentId, agentName)
     : await createAgentServiceUser(agentId, agentName);
   const serviceUserId = serviceUser.id as string;
 
   const sourceKeyId = rawAgent.apiKeyId as string;
-  const sourceKey = sourceKeyId ? store.getById('apiKeys', sourceKeyId) : null;
+  const sourceKey = sourceKeyId ? await getApiKeyRecord(sourceKeyId) : null;
   const sourceKeyIsActive = Boolean(sourceKey && sourceKey.isActive !== false);
   const sourcePermissions = sourceKeyIsActive
     ? normalizePermissionList(sourceKey?.permissions)
@@ -1178,7 +1184,7 @@ async function syncAgentWorkspaceAccess(
   }
 
   const currentKeyId = rawAgent.workspaceApiKeyId as string | null | undefined;
-  const currentKey = currentKeyId ? store.getById('apiKeys', currentKeyId) : null;
+  const currentKey = currentKeyId ? await getApiKeyRecord(currentKeyId) : null;
   const keyOwnerMatches = currentKey?.createdById === serviceUserId;
   const keyPermissionsMatch = currentKey
     ? arraysEqualAsSets(
@@ -1222,7 +1228,7 @@ async function syncAgentWorkspaceAccess(
     await deleteApiKey(currentKeyId).catch(() => {});
   }
 
-  const updated = store.update('agents', agentId, {
+  const updated = await store.update('agents', agentId, {
     serviceUserId,
     apiKeyName: sourceKeyIsActive ? (sourceKey?.name as string) : '',
     apiKeyPrefix: sourceKeyIsActive ? (sourceKey?.keyPrefix as string) : '',
@@ -1235,10 +1241,7 @@ async function syncAgentWorkspaceAccess(
 }
 
 export async function syncAgentsForApiKey(apiKeyId: string): Promise<void> {
-  const agents = store.find(
-    'agents',
-    (record: Record<string, unknown>) => record.apiKeyId === apiKeyId,
-  );
+  const agents = await listAgentRecordsByApiKeyId(apiKeyId);
   for (const agent of agents) {
     await syncAgentWorkspaceAccess(agent.id as string);
   }
@@ -1249,10 +1252,10 @@ export async function prepareAgentWorkspaceAccess(agentId: string): Promise<Agen
 }
 
 export async function ensureAgentServiceAccounts(): Promise<void> {
-  const agents = store.getAll('agents') as Record<string, unknown>[];
+  const ids = await listAllAgentRecordIds();
 
-  for (const rawAgent of agents) {
-    await syncAgentWorkspaceAccess(rawAgent.id as string);
+  for (const agentId of ids) {
+    await syncAgentWorkspaceAccess(agentId);
   }
 }
 

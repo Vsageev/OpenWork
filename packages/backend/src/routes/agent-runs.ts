@@ -35,7 +35,7 @@ export async function agentRunRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       const { status, agentId, conversationId, triggerType, limit, offset } = request.query;
-      const result = listAgentRuns({ status, agentId, conversationId, triggerType, limit, offset });
+      const result = await listAgentRuns({ status, agentId, conversationId, triggerType, limit, offset });
       return reply.send({ ...result, limit, offset });
     },
   );
@@ -50,7 +50,7 @@ export async function agentRunRoutes(app: FastifyInstance) {
       },
     },
     async (_request, reply) => {
-      const entries = getActiveRuns();
+      const entries = await getActiveRuns();
       return reply.send({ entries });
     },
   );
@@ -166,7 +166,7 @@ export async function agentRunRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const cancelled = cancelAgentBatchRun(request.params.runId);
+      const cancelled = await cancelAgentBatchRun(request.params.runId);
       if (!cancelled) {
         return reply.status(404).send({ error: 'Batch run not found' });
       }
@@ -187,7 +187,7 @@ export async function agentRunRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const result = killAgentRun(request.params.id);
+      const result = await killAgentRun(request.params.id);
       if (!result.ok) {
         const status = result.error === 'Run not found' ? 404 : 409;
         return reply.status(status).send({ error: result.error });

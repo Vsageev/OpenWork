@@ -1,4 +1,5 @@
 import { store } from '../db/index.js';
+import { getConnectorRecordById, listConnectorRecords } from '../db/repositories/connectors-repository.js';
 import { getAdapter, type AuditCtx } from './connector-adapters/index.js';
 
 function enrich(connector: Record<string, unknown>) {
@@ -13,11 +14,12 @@ function enrich(connector: Record<string, unknown>) {
 }
 
 export async function listConnectors() {
-  return store.getAll('connectors').map(enrich);
+  const rows = await listConnectorRecords();
+  return rows.map(enrich);
 }
 
 export async function getConnectorById(id: string) {
-  const connector = store.getById('connectors', id);
+  const connector = await getConnectorRecordById(id);
   if (!connector) return null;
   return enrich(connector);
 }
@@ -44,7 +46,7 @@ export async function createConnector(
 }
 
 export async function deleteConnector(id: string, audit?: AuditCtx) {
-  const connector = store.getById('connectors', id);
+  const connector = await getConnectorRecordById(id);
   if (!connector) return null;
 
   const adapter = getAdapter(connector.type as string);
@@ -54,7 +56,7 @@ export async function deleteConnector(id: string, audit?: AuditCtx) {
 }
 
 export async function refreshConnector(id: string, audit?: AuditCtx) {
-  const connector = store.getById('connectors', id);
+  const connector = await getConnectorRecordById(id);
   if (!connector) return null;
 
   const adapter = getAdapter(connector.type as string);
@@ -65,7 +67,7 @@ export async function refreshConnector(id: string, audit?: AuditCtx) {
     statusMessage: live.statusMessage,
   });
 
-  return enrich(store.getById('connectors', id)!);
+  return enrich((await getConnectorRecordById(id))!);
 }
 
 export async function updateConnectorSettings(
@@ -73,11 +75,11 @@ export async function updateConnectorSettings(
   settings: Record<string, unknown>,
   audit?: AuditCtx,
 ) {
-  const connector = store.getById('connectors', id);
+  const connector = await getConnectorRecordById(id);
   if (!connector) return null;
 
   const adapter = getAdapter(connector.type as string);
   await adapter.updateSettings(connector.integrationId as string, settings, audit);
 
-  return enrich(store.getById('connectors', id)!);
+  return enrich((await getConnectorRecordById(id))!);
 }

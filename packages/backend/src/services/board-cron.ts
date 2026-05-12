@@ -1,5 +1,10 @@
 import cron from 'node-cron';
 import { store } from '../db/index.js';
+import {
+  getBoardCronTemplateRecordById,
+  listBoardCronTemplatesForBoard,
+  listDistinctBoardIdsFromCronTemplates,
+} from '../db/repositories/board-cron-templates-repository.js';
 import { createCard, addCardTag } from './cards.js';
 import { addCardToBoard, getBoardById } from './boards.js';
 
@@ -59,25 +64,24 @@ export function withBoardCronTemplateNextRun(
   };
 }
 
-export function listBoardCronTemplatesWithNextRun(
+export async function listBoardCronTemplatesWithNextRun(
   boardId: string,
-): BoardCronTemplateWithNextRun[] {
-  return listBoardCronTemplates(boardId).map((template) =>
-    withBoardCronTemplateNextRun(template as BoardCronTemplate),
-  );
+): Promise<BoardCronTemplateWithNextRun[]> {
+  const templates = await listBoardCronTemplates(boardId);
+  return templates.map((template) => withBoardCronTemplateNextRun(template as BoardCronTemplate));
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────
 
-export function listBoardCronTemplates(boardId: string) {
-  return store.find('boardCronTemplates', (r: any) => r.boardId === boardId) as any[];
+export async function listBoardCronTemplates(boardId: string) {
+  return (await listBoardCronTemplatesForBoard(boardId)) as any[];
 }
 
-export function getBoardCronTemplate(id: string) {
-  return (store.getById('boardCronTemplates', id) as any) ?? null;
+export async function getBoardCronTemplate(id: string) {
+  return ((await getBoardCronTemplateRecordById(id)) as any) ?? null;
 }
 
-export function createBoardCronTemplate(
+export async function createBoardCronTemplate(
   data: {
     boardId: string;
     columnId: string;
@@ -102,11 +106,11 @@ export function createBoardCronTemplate(
     createdById,
   }) as any;
 
-  syncBoardCronJobs(data.boardId);
+  await syncBoardCronJobs(data.boardId);
   return template;
 }
 
-export function updateBoardCronTemplate(
+export async function updateBoardCronTemplate(
   id: string,
   data: {
     columnId?: string;
@@ -118,7 +122,7 @@ export function updateBoardCronTemplate(
     enabled?: boolean;
   },
 ) {
-  const existing = store.getById('boardCronTemplates', id) as any;
+  const existing = (await getBoardCronTemplateRecordById(id)) as any;
   if (!existing) return null;
 
   const setData: Record<string, unknown> = {};
@@ -132,12 +136,12 @@ export function updateBoardCronTemplate(
   const updated = store.update('boardCronTemplates', id, setData) as any;
   if (!updated) return null;
 
-  syncBoardCronJobs(existing.boardId);
+  await syncBoardCronJobs(existing.boardId);
   return updated;
 }
 
-export function deleteBoardCronTemplate(id: string): boolean {
-  const existing = store.getById('boardCronTemplates', id) as any;
+export async function deleteBoardCronTemplate(id: string): Promise<boolean> {
+  const existing = (await getBoardCronTemplateRecordById(id)) as any;
   if (!existing) return false;
 
   const deleted = store.delete('boardCronTemplates', id);
@@ -183,8 +187,8 @@ async function executeBoardCronTemplate(template: any): Promise<void> {
   }
 }
 
-export function syncBoardCronJobs(boardId: string): void {
-  const templates = listBoardCronTemplates(boardId);
+export async function syncBoardCronJobs(boardId: string): Promise<void> {
+  const templates = await listBoardCronTemplates(boardId);
 
   // Build expected active templates
   const expected = new Map<string, { template: any; signature: string }>();
@@ -196,7 +200,7 @@ export function syncBoardCronJobs(boardId: string): void {
 
   // Stop tasks for this board that are no longer needed
   for (const [key, running] of runningTasks.entries()) {
-    const tmpl = store.getById('boardCronTemplates', key) as any;
+    const tmpl = (await getBoardCronTemplateRecordById(key)) as any;
     if (!tmpl || tmpl.boardId !== boardId) continue;
     if (!expected.has(key)) {
       running.task.stop();
@@ -215,17 +219,19 @@ export function syncBoardCronJobs(boardId: string): void {
     }
 
     const task = cron.schedule(exp.template.cron, () => {
-      const current = store.getById('boardCronTemplates', key) as any;
-      if (current && current.enabled) {
-        void executeBoardCronTemplate(current);
-      }
+      void (async () => {
+        const current = (await getBoardCronTemplateRecordById(key)) as any;
+        if (current && current.enabled) {
+          await executeBoardCronTemplate(current);
+        }
+      })();
     });
     runningTasks.set(key, { task, signature: exp.signature });
   }
 }
 
-export function stopAllBoardCronJobs(boardId: string): void {
-  const templates = listBoardCronTemplates(boardId);
+export async function stopAllBoardCronJobs(boardId: string): Promise<void> {
+  const templates = await listBoardCronTemplates(boardId);
   for (const t of templates) {
     const running = runningTasks.get(t.id);
     if (running) {
@@ -235,10 +241,9 @@ export function stopAllBoardCronJobs(boardId: string): void {
   }
 }
 
-export function initAllBoardCronJobs(): void {
-  const allTemplates = store.getAll('boardCronTemplates') as any[];
-  const boardIds = new Set(allTemplates.map((t: any) => t.boardId));
+export async function initAllBoardCronJobs(): Promise<void> {
+  const boardIds = await listDistinctBoardIdsFromCronTemplates();
   for (const boardId of boardIds) {
-    syncBoardCronJobs(boardId);
+    await syncBoardCronJobs(boardId);
   }
 }

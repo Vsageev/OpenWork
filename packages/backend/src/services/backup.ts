@@ -1,8 +1,89 @@
-import { mkdir, readdir, stat, unlink, copyFile, rmdir, readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdir, readdir, stat, unlink, rmdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { env } from '../config/env.js';
 import { store } from '../db/index.js';
+import { STORE_MAPPED_COLLECTION_NAMES } from '../db/sql-store-adapter.js';
 import { collectionSchemas } from '../schemas/collections.js';
+
+const execFileAsync = promisify(execFile);
+
+/** Written into each backup directory; excluded from JSON bundle download/validation. */
+const BACKUP_MANIFEST = 'openwork-backup-manifest.json';
+
+function isCollectionBackupJson(filename: string): boolean {
+  return filename.endsWith('.json') && filename !== BACKUP_MANIFEST;
+}
+
+async function runPgDump(databaseUrl: string, outputPath: string): Promise<void> {
+  await execFileAsync('pg_dump', [databaseUrl, '-Fc', '--no-owner', '-f', outputPath], {
+    env: process.env,
+  });
+}
+
+async function runPgRestore(databaseUrl: string, dumpPath: string): Promise<void> {
+  await execFileAsync(
+    'pg_restore',
+    ['--clean', '--if-exists', '--no-owner', '-d', databaseUrl, dumpPath],
+    { env: process.env },
+  );
+}
+
+/**
+ * Writes `postgres.dump` (best-effort), per-collection JSON mirrors, and a small manifest.
+ */
+async function writePostgresFullBackup(
+  targetDir: string,
+  options: { requirePostgresDump: boolean },
+): Promise<{ sizeBytes: number; dumpWritten: boolean }> {
+  const dumpPath = join(targetDir, 'postgres.dump');
+  let dumpWritten = false;
+  try {
+    await runPgDump(env.DATABASE_URL, dumpPath);
+    dumpWritten = true;
+  } catch (err) {
+    if (options.requirePostgresDump) {
+      throw new Error(
+        `Backup aborted: pg_dump did not produce postgres.dump (${err instanceof Error ? err.message : String(err)}). Install PostgreSQL client tools so pg_dump is on PATH, and ensure DATABASE_URL reaches a live Postgres server. See docs/DEVELOPMENT.md.`,
+      );
+    }
+    console.warn(
+      '[backup] pg_dump failed (ensure Postgres client tools are installed and DATABASE_URL is reachable):',
+      err,
+    );
+  }
+
+  let totalSize = 0;
+  for (const col of STORE_MAPPED_COLLECTION_NAMES) {
+    const data = store.getAll(col);
+    if (data.length === 0) continue;
+    const fp = join(targetDir, `${col}.json`);
+    const content = JSON.stringify(data, null, 2);
+    await writeFile(fp, content, 'utf-8');
+    totalSize += (await stat(fp)).size;
+  }
+
+  if (dumpWritten) {
+    totalSize += (await stat(dumpPath)).size;
+  }
+
+  const formats: string[] = ['json_collections_mirror'];
+  if (dumpWritten) formats.push('pg_dump_custom');
+
+  const manifest = {
+    version: 1,
+    storeDriver: 'postgres' as const,
+    formats,
+    postgresDumpFile: dumpWritten ? 'postgres.dump' : null,
+    createdAt: new Date().toISOString(),
+  };
+  const manifestPath = join(targetDir, BACKUP_MANIFEST);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  totalSize += (await stat(manifestPath)).size;
+
+  return { sizeBytes: totalSize, dumpWritten };
+}
 
 export interface BackupResult {
   filename: string;
@@ -17,8 +98,6 @@ export interface BackupInfo {
   createdAt: Date;
 }
 
-const DATA_DIR = resolve(env.DATA_DIR);
-
 function getBackupDir(): string {
   return resolve(env.BACKUP_DIR);
 }
@@ -32,7 +111,10 @@ function buildSubdirName(): string {
 function parseTimestampFromDirname(dirname: string): Date | null {
   const match = dirname.match(/^ws-backup-(.+)$/);
   if (!match) return null;
-  const isoStr = match[1].replace(/(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z/, '$1:$2:$3.$4Z');
+  const isoStr = match[1].replace(
+    /(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z/,
+    '$1:$2:$3.$4Z',
+  );
   const date = new Date(isoStr);
   return isNaN(date.getTime()) ? null : date;
 }
@@ -53,9 +135,10 @@ export class BackupValidationError extends Error {
   }
 }
 
-export function validateCollections(
-  collections: Record<string, unknown[]>,
-): { valid: boolean; errors: CollectionValidationError[] } {
+export function validateCollections(collections: Record<string, unknown[]>): {
+  valid: boolean;
+  errors: CollectionValidationError[];
+} {
   const errors: CollectionValidationError[] = [];
 
   for (const [col, records] of Object.entries(collections)) {
@@ -108,26 +191,11 @@ export async function createBackup(): Promise<BackupResult> {
   const subdirPath = join(dir, subdirName);
   await mkdir(subdirPath, { recursive: true });
 
-  // Flush pending writes before copying
   await store.flush();
 
-  // Copy all JSON files from data directory
-  let totalSize = 0;
-  try {
-    const dataFiles = await readdir(DATA_DIR);
-    const jsonFiles = dataFiles.filter((f) => f.endsWith('.json'));
-
-    for (const file of jsonFiles) {
-      const src = join(DATA_DIR, file);
-      const dest = join(subdirPath, file);
-      await copyFile(src, dest);
-      const fileInfo = await stat(dest);
-      totalSize += fileInfo.size;
-    }
-  } catch (err) {
-    // If data dir doesn't exist or is empty, create an empty backup
-    console.warn('Warning: could not read data directory:', err);
-  }
+  const { sizeBytes: totalSize } = await writePostgresFullBackup(subdirPath, {
+    requirePostgresDump: true,
+  });
 
   return {
     filename: subdirName,
@@ -142,9 +210,7 @@ export async function listBackups(): Promise<BackupInfo[]> {
   await ensureBackupDir();
 
   const entries = await readdir(dir, { withFileTypes: true });
-  const backupDirs = entries.filter(
-    (e) => e.isDirectory() && e.name.startsWith('ws-backup-'),
-  );
+  const backupDirs = entries.filter((e) => e.isDirectory() && e.name.startsWith('ws-backup-'));
 
   const results: BackupInfo[] = [];
   for (const entry of backupDirs) {
@@ -182,70 +248,51 @@ export async function getBackupBundle(name: string): Promise<Record<string, unkn
   if (!backupPath) throw new Error(`Backup not found: ${name}`);
 
   const files = await readdir(backupPath);
-  const jsonFiles = files.filter((f) => f.endsWith('.json'));
+  const jsonFiles = files.filter(isCollectionBackupJson);
 
   const collections: Record<string, unknown[]> = {};
   for (const file of jsonFiles) {
     const col = file.replace('.json', '');
     const raw = await readFile(join(backupPath, file), 'utf-8');
-    collections[col] = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) continue;
+    collections[col] = parsed;
   }
 
   return collections;
 }
 
 /**
- * Restores data from a backup: validates records, creates a pre-restore
- * snapshot, copies JSON files back into DATA_DIR, and reloads the store.
+ * Restores data from a backup created by this server (includes `postgres.dump`).
+ *
+ * Snapshots the live database, runs `pg_restore --clean`, then reloads the store. JSON-only backup
+ * directories are retained as archive data and are not applied by restore.
  */
 export async function restoreBackup(name: string): Promise<{ preRestoreBackup: string }> {
   const backupPath = await getBackupPath(name);
   if (!backupPath) throw new Error(`Backup not found: ${name}`);
 
-  const files = await readdir(backupPath);
-  const jsonFiles = files.filter((f) => f.endsWith('.json'));
-
-  if (jsonFiles.length === 0) {
-    throw new Error('Backup is empty — no JSON files found');
+  const dumpPath = join(backupPath, 'postgres.dump');
+  let hasDump: boolean;
+  try {
+    hasDump = (await stat(dumpPath)).isFile();
+  } catch {
+    hasDump = false;
   }
 
-  // Read and validate all collections before touching DATA_DIR
-  const collections: Record<string, unknown[]> = {};
-  for (const file of jsonFiles) {
-    const col = file.replace('.json', '');
-    const raw = await readFile(join(backupPath, file), 'utf-8');
-    collections[col] = JSON.parse(raw);
+  if (!hasDump) {
+    throw new Error(
+      'This backup does not include postgres.dump. POST /api/backups/:name/restore replays a pg_dump custom-format file created when the server could run pg_dump. JSON-only trees from POST /api/backups/import are archived data and are not restore inputs. See docs/DEVELOPMENT.md.',
+    );
   }
 
-  const { valid, errors } = validateCollections(collections);
-  if (!valid) {
-    throw new BackupValidationError(errors);
-  }
-
-  // Create a pre-restore safety snapshot
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const preRestoreName = `ws-backup-pre-restore-${ts}`;
   const preRestorePath = join(getBackupDir(), preRestoreName);
   await mkdir(preRestorePath, { recursive: true });
+  await writePostgresFullBackup(preRestorePath, { requirePostgresDump: true });
 
-  try {
-    const dataFiles = await readdir(DATA_DIR);
-    for (const file of dataFiles.filter((f) => f.endsWith('.json'))) {
-      await copyFile(join(DATA_DIR, file), join(preRestorePath, file));
-    }
-  } catch {
-    // DATA_DIR may not exist yet — that's fine
-  }
-
-  // Copy all JSON files from backup into data directory
-  await mkdir(DATA_DIR, { recursive: true });
-  for (const file of jsonFiles) {
-    const src = join(backupPath, file);
-    const dest = join(DATA_DIR, file);
-    await copyFile(src, dest);
-  }
-
-  // Reload in-memory store
+  await runPgRestore(env.DATABASE_URL, dumpPath);
   await store.reload();
 
   return { preRestoreBackup: preRestoreName };
@@ -256,7 +303,10 @@ export async function restoreBackup(name: string): Promise<{ preRestoreBackup: s
  * Creates a new backup subdirectory, writes each collection as a JSON file,
  * and returns the backup info.
  */
-export async function importBackup(collections: Record<string, unknown[]>, filename?: string): Promise<BackupResult> {
+export async function importBackup(
+  collections: Record<string, unknown[]>,
+  filename?: string,
+): Promise<BackupResult> {
   // Validate before writing anything to disk
   const { valid, errors } = validateCollections(collections);
   if (!valid) {
@@ -323,7 +373,6 @@ export async function deleteBackup(name: string): Promise<void> {
 }
 
 export async function pruneOldBackups(): Promise<string[]> {
-  const dir = getBackupDir();
   const backups = await listBackups();
   const cutoff = Date.now() - env.BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   const removed: string[] = [];

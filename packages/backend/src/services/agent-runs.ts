@@ -1,6 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { store } from '../db/index.js';
+import {
+  findAgentRunIdsForRetentionCleanup,
+  findAgentRunsByListFilterPaged,
+  findAgentRunsWithLegacyTriggerTypes,
+  findRunningAgentRunsAsync,
+} from '../db/repositories/agent-execution-repository.js';
 import { env } from '../config/env.js';
 import { extractFinalResponseText } from '../lib/agent-output.js';
 
@@ -57,19 +63,15 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
   });
 }
 
-export function completeAgentRun(
-  runId: string,
-  errorMessage: string | null = null,
+function buildAgentRunCompletionPatch(
+  run: Record<string, unknown>,
+  errorMessage: string | null,
   logs?: { stdout?: string; stderr?: string },
-) {
-  const run = store.getById('agent_runs', runId);
-  if (!run) return null;
-
+): Record<string, unknown> {
   const startedAt = new Date(run.startedAt as string).getTime();
   const now = Date.now();
   const durationMs = now - startedAt;
 
-  // If logs not passed explicitly, try reading from files
   let stdout = logs?.stdout ?? null;
   let stderr = logs?.stderr ?? null;
 
@@ -93,14 +95,28 @@ export function completeAgentRun(
     typeof run.responseText === 'string' ? run.responseText : null;
   const responseText = finalStdout ? extractFinalResponseText(finalStdout) : '';
 
-  return store.update('agent_runs', runId, {
-    status: errorMessage ? 'error' : 'completed',
+  return {
+    status: (errorMessage ? 'error' : 'completed') as RunStatus,
     errorMessage,
     finishedAt: new Date().toISOString(),
     durationMs,
     stdout: finalStdout,
     stderr: stderr ?? (run.stderr as string | null) ?? null,
     responseText: responseText || previousResponseText,
+  };
+}
+
+export async function completeAgentRun(
+  runId: string,
+  errorMessage: string | null = null,
+  logs?: { stdout?: string; stderr?: string },
+): Promise<Record<string, unknown> | null> {
+  return store.transaction(async () => {
+    await store.lockAgentRunRowForUpdate(runId);
+    const run = store.getById('agent_runs', runId);
+    if (!run || run.status !== 'running') return null;
+    const patch = buildAgentRunCompletionPatch(run, errorMessage, logs);
+    return store.update('agent_runs', runId, patch);
   });
 }
 
@@ -148,23 +164,26 @@ export function getAgentRun(runId: string) {
   };
 }
 
-export function killAgentRun(runId: string): { ok: boolean; error?: string } {
-  const run = store.getById('agent_runs', runId);
-  if (!run) return { ok: false, error: 'Run not found' };
-  if (run.status !== 'running') return { ok: false, error: 'Run is not active' };
+export async function killAgentRun(runId: string): Promise<{ ok: boolean; error?: string }> {
+  return store.transaction(async () => {
+    await store.lockAgentRunRowForUpdate(runId);
+    const run = store.getById('agent_runs', runId);
+    if (!run) return { ok: false, error: 'Run not found' };
+    if (run.status !== 'running') return { ok: false, error: 'Run is not active' };
 
-  const pid = run.pid as number | null;
-  if (pid) {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      // Process may have already exited
+    const pid = run.pid as number | null;
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // Process may have already exited
+      }
     }
-  }
 
-  completeAgentRun(runId, 'Killed by user');
-  store.update('agent_runs', runId, { killedByUser: true });
-  return { ok: true };
+    const patch = buildAgentRunCompletionPatch(run, 'Killed by user', undefined);
+    store.update('agent_runs', runId, { ...patch, killedByUser: true });
+    return { ok: true };
+  });
 }
 
 interface ListAgentRunsParams {
@@ -200,29 +219,27 @@ function toAgentRunSummary(run: Record<string, unknown>) {
   };
 }
 
-export function listAgentRuns(params: ListAgentRunsParams = {}) {
+export async function listAgentRuns(params: ListAgentRunsParams = {}) {
   const { status, agentId, triggerType, conversationId, limit = 50, offset = 0 } = params;
 
-  const all = store.find('agent_runs', (r: Record<string, unknown>) => {
-    if (status && r.status !== status) return false;
-    if (agentId && r.agentId !== agentId) return false;
-    if (triggerType && r.triggerType !== triggerType) return false;
-    if (conversationId && r.conversationId !== conversationId) return false;
-    return true;
-  });
-
-  const sorted = all.sort(
-    (a: Record<string, unknown>, b: Record<string, unknown>) =>
-      new Date(b.startedAt as string).getTime() - new Date(a.startedAt as string).getTime(),
+  const { rows: all, total } = await findAgentRunsByListFilterPaged(
+    {
+      status,
+      agentId,
+      triggerType,
+      conversationId,
+    },
+    limit,
+    offset,
   );
 
-  const entries = sorted.slice(offset, offset + limit).map(toAgentRunSummary);
-  return { entries, total: all.length };
+  const entries = all.map(toAgentRunSummary);
+  return { entries, total };
 }
 
-export function getActiveRuns() {
-  return store
-    .find('agent_runs', (r: Record<string, unknown>) => r.status === 'running')
+export async function getActiveRuns() {
+  const running = await findRunningAgentRunsAsync();
+  return running
     .map(toAgentRunSummary)
     .sort(
       (a: Record<string, unknown>, b: Record<string, unknown>) =>
@@ -244,10 +261,10 @@ function isPidAlive(pid: number): boolean {
  * - If PID is alive → call reattach callback so agent-chat can re-monitor
  * - If PID is dead → read output from log files and mark completed/error
  */
-export function reconcileRunsOnStartup(
+export async function reconcileRunsOnStartup(
   reattach: (run: Record<string, unknown>) => void,
 ) {
-  const stale = store.find('agent_runs', (r: Record<string, unknown>) => r.status === 'running');
+  const stale = await findRunningAgentRunsAsync();
   if (stale.length === 0) return [];
 
   console.log(`[agent-runs] Reconciling ${stale.length} running record(s) after restart`);
@@ -316,16 +333,10 @@ export function reconcileRunsOnStartup(
 export function cleanupOldRunRecords(olderThanDays: number): number {
   const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
 
-  const toDelete = store.find('agent_runs', (r: Record<string, unknown>) => {
-    if (r.status === 'running') return false;
-    const finished = r.finishedAt ?? r.startedAt;
-    return new Date(finished as string).getTime() < cutoff;
-  });
+  const ids = findAgentRunIdsForRetentionCleanup(cutoff);
 
   let deleted = 0;
-  for (const run of toDelete) {
-    const runId = run.id as string;
-
+  for (const runId of ids) {
     // Remove log directory if it exists
     const logDir = path.join(RUNS_DIR, runId);
     if (fs.existsSync(logDir)) {
@@ -358,17 +369,15 @@ export function migrateLegacyAgentRunTriggerTypes() {
     card: 0,
   };
 
-  const runs = store.find('agent_runs', (r: Record<string, unknown>) => {
-    return r.triggerType === 'cron' || r.triggerType === 'card';
-  });
+  const runs = findAgentRunsWithLegacyTriggerTypes();
 
   for (const run of runs) {
     const triggerType = run.triggerType;
     if (triggerType !== 'cron' && triggerType !== 'card') continue;
 
-    legacyCounts[triggerType] += 1;
+    legacyCounts[triggerType as LegacyTriggerType] += 1;
     store.update('agent_runs', run.id as string, {
-      triggerType: legacyToCanonical[triggerType],
+      triggerType: legacyToCanonical[triggerType as LegacyTriggerType],
     });
   }
 

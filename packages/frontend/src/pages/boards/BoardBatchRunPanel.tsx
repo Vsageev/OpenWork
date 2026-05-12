@@ -185,7 +185,7 @@ export function BoardBatchRunPanel({ boardId, columns, availableCards, onClose }
   }
 
   async function handleSubmit() {
-    if (!agentId || !prompt.trim() || submitting) return;
+    if (!agentId || submitting) return;
 
     if (scopeMode === 'manual') {
       if (manualCardCount === 0) {
@@ -229,8 +229,8 @@ export function BoardBatchRunPanel({ boardId, columns, availableCards, onClose }
       } else {
         toast.success(`Batch run started — ${res.total} card${res.total !== 1 ? 's' : ''} queued`);
       }
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Failed to start batch run');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to start batch run');
     } finally {
       setSubmitting(false);
     }
@@ -239,19 +239,13 @@ export function BoardBatchRunPanel({ boardId, columns, availableCards, onClose }
   const allSelected = selectedColumnIds.size === columns.length;
   const selectedAgent = agents.find((a) => a.id === agentId);
 
-  const canRun = !submitting
-    && !!agentId
-    && !!prompt.trim()
-    && (scopeMode === 'manual' ? manualCardCount > 0 : selectedColumnIds.size > 0);
   const disabledReason = submitting
     ? 'Batch run is starting…'
     : !agentId
       ? 'Select an agent first'
-      : !prompt.trim()
-        ? 'Enter a prompt'
-        : scopeMode === 'manual' && manualCardCount === 0
-          ? 'Add at least one card'
-          : scopeMode === 'filters' && selectedColumnIds.size === 0
+      : scopeMode === 'manual' && manualCardCount === 0
+        ? 'Add at least one card'
+        : scopeMode === 'filters' && selectedColumnIds.size === 0
           ? 'Select at least one column'
           : undefined;
 
@@ -354,12 +348,12 @@ export function BoardBatchRunPanel({ boardId, columns, availableCards, onClose }
           {/* Prompt */}
           <div className={styles.section}>
             <div className={styles.sectionHeader}>
-              <span className={styles.sectionLabel}>Prompt</span>
+              <span className={styles.sectionLabel}>Prompt (optional)</span>
               <span className={styles.charCount}>{prompt.length.toLocaleString()} / 10,000</span>
             </div>
             <textarea
               className={styles.promptTextarea}
-              placeholder="Describe what the agent should do with each card…"
+              placeholder="Add extra instructions, or leave empty to use the card details."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               maxLength={10000}

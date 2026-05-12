@@ -1,4 +1,7 @@
-import { store } from '../db/index.js';
+import {
+  insertAuditLogRecord,
+  listAuditLogRecords,
+} from '../db/repositories/audit-logs-repository.js';
 
 type AuditAction = string;
 
@@ -24,7 +27,7 @@ export interface AuditLogQuery {
 }
 
 export async function createAuditLog(params: LogEntryParams) {
-  const entry = store.insert('auditLogs', {
+  const entry = await insertAuditLogRecord({
     userId: params.userId,
     action: params.action,
     entityType: params.entityType,
@@ -54,7 +57,7 @@ export async function queryAuditLogs(query: AuditLogQuery) {
     return true;
   };
 
-  const allMatching = store.find('auditLogs', predicate);
+  const allMatching = listAuditLogRecords().filter(predicate);
   const total = allMatching.length;
 
   const limit = query.limit ?? 50;

@@ -1,3 +1,8 @@
+import {
+  deleteAllMessageDraftsForConversationNative,
+  findMessageDraftByConversationIdNative,
+  listMessageDraftsNative,
+} from '../db/repositories/message-drafts-repository.js';
 import { store } from '../db/index.js';
 import { isAgentConversationRecord } from './conversation-scope.js';
 
@@ -17,34 +22,7 @@ export interface UpsertDraftData {
 export async function listDrafts(query: DraftListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
-  const conversationScopeCache = new Map<string, boolean>();
-
-  const isInboxConversation = (conversationId: string): boolean => {
-    const cached = conversationScopeCache.get(conversationId);
-    if (cached !== undefined) return cached;
-    const conversation = store.getById('conversations', conversationId);
-    const isInbox = Boolean(conversation && !isAgentConversationRecord(conversation));
-    conversationScopeCache.set(conversationId, isInbox);
-    return isInbox;
-  };
-
-  const predicate = (r: Record<string, unknown>) => {
-    const conversationId = r.conversationId as string | undefined;
-    if (!conversationId || !isInboxConversation(conversationId)) return false;
-    if (query.conversationId && conversationId !== query.conversationId) return false;
-    return true;
-  };
-
-  const allMatching = store.find('messageDrafts', predicate);
-  const total = allMatching.length;
-
-  const sorted = allMatching.sort(
-    (a, b) =>
-      new Date(b.updatedAt as string).getTime() - new Date(a.updatedAt as string).getTime(),
-  );
-
-  const entries = sorted.slice(offset, offset + limit);
-  return { entries, total };
+  return listMessageDraftsNative({ ...query, limit, offset });
 }
 
 export async function getDraftById(id: string) {
@@ -59,10 +37,7 @@ export async function upsertDraft(data: UpsertDraftData) {
   const conversation = store.getById('conversations', data.conversationId);
   if (!conversation || isAgentConversationRecord(conversation)) return null;
 
-  const existing = store.findOne(
-    'messageDrafts',
-    (r) => r.conversationId === data.conversationId,
-  );
+  const existing = await findMessageDraftByConversationIdNative(data.conversationId);
 
   if (existing) {
     const updated = store.update('messageDrafts', existing.id as string, {
@@ -93,9 +68,9 @@ export async function deleteDraftByConversationId(conversationId: string) {
   const conversation = store.getById('conversations', conversationId);
   if (!conversation || isAgentConversationRecord(conversation)) return false;
 
-  const deleted = store.deleteWhere(
-    'messageDrafts',
-    (r: any) => r.conversationId === conversationId,
-  );
-  return deleted.length > 0;
+  const existing = await findMessageDraftByConversationIdNative(conversationId);
+  if (!existing) return false;
+
+  await deleteAllMessageDraftsForConversationNative(conversationId);
+  return true;
 }

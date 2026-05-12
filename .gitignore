@@ -11,6 +11,7 @@ logs/
 backups/
 certs/
 **/data/
+packages/backend/migration-artifacts/
 .claude-api-key
 .claude/tmp-*
 .playwright-browsers/

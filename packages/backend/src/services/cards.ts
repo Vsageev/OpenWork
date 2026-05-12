@@ -1,3 +1,19 @@
+import {
+  deleteCardCommentsByCardId,
+  deleteCardLinksForCard,
+  deleteCardTagPair,
+  deleteBoardCardsByCardId,
+  deleteCardTagsByCardId,
+  findBidirectionalCardLink,
+  findCardTag,
+  listBoardCardsByCardId,
+  listCardCommentsByCardId,
+  listCardLinksBySourceCard,
+  listCardLinksByTargetCard,
+  listCardTagsByCardId,
+  countCardsByCollectionIdNative,
+  listCardsNative,
+} from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
 import { createAuditLog } from './audit-log.js';
 import { getAgent } from './agents.js';
@@ -37,45 +53,10 @@ interface UpdateCardOptions {
 export async function listCards(query: CardListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
-
-  let all = store.getAll('cards') as any[];
-
-  if (query.collectionId) {
-    all = all.filter((c: any) => c.collectionId === query.collectionId);
-  }
-
-  if (query.assigneeId) {
-    all = all.filter((c: any) => c.assigneeId === query.assigneeId);
-  }
-
-  if (query.search) {
-    const term = query.search.toLowerCase();
-    all = all.filter(
-      (c: any) =>
-        c.name?.toLowerCase().includes(term) ||
-        c.description?.toLowerCase().includes(term),
-    );
-  }
-
-  if (query.tagId) {
-    const taggedCardIds = new Set(
-      (store.find('cardTags', (r: any) => r.tagId === query.tagId) as any[]).map((ct: any) => ct.cardId),
-    );
-    all = all.filter((c: any) => taggedCardIds.has(c.id));
-  }
-
-  const total = all.length;
-
-  if (limit === 0) {
-    return { entries: [], total };
-  }
-
-  all.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-
-  const entries = all.slice(offset, offset + limit);
+  const { entries, total } = await listCardsNative({ ...query, limit, offset });
 
   // Hydrate assignee and tags for list entries
-  const hydrated = entries.map((card: any) => {
+  const hydrated = (entries as any[]).map((card: any) => {
     let assignee = null;
     if (card.assigneeId) {
       const user = store.getById('users', card.assigneeId) as any;
@@ -92,14 +73,14 @@ export async function listCards(query: CardListQuery) {
       }
     }
 
-    const cardTags = store.find('cardTags', (r: any) => r.cardId === card.id) as any[];
+    const cardTags = listCardTagsByCardId(card.id) as any[];
     const tags = cardTags
       .map((ct: any) => store.getById('tags', ct.tagId))
       .filter(Boolean)
       .map((t: any) => ({ id: t.id, name: t.name, color: t.color }));
 
     // Load board placements
-    const boardCards = store.find('boardCards', (r: any) => r.cardId === card.id) as any[];
+    const boardCards = listBoardCardsByCardId(card.id) as any[];
     const boards: any[] = [];
     for (const bc of boardCards) {
       const board = store.getById('boards', bc.boardId) as any;
@@ -125,7 +106,7 @@ export async function getCardById(id: string) {
   if (!card) return null;
 
   // Load tags
-  const cardTags = store.find('cardTags', (r: any) => r.cardId === id) as any[];
+  const cardTags = listCardTagsByCardId(id) as any[];
   const tagIds = cardTags.map((ct: any) => ct.tagId);
   const tags = tagIds
     .map((tid: string) => store.getById('tags', tid))
@@ -149,8 +130,8 @@ export async function getCardById(id: string) {
   }
 
   // Load linked cards
-  const outgoing = store.find('cardLinks', (r: any) => r.sourceCardId === id) as any[];
-  const incoming = store.find('cardLinks', (r: any) => r.targetCardId === id) as any[];
+  const outgoing = listCardLinksBySourceCard(id) as any[];
+  const incoming = listCardLinksByTargetCard(id) as any[];
 
   const linkedCards: any[] = [];
   for (const link of outgoing) {
@@ -170,7 +151,7 @@ export async function getCardById(id: string) {
   }
 
   // Load board placements
-  const boardCards = store.find('boardCards', (r: any) => r.cardId === id) as any[];
+  const boardCards = listBoardCardsByCardId(id) as any[];
   const boards: any[] = [];
   for (const bc of boardCards) {
     const board = store.getById('boards', bc.boardId) as any;
@@ -193,13 +174,12 @@ export async function createCard(
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
   // Auto-calculate position if not provided
-  let position = data.position;
+    let position = data.position;
   if (position === undefined) {
-    const existing = store.find('cards', (r: any) => r.collectionId === data.collectionId) as any[];
-    position = existing.length;
+    position = await countCardsByCollectionIdNative(data.collectionId);
   }
 
-  const card = store.insert('cards', {
+  const card = await store.insert('cards', {
     collectionId: data.collectionId,
     name: data.name,
     description: data.description ?? null,
@@ -259,7 +239,7 @@ export async function updateCard(
   }
   setData.updatedAt = new Date().toISOString();
 
-  const updated = store.update('cards', id, setData);
+  const updated = await store.update('cards', id, setData);
   if (!updated) return null;
 
   if (audit) {
@@ -298,16 +278,17 @@ export async function deleteCard(
   id: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  // Remove card comments
-  store.deleteWhere('cardComments', (r: any) => r.cardId === id);
-  // Remove card tags
-  store.deleteWhere('cardTags', (r: any) => r.cardId === id);
-  // Remove board cards
-  store.deleteWhere('boardCards', (r: any) => r.cardId === id);
-  // Remove card links
-  store.deleteWhere('cardLinks', (r: any) => r.sourceCardId === id || r.targetCardId === id);
-
-  const deleted = store.delete('cards', id);
+  const deleted = await store.transaction(async () => {
+    // Remove card comments
+    deleteCardCommentsByCardId(id);
+    // Remove card tags
+    deleteCardTagsByCardId(id);
+    // Remove board cards
+    deleteBoardCardsByCardId(id);
+    // Remove card links
+    deleteCardLinksForCard(id);
+    return store.delete('cards', id);
+  });
 
   if (deleted && audit) {
     await createAuditLog({
@@ -324,28 +305,27 @@ export async function deleteCard(
 }
 
 export async function addCardTag(cardId: string, tagId: string) {
-  const existing = store.findOne('cardTags', (r: any) => r.cardId === cardId && r.tagId === tagId);
+  const existing = findCardTag(cardId, tagId);
   if (existing) return existing;
   return store.insert('cardTags', { cardId, tagId });
 }
 
 export async function removeCardTag(cardId: string, tagId: string) {
-  store.deleteWhere('cardTags', (r: any) => r.cardId === cardId && r.tagId === tagId);
+  await store.transaction(async () => {
+    deleteCardTagPair(cardId, tagId);
+  });
   return true;
 }
 
 export async function addCardLink(sourceCardId: string, targetCardId: string) {
   // Check no duplicate link exists (in either direction)
-  const existing = store.findOne('cardLinks', (r: any) =>
-    (r.sourceCardId === sourceCardId && r.targetCardId === targetCardId) ||
-    (r.sourceCardId === targetCardId && r.targetCardId === sourceCardId),
-  );
+  const existing = findBidirectionalCardLink(sourceCardId, targetCardId);
   if (existing) return existing;
   return store.insert('cardLinks', { sourceCardId, targetCardId });
 }
 
 export async function removeCardLink(linkId: string) {
-  return store.delete('cardLinks', linkId) ?? null;
+  return (await store.delete('cardLinks', linkId)) ?? null;
 }
 
 // Card comments
@@ -355,7 +335,7 @@ export async function listCardComments(
   limit = 50,
   offset = 0,
 ) {
-  let all = store.find('cardComments', (r: any) => r.cardId === cardId) as any[];
+  let all = listCardCommentsByCardId(cardId) as any[];
   all.sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt));
   const total = all.length;
   const entries = all.slice(offset, offset + limit).map((comment: any) => {
@@ -406,7 +386,7 @@ export async function createCardComment(
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
   attachments?: Array<{ type: string; fileName: string; mimeType: string; fileSize: number; storagePath: string }>,
 ) {
-  const comment = store.insert('cardComments', {
+  const comment = await store.insert('cardComments', {
     cardId,
     authorId: audit?.userId,
     content,
@@ -433,7 +413,7 @@ export async function updateCardComment(
   content: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const updated = store.update('cardComments', commentId, { content, updatedAt: new Date().toISOString() });
+  const updated = await store.update('cardComments', commentId, { content, updatedAt: new Date().toISOString() });
   if (!updated) return null;
 
   if (audit) {
@@ -455,7 +435,7 @@ export async function deleteCardComment(
   commentId: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const deleted = store.delete('cardComments', commentId);
+  const deleted = await store.delete('cardComments', commentId);
 
   if (deleted && audit) {
     await createAuditLog({

@@ -1,5 +1,10 @@
-import path from 'node:path';
-import { env } from '../config/env.js';
-import { JsonStore } from './json-store.js';
+import { databaseConfig } from '../config/database.js';
+import type { DatabaseConfig } from '../config/database.js';
+import { SqlStoreAdapter } from './sql-store-adapter.js';
 
-export const store = new JsonStore(path.resolve(env.DATA_DIR));
+export function createStore(config: DatabaseConfig = databaseConfig): SqlStoreAdapter {
+  console.info('[db] Store: PostgreSQL (sql-store-adapter)');
+  return new SqlStoreAdapter(config);
+}
+
+export const store = createStore();

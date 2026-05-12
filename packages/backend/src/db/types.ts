@@ -1,5 +1,5 @@
-// Plain TypeScript interfaces matching the Drizzle schema definitions.
-// Used as the data-layer types throughout services now that Drizzle is removed.
+// Plain TypeScript interfaces used by the SQL-backed store and API services.
+// Keep these aligned with persisted records and repository mappings.
 
 export interface User {
   id: string;

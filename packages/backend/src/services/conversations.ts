@@ -1,3 +1,6 @@
+import { listConversationsNative, markAllConversationsReadNative } from '../db/repositories/conversations-repository.js';
+import { deleteAllMessageDraftsForConversationNative } from '../db/repositories/message-drafts-repository.js';
+import { deleteAllMessagesForConversationNative, getLatestNonSystemMessageForConversationNative } from '../db/repositories/messages-repository.js';
 import { store } from '../db/index.js';
 import { createAuditLog } from './audit-log.js';
 import { isAgentConversationRecord } from './conversation-scope.js';
@@ -35,46 +38,12 @@ export async function listConversations(query: ConversationListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
 
-  const predicate = (r: Record<string, unknown>) => {
-    if (isAgentConversationRecord(r)) return false;
-    if (query.contactId && r.contactId !== query.contactId) return false;
-    if (query.assigneeId && r.assigneeId !== query.assigneeId) return false;
-    if (query.channelType && r.channelType !== query.channelType) return false;
-    if (query.status && r.status !== query.status) return false;
-    if (query.isUnread !== undefined && r.isUnread !== query.isUnread) return false;
-    if (query.search) {
-      const needle = query.search.toLowerCase();
-      const subject = r.subject as string | undefined;
-      const subjectMatch = subject?.toLowerCase().includes(needle);
-      // Also search by contact name
-      let contactMatch = false;
-      if (r.contactId) {
-        const contact = store.getById('contacts', r.contactId as string);
-        if (contact) {
-          const fullName = [contact.firstName, contact.lastName].filter(Boolean).join(' ').toLowerCase();
-          contactMatch = fullName.includes(needle);
-        }
-      }
-      if (!subjectMatch && !contactMatch) return false;
-    }
-    return true;
-  };
+  const { entries: conversations, total } = await listConversationsNative(
+    { ...query, limit, offset },
+    isAgentConversationRecord,
+  );
 
-  const allMatching = store.find('conversations', predicate);
-  const total = allMatching.length;
-
-  if (limit === 0) {
-    return { entries: [], total };
-  }
-
-  const sorted = allMatching.sort((a, b) => {
-    const aLast = new Date(a.lastMessageAt as string).getTime() || 0;
-    const bLast = new Date(b.lastMessageAt as string).getTime() || 0;
-    if (bLast !== aLast) return bLast - aLast;
-    return new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime();
-  });
-
-  const entries = sorted.slice(offset, offset + limit).map((conversation) => {
+  const entries = await Promise.all(conversations.map(async (conversation) => {
     const contact = conversation.contactId
       ? store.getById('contacts', conversation.contactId as string)
       : null;
@@ -82,14 +51,7 @@ export async function listConversations(query: ConversationListQuery) {
       ? store.getById('users', conversation.assigneeId as string)
       : null;
 
-    // Find last non-system message for preview
-    const convMessages = store.find('messages', (r: Record<string, unknown>) =>
-      r.conversationId === conversation.id && r.type !== 'system'
-    );
-    const lastMsg = convMessages.sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
-      new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime()
-    )[0] as Record<string, unknown> | undefined;
-
+    const lastMsg = await getLatestNonSystemMessageForConversationNative(conversation.id as string);
     let lastMessagePreview: string | null = null;
     if (lastMsg) {
       const type = lastMsg.type as string;
@@ -134,7 +96,7 @@ export async function listConversations(query: ConversationListQuery) {
           }
         : null,
     };
-  });
+  }));
 
   return { entries, total };
 }
@@ -175,7 +137,11 @@ export async function createConversation(
   data: CreateConversationData,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const conversation = store.insert('conversations', { ...data });
+  const conversation = store.insert('conversations', {
+    ...data,
+    status: data.status ?? 'open',
+    isUnread: false,
+  });
 
   if (audit) {
     await createAuditLog({
@@ -238,15 +204,8 @@ export async function markConversationRead(id: string) {
   return updated ?? null;
 }
 
-export function markAllConversationsRead(): number {
-  const unread = store.find(
-    'conversations',
-    (r: Record<string, unknown>) => r.isUnread === true && !isAgentConversationRecord(r),
-  );
-  for (const conv of unread) {
-    store.update('conversations', conv.id as string, { isUnread: false });
-  }
-  return unread.length;
+export async function markAllConversationsRead(): Promise<number> {
+  return markAllConversationsReadNative();
 }
 
 export async function deleteConversation(
@@ -257,8 +216,8 @@ export async function deleteConversation(
   if (!existing || isAgentConversationRecord(existing)) return false;
 
   // Delete all messages and drafts belonging to this conversation
-  store.deleteWhere('messages', (r: any) => r.conversationId === id);
-  store.deleteWhere('messageDrafts', (r: any) => r.conversationId === id);
+  await deleteAllMessagesForConversationNative(id);
+  await deleteAllMessageDraftsForConversationNative(id);
 
   const deleted = store.delete('conversations', id);
   if (!deleted) return false;

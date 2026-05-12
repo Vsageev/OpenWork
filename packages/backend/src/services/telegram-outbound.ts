@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { store } from '../db/index.js';
+import { findFirstActiveTelegramBot } from '../db/repositories/telegram-bots-repository.js';
 import { updateMessageStatus } from './messages.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
@@ -77,7 +78,7 @@ async function resolveConversationBot(conversationId: string) {
   }
 
   // Find an active Telegram bot to send with
-  const bot = store.findOne('telegramBots', r => r.status === 'active');
+  const bot = await findFirstActiveTelegramBot();
 
   if (!bot) return null;
 

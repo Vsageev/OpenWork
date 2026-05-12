@@ -1,3 +1,18 @@
+import {
+  deleteBoardCardByBoardAndCard,
+  deleteBoardCardsByBoardId,
+  deleteBoardCardsByBoardIdNative,
+  deleteBoardCardsByColumnId,
+  deleteBoardColumnsByBoardId,
+  getBoardCardByBoardAndCardNative,
+  countBoardCardsByBoardAndColumnNative,
+  listBoardCardsByBoardIdNative,
+  listBoardColumnsByBoardIdNative,
+  listCardTagsByCardId,
+  countGeneralBoardsNative,
+  listBoardsNative,
+  listGeneralBoardsNative,
+} from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
 import { createAuditLog } from './audit-log.js';
 import { updateCard } from './cards.js';
@@ -32,10 +47,8 @@ async function runWithGeneralBoardLock<T>(fn: () => Promise<T> | T): Promise<T> 
   }
 }
 
-function findCanonicalGeneralBoard(excludeId?: string): any | null {
-  const generals = (store.getAll('boards') as any[])
-    .filter((board) => (excludeId ? board.id !== excludeId : true))
-    .filter((board) => isGeneralBoard(board));
+async function findCanonicalGeneralBoard(excludeId?: string): Promise<any | null> {
+  const generals = (await listGeneralBoardsNative(isGeneralBoard, excludeId)) as any[];
   if (generals.length === 0) return null;
 
   generals.sort((a, b) => {
@@ -47,7 +60,7 @@ function findCanonicalGeneralBoard(excludeId?: string): any | null {
 
   const canonical = generals[0];
   if (canonical?.id && canonical.isGeneral !== true) {
-    store.update('boards', canonical.id, { isGeneral: true });
+    await store.update('boards', canonical.id, { isGeneral: true });
   }
 
   return canonical;
@@ -60,7 +73,7 @@ async function insertBoard(
   isGeneral: boolean,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const board = store.insert('boards', {
+  const board = await store.insert('boards', {
     name: boardData.name,
     description: boardData.description ?? null,
     collectionId: boardData.collectionId ?? null,
@@ -71,7 +84,7 @@ async function insertBoard(
 
   if (columns && columns.length > 0) {
     for (const col of columns) {
-      store.insert('boardColumns', {
+      await store.insert('boardColumns', {
         boardId: board.id,
         name: col.name,
         color: col.color ?? '#6B7280',
@@ -107,8 +120,7 @@ export function isGeneralBoard(board: unknown): boolean {
 }
 
 export async function countGeneralBoards(): Promise<number> {
-  const all = store.getAll('boards') as any[];
-  return all.filter((board) => isGeneralBoard(board)).length;
+  return countGeneralBoardsNative(isGeneralBoard);
 }
 
 export interface BoardListQuery {
@@ -162,43 +174,14 @@ export async function listBoards(query: BoardListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
 
-  let all = store.getAll('boards') as any[];
-
-  if (query.ids) {
-    const idSet = new Set(query.ids);
-    all = all.filter((b: any) => idSet.has(b.id));
-  }
-
-  if (query.collectionId) {
-    all = all.filter((b: any) => b.collectionId === query.collectionId);
-  }
-
-  if (query.search) {
-    const term = query.search.toLowerCase();
-    all = all.filter(
-      (b: any) =>
-        b.name?.toLowerCase().includes(term) ||
-        b.description?.toLowerCase().includes(term),
-    );
-  }
-
-  all.sort(
-    (a, b) =>
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-  );
-
-  const total = all.length;
-  const entries = all.slice(offset, offset + limit);
-
-  return { entries, total };
+  return listBoardsNative({ ...query, limit, offset });
 }
 
 export async function getBoardById(id: string) {
   const board = store.getById('boards', id) as any;
   if (!board) return null;
 
-  const columns = store.find('boardColumns', (r: any) => r.boardId === id) as any[];
-  columns.sort((a, b) => a.position - b.position);
+  const columns = (await listBoardColumnsByBoardIdNative(id)) as any[];
 
   return { ...board, columns };
 }
@@ -207,7 +190,7 @@ export async function getBoardWithCards(id: string) {
   const board = await getBoardById(id);
   if (!board) return null;
 
-  const boardCards = store.find('boardCards', (r: any) => r.boardId === id) as any[];
+  const boardCards = (await listBoardCardsByBoardIdNative(id)) as any[];
 
   // Load card data for each board card, including assignee and tags
   const cardsWithPositions = boardCards.map((bc: any) => {
@@ -232,7 +215,7 @@ export async function getBoardWithCards(id: string) {
     }
 
     // Hydrate tags
-    const cardTags = store.find('cardTags', (r: any) => r.cardId === card.id) as any[];
+    const cardTags = listCardTagsByCardId(card.id) as any[];
     const tags = cardTags
       .map((ct: any) => store.getById('tags', ct.tagId))
       .filter(Boolean);
@@ -268,7 +251,7 @@ export async function createBoard(
 
   return runWithGeneralBoardLock(async () => {
     // Serialize "General Board" creation/check to avoid duplicates under concurrent requests.
-    const existingGeneral = findCanonicalGeneralBoard();
+    const existingGeneral = await findCanonicalGeneralBoard();
     if (existingGeneral) {
       return getBoardById(existingGeneral.id);
     }
@@ -312,7 +295,7 @@ export async function updateBoard(
           : GENERAL_BOARD_NAMES.has(normalizeName(data.name));
 
       if (refreshedNextIsGeneral && !refreshedIsGeneral) {
-        const canonicalGeneral = findCanonicalGeneralBoard(id);
+        const canonicalGeneral = await findCanonicalGeneralBoard(id);
         if (canonicalGeneral) {
           return getBoardById(canonicalGeneral.id);
         }
@@ -327,7 +310,7 @@ export async function updateBoard(
       refreshedSetData.isGeneral = refreshedNextIsGeneral;
       refreshedSetData.updatedAt = new Date().toISOString();
 
-      const updated = store.update('boards', id, refreshedSetData);
+      const updated = await store.update('boards', id, refreshedSetData);
       if (!updated) return null;
 
       if (audit) {
@@ -346,7 +329,7 @@ export async function updateBoard(
     });
   }
 
-  const updated = store.update('boards', id, setData);
+  const updated = await store.update('boards', id, setData);
   if (!updated) return null;
 
   if (audit) {
@@ -368,11 +351,13 @@ export async function deleteBoard(
   id: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  // Remove board columns and board cards
-  store.deleteWhere('boardColumns', (r: any) => r.boardId === id);
-  store.deleteWhere('boardCards', (r: any) => r.boardId === id);
-
-  const deleted = store.delete('boards', id);
+  const deleted = await store.transaction(async () => {
+    // Remove board columns and board cards
+    deleteBoardColumnsByBoardId(id);
+    await deleteBoardCardsByBoardIdNative(id);
+    return store.delete('boards', id);
+  });
+  if (deleted) await store.reload();
 
   if (deleted && audit) {
     await createAuditLog({
@@ -411,13 +396,15 @@ export async function updateColumn(columnId: string, data: UpdateColumnData) {
   }
   setData.updatedAt = new Date().toISOString();
 
-  return store.update('boardColumns', columnId, setData) ?? null;
+  return (await store.update('boardColumns', columnId, setData)) ?? null;
 }
 
 export async function deleteColumn(columnId: string) {
-  // Remove cards from this column
-  store.deleteWhere('boardCards', (r: any) => r.columnId === columnId);
-  return store.delete('boardColumns', columnId) ?? null;
+  return store.transaction(async () => {
+    // Remove cards from this column
+    deleteBoardCardsByColumnId(columnId);
+    return (await store.delete('boardColumns', columnId)) ?? null;
+  });
 }
 
 // ── Auto-assign agent helper ──────────────────────────────────────────
@@ -444,17 +431,16 @@ async function tryAutoAssignAgent(columnId: string, cardId: string) {
 
 export async function addCardToBoard(boardId: string, cardId: string, columnId: string, position?: number) {
   // Check if card is already on this board
-  const existing = store.findOne('boardCards', (r: any) => r.boardId === boardId && r.cardId === cardId);
+  const existing = await getBoardCardByBoardAndCardNative(boardId, cardId);
   if (existing) return existing;
 
   // Auto-calculate position if not provided
   let pos = position;
   if (pos === undefined) {
-    const columnCards = store.find('boardCards', (r: any) => r.boardId === boardId && r.columnId === columnId) as any[];
-    pos = columnCards.length;
+    pos = await countBoardCardsByBoardAndColumnNative(boardId, columnId);
   }
 
-  const boardCard = store.insert('boardCards', {
+  const boardCard = await store.insert('boardCards', {
     boardId,
     cardId,
     columnId,
@@ -467,22 +453,21 @@ export async function addCardToBoard(boardId: string, cardId: string, columnId: 
 }
 
 export async function moveCardOnBoard(boardId: string, cardId: string, columnId: string, position?: number) {
-  const boardCard = store.findOne('boardCards', (r: any) => r.boardId === boardId && r.cardId === cardId) as any;
+  const boardCard = (await getBoardCardByBoardAndCardNative(boardId, cardId)) as any;
   if (!boardCard) return null;
 
   const previousColumnId = boardCard.columnId;
 
   let pos = position;
   if (pos === undefined) {
-    const columnCards = store.find('boardCards', (r: any) => r.boardId === boardId && r.columnId === columnId) as any[];
-    pos = columnCards.length;
+    pos = await countBoardCardsByBoardAndColumnNative(boardId, columnId);
   }
 
-  const updated = store.update('boardCards', boardCard.id, {
+  const updated = (await store.update('boardCards', boardCard.id, {
     columnId,
     position: pos,
     updatedAt: new Date().toISOString(),
-  }) ?? null;
+  })) ?? null;
 
   if (updated && previousColumnId !== columnId) {
     await tryAutoAssignAgent(columnId, cardId);
@@ -492,10 +477,12 @@ export async function moveCardOnBoard(boardId: string, cardId: string, columnId:
 }
 
 export async function removeCardFromBoard(boardId: string, cardId: string) {
-  store.deleteWhere('boardCards', (r: any) => r.boardId === boardId && r.cardId === cardId);
+  await store.transaction(async () => {
+    deleteBoardCardByBoardAndCard(boardId, cardId);
+  });
   return true;
 }
 
 export async function clearBoardCards(boardId: string) {
-  return store.deleteWhere('boardCards', (r: any) => r.boardId === boardId);
+  return store.transaction(async () => deleteBoardCardsByBoardId(boardId));
 }

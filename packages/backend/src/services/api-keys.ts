@@ -1,5 +1,13 @@
 import { randomBytes, createHash } from 'node:crypto';
-import { store } from '../db/index.js';
+import {
+  deleteApiKeyRecord,
+  filterApiKeysByCreatedById,
+  findActiveApiKeyByKeyHash,
+  getApiKeyRecord,
+  insertApiKeyRecord,
+  listApiKeyRecords,
+  updateApiKeyRecord,
+} from '../db/repositories/api-keys-repository.js';
 import { createAuditLog } from './audit-log.js';
 
 const API_KEY_BYTE_LENGTH = 32;
@@ -31,7 +39,8 @@ export interface UpdateApiKeyParams {
 
 // Fields to expose (exclude keyHash)
 function sanitize(record: Record<string, unknown>) {
-  const { keyHash, ...rest } = record;
+  const rest = { ...record };
+  delete rest.keyHash;
   return {
     ...rest,
     isActive: isActive(rest),
@@ -53,7 +62,7 @@ export async function createApiKey(
   const keyHash = hashKey(rawKey);
   const keyPrefix = rawKey.slice(0, 8);
 
-  const record = store.insert('apiKeys', {
+  const record = await insertApiKeyRecord({
     name: params.name,
     keyHash,
     keyPrefix,
@@ -86,12 +95,14 @@ export async function listApiKeys(filters?: { createdById?: string; limit?: numb
   const limit = filters?.limit ?? 50;
   const offset = filters?.offset ?? 0;
 
-  const predicate = filters?.createdById
-    ? (r: Record<string, unknown>) => r.createdById === filters.createdById
-    : undefined;
-
-  const all = (predicate ? store.find('apiKeys', predicate) : store.getAll('apiKeys'))
-    .sort((a, b) => new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime());
+  const all = (
+    filters?.createdById
+      ? await filterApiKeysByCreatedById(filters.createdById)
+      : await listApiKeyRecords()
+  ).sort(
+    (a, b) =>
+      new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime(),
+  );
 
   const total = all.length;
   const entries = all.slice(offset, offset + limit).map(sanitize);
@@ -103,7 +114,7 @@ export async function listApiKeys(filters?: { createdById?: string; limit?: numb
  * Get a single API key by id (never returns the hash).
  */
 export async function getApiKeyById(id: string) {
-  const key = store.getById('apiKeys', id);
+  const key = await getApiKeyRecord(id);
   if (!key) return null;
   return sanitize(key);
 }
@@ -116,7 +127,7 @@ export async function updateApiKey(
   params: UpdateApiKeyParams,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const updated = store.update('apiKeys', id, params as Record<string, unknown>);
+  const updated = await updateApiKeyRecord(id, params as Record<string, unknown>);
   if (!updated) return null;
 
   if (audit) {
@@ -141,7 +152,7 @@ export async function deleteApiKey(
   id: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const deleted = store.delete('apiKeys', id);
+  const deleted = await deleteApiKeyRecord(id);
 
   if (!deleted) return false;
 
@@ -166,7 +177,7 @@ export async function deleteApiKey(
 export async function validateApiKey(rawKey: string) {
   const keyHash = hashKey(rawKey);
 
-  const key = store.findOne('apiKeys', (r) => r.keyHash === keyHash && isActive(r));
+  const key = await findActiveApiKeyByKeyHash(keyHash);
 
   if (!key) return null;
 
@@ -177,7 +188,7 @@ export async function validateApiKey(rawKey: string) {
 
   // Update lastUsedAt (fire-and-forget)
   try {
-    store.update('apiKeys', key.id as string, { lastUsedAt: new Date() });
+    await updateApiKeyRecord(key.id as string, { lastUsedAt: new Date() } as Record<string, unknown>);
   } catch {
     // ignore
   }

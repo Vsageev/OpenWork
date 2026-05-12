@@ -7,6 +7,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
 import { store } from '../db/index.js';
+import { findFirstActiveTelegramBot } from '../db/repositories/telegram-bots-repository.js';
 import { getFileInfo, buildFileUrl } from '../services/telegram.js';
 import { sendMessage } from '../services/messages.js';
 import { sendTelegramMedia } from '../services/telegram-outbound.js';
@@ -107,7 +108,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       }
 
       // 3. Find an active Telegram bot to fetch the file
-      const bot = store.findOne('telegramBots', (b) => b.status === 'active');
+      const bot = await findFirstActiveTelegramBot();
 
       if (!bot) {
         return reply.serviceUnavailable('No active Telegram bot');

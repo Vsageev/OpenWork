@@ -1,3 +1,8 @@
+import {
+  listBoardsTouchingCollectionIds,
+  listCardsWithCollectionIdIn,
+  listWorkspacesTouchingCollectionIds,
+} from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
 import { createAuditLog } from './audit-log.js';
 
@@ -139,23 +144,13 @@ export async function consolidateGeneralCollections() {
 
   const duplicateIdSet = new Set(duplicateIds);
 
-  const cards = store.find(
-    'cards',
-    (card: any) =>
-      typeof card.collectionId === 'string' && duplicateIdSet.has(card.collectionId),
-  ) as any[];
+  const cards = listCardsWithCollectionIdIn(duplicateIdSet) as any[];
   for (const card of cards) {
     if (typeof card.id !== 'string') continue;
     store.update('cards', card.id, { collectionId: canonicalId });
   }
 
-  const boards = store.find(
-    'boards',
-    (board: any) =>
-      (typeof board.collectionId === 'string' && duplicateIdSet.has(board.collectionId)) ||
-      (typeof board.defaultCollectionId === 'string' &&
-        duplicateIdSet.has(board.defaultCollectionId)),
-  ) as any[];
+  const boards = listBoardsTouchingCollectionIds(duplicateIdSet) as any[];
   for (const board of boards) {
     if (typeof board.id !== 'string') continue;
 
@@ -175,15 +170,7 @@ export async function consolidateGeneralCollections() {
     }
   }
 
-  const workspaces = store.find(
-    'workspaces',
-    (workspace: any) =>
-      Array.isArray(workspace.collectionIds) &&
-      workspace.collectionIds.some(
-        (collectionId: unknown) =>
-          typeof collectionId === 'string' && duplicateIdSet.has(collectionId),
-      ),
-  ) as any[];
+  const workspaces = listWorkspacesTouchingCollectionIds(duplicateIdSet) as any[];
   for (const workspace of workspaces) {
     if (typeof workspace.id !== 'string') continue;
 

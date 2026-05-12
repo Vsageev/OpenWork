@@ -1,3 +1,4 @@
+import { listBoardCardsByBoardId } from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
 import { getAgent } from './agents.js';
 import {
@@ -10,7 +11,7 @@ import {
 export interface BoardBatchOptions {
   boardId: string;
   agentId: string;
-  prompt: string;
+  prompt?: string;
   cardIds?: string[];
   columnIds?: string[];
   textFilter?: string;
@@ -35,7 +36,7 @@ export function countBoardBatchCards(
   columnIds?: string[],
   textFilter?: string,
 ): number {
-  let boardCards = store.find('boardCards', (r: any) => r.boardId === boardId) as any[];
+  let boardCards = listBoardCardsByBoardId(boardId) as any[];
 
   if (columnIds && columnIds.length > 0) {
     const columnSet = new Set(columnIds);
@@ -82,7 +83,7 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
   let cards: any[] = [];
 
   if (cardIds && cardIds.length > 0) {
-    const boardCards = store.find('boardCards', (r: any) => r.boardId === boardId) as any[];
+    const boardCards = listBoardCardsByBoardId(boardId) as any[];
     const boardCardMap = new Map<string, any>();
     for (const boardCard of boardCards) {
       boardCardMap.set(boardCard.cardId as string, boardCard);
@@ -99,7 +100,7 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
       .filter(Boolean);
   } else {
     // Get all board cards, optionally filtered by column
-    let boardCards = store.find('boardCards', (r: any) => r.boardId === boardId) as any[];
+    let boardCards = listBoardCardsByBoardId(boardId) as any[];
 
     if (columnIds && columnIds.length > 0) {
       const columnSet = new Set(columnIds);

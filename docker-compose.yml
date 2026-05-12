@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16
+    container_name: openwork-postgres
+    restart: unless-stopped
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openwork}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openwork}
+      POSTGRES_DB: ${POSTGRES_DB:-openwork}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-openwork} -d ${POSTGRES_DB:-openwork}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
@@ -12,6 +30,10 @@ services:
       PORT: 3847
       HOST: 0.0.0.0
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      DATABASE_URL: postgres://${POSTGRES_USER:-openwork}:${POSTGRES_PASSWORD:-openwork}@postgres:5432/${POSTGRES_DB:-openwork}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - backups:/app/backups
     profiles:
@@ -34,3 +56,4 @@ services:
 
 volumes:
   backups:
+  postgres-data:

@@ -2,12 +2,15 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
-import { store } from '../db/index.js';
+import {
+  getSetting,
+  upsertSetting,
+} from '../db/repositories/settings-repository.js';
+import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import { env } from '../config/env.js';
 import { promptRateLimiter } from './agent-chat.js';
 import { getProjectSettings, updateProjectSettings } from '../services/project-settings.js';
 
-const SETTINGS_COLLECTION = 'settings';
 const RATE_LIMIT_SETTINGS_ID = 'rate-limits';
 
 interface RateLimitSettings {
@@ -18,8 +21,8 @@ interface RateLimitSettings {
   updatedAt: string;
 }
 
-function getRateLimitSettings(): RateLimitSettings {
-  const existing = store.getById(SETTINGS_COLLECTION, RATE_LIMIT_SETTINGS_ID) as RateLimitSettings | null;
+async function getRateLimitSettings(): Promise<RateLimitSettings> {
+  const existing = (await getSetting(RATE_LIMIT_SETTINGS_ID)) as RateLimitSettings | null;
   if (existing) return existing;
   return {
     id: RATE_LIMIT_SETTINGS_ID,
@@ -30,8 +33,8 @@ function getRateLimitSettings(): RateLimitSettings {
   };
 }
 
-export function initRateLimiterFromSettings(): void {
-  const settings = getRateLimitSettings();
+export async function initRateLimiterFromSettings(): Promise<void> {
+  const settings = await getRateLimitSettings();
   promptRateLimiter.reconfigure(settings.agentPromptMax, settings.agentPromptWindowS * 1000);
 }
 
@@ -43,7 +46,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     '/api/settings/rate-limits',
     { onRequest: [app.authenticate, requirePermission('settings:read')] },
     async () => {
-      const settings = getRateLimitSettings();
+      const settings = await getRateLimitSettings();
       return {
         agentPromptMax: settings.agentPromptMax,
         agentPromptWindowS: settings.agentPromptWindowS,
@@ -62,7 +65,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
     },
     async () => {
-      const settings = getProjectSettings();
+      const settings = await getProjectSettings();
       return {
         defaultAgentKeyId: settings.defaultAgentKeyId,
       };
@@ -86,7 +89,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       if (request.body.defaultAgentKeyId) {
-        const apiKey = store.getById('apiKeys', request.body.defaultAgentKeyId);
+        const apiKey = await getApiKeyRecord(request.body.defaultAgentKeyId);
         if (!apiKey || apiKey.isActive === false) {
           return reply.badRequest('Default agent key not found or inactive');
         }
@@ -95,7 +98,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         }
       }
 
-      const updated = updateProjectSettings({
+      const updated = await updateProjectSettings({
         ...(request.body.defaultAgentKeyId !== undefined
           ? { defaultAgentKeyId: request.body.defaultAgentKeyId }
           : {}),
@@ -118,7 +121,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
     },
     async () => {
-      const settings = getProjectSettings();
+      const settings = await getProjectSettings();
       return {
         fallbackModel: settings.fallbackModel,
         fallbackModelId: settings.fallbackModelId,
@@ -143,7 +146,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
     },
     async (request) => {
-      const updated = updateProjectSettings({
+      const updated = await updateProjectSettings({
         ...(request.body.fallbackModel !== undefined
           ? { fallbackModel: request.body.fallbackModel }
           : {}),
@@ -170,7 +173,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
     },
     async () => {
-      const settings = getProjectSettings();
+      const settings = await getProjectSettings();
       return {
         autoAttachOversizedPasteAsTextFile: settings.autoAttachOversizedPasteAsTextFile,
       };
@@ -194,7 +197,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
     },
     async (request) => {
-      const updated = updateProjectSettings({
+      const updated = await updateProjectSettings({
         ...(request.body.autoAttachOversizedPasteAsTextFile !== undefined
           ? {
               autoAttachOversizedPasteAsTextFile:
@@ -205,7 +208,7 @@ export async function settingsRoutes(app: FastifyInstance) {
                 autoAttachOversizedPasteAsTextFile:
                   request.body.autoConvertLargePastedTextToAttachment,
               }
-          : {}),
+            : {}),
       });
 
       return {
@@ -229,20 +232,14 @@ export async function settingsRoutes(app: FastifyInstance) {
     },
     async (request) => {
       const { agentPromptMax, agentPromptWindowS } = request.body;
-      const existing = store.getById(SETTINGS_COLLECTION, RATE_LIMIT_SETTINGS_ID);
-
-      const current = getRateLimitSettings();
+      const current = await getRateLimitSettings();
       const updated = {
         ...current,
         agentPromptMax: agentPromptMax ?? current.agentPromptMax,
         agentPromptWindowS: agentPromptWindowS ?? current.agentPromptWindowS,
       };
 
-      if (existing) {
-        store.update(SETTINGS_COLLECTION, RATE_LIMIT_SETTINGS_ID, updated as unknown as Record<string, unknown>);
-      } else {
-        store.insert(SETTINGS_COLLECTION, updated as unknown as Record<string, unknown>);
-      }
+      upsertSetting(updated as unknown as Record<string, unknown>);
 
       // Apply to running rate limiter
       promptRateLimiter.reconfigure(updated.agentPromptMax, updated.agentPromptWindowS * 1000);

@@ -1,7 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
-import { store } from '../db/index.js';
+import {
+  deleteTag,
+  findTagByName,
+  insertTag,
+  listCardTags,
+  listTags,
+  removeCardTagsForTag,
+  updateTag,
+} from '../db/repositories/tags-repository.js';
 import { requirePermission } from '../middleware/rbac.js';
 
 const createTagBody = z.object({
@@ -34,7 +42,7 @@ export async function tagRoutes(app: FastifyInstance) {
       },
     },
     async (_request, reply) => {
-      const entries = store.getAll('tags');
+      const entries = listTags();
       // Sort by createdAt descending
       entries.sort((a, b) => {
         const aDate = a.createdAt as string || '';
@@ -42,7 +50,7 @@ export async function tagRoutes(app: FastifyInstance) {
         return bDate.localeCompare(aDate);
       });
       // Count card usages per tag
-      const cardTags = store.getAll('cardTags') as any[];
+      const cardTags = listCardTags() as any[];
       const countsByTagId = new Map<string, number>();
       for (const ct of cardTags) {
         countsByTagId.set(ct.tagId, (countsByTagId.get(ct.tagId) ?? 0) + 1);
@@ -67,13 +75,13 @@ export async function tagRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const existing = store.findOne('tags', (t) => t.name === request.body.name);
+      const existing = findTagByName(request.body.name);
 
       if (existing) {
         return reply.conflict('Tag with this name already exists');
       }
 
-      const tag = store.insert('tags', request.body);
+      const tag = insertTag(request.body as Record<string, unknown>);
       return reply.status(201).send(tag);
     },
   );
@@ -92,14 +100,14 @@ export async function tagRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       if (request.body.name) {
-        const existing = store.findOne('tags', (t) => t.name === request.body.name);
+        const existing = findTagByName(request.body.name);
 
         if (existing && existing.id !== request.params.id) {
           return reply.conflict('Tag with this name already exists');
         }
       }
 
-      const updated = store.update('tags', request.params.id, request.body);
+      const updated = updateTag(request.params.id, request.body as Record<string, unknown>);
 
       if (!updated) {
         return reply.notFound('Tag not found');
@@ -121,14 +129,14 @@ export async function tagRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const deleted = store.delete('tags', request.params.id);
+      // Drop associations first so Postgres FK on card_tags.tag_id allows tag deletion.
+      removeCardTagsForTag(request.params.id);
+
+      const deleted = deleteTag(request.params.id);
 
       if (!deleted) {
         return reply.notFound('Tag not found');
       }
-
-      // Cascade: remove all card-tag associations for the deleted tag
-      store.deleteWhere('cardTags', (r: any) => r.tagId === request.params.id);
 
       return reply.status(204).send();
     },

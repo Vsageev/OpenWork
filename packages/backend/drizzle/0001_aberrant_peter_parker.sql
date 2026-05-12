@@ -1,0 +1,1 @@
+ALTER TABLE "agent_batch_runs" ALTER COLUMN "started_at" DROP NOT NULL;

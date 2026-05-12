@@ -156,8 +156,8 @@ export function shutdownAgentCronJobs(): void {
 /**
  * Initialize cron jobs for all agents on app startup.
  */
-export function initAllCronJobs(): void {
-  const agents = listAgents();
+export async function initAllCronJobs(): Promise<void> {
+  const agents = await listAgents();
   for (const agent of agents) {
     try {
       const cronJobs = agent.cronJobs;

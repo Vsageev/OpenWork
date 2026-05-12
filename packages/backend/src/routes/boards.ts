@@ -109,7 +109,7 @@ export async function boardRoutes(app: FastifyInstance) {
     async (request, reply) => {
       let ids: string[] | undefined;
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId) as any;
+        const workspace = await getWorkspaceById(request.query.workspaceId);
         if (workspace) {
           ids = workspace.boardIds;
         }
@@ -442,8 +442,8 @@ export async function boardRoutes(app: FastifyInstance) {
       const board = await getBoardById(request.params.id);
       if (!board) return reply.notFound('Board not found');
 
-      syncBoardCronJobs(request.params.id);
-      const entries = listBoardCronTemplatesWithNextRun(request.params.id);
+      await syncBoardCronJobs(request.params.id);
+      const entries = await listBoardCronTemplatesWithNextRun(request.params.id);
       return reply.send({ entries, total: entries.length });
     },
   );
@@ -472,7 +472,7 @@ export async function boardRoutes(app: FastifyInstance) {
       const board = await getBoardById(request.params.id);
       if (!board) return reply.notFound('Board not found');
 
-      const template = createBoardCronTemplate(
+      const template = await createBoardCronTemplate(
         { ...request.body, boardId: request.params.id },
         request.user.sub,
       );
@@ -502,7 +502,7 @@ export async function boardRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const updated = updateBoardCronTemplate(request.params.templateId, request.body);
+      const updated = await updateBoardCronTemplate(request.params.templateId, request.body);
       if (!updated) return reply.notFound('Cron template not found');
       return reply.send(withBoardCronTemplateNextRun(updated));
     },
@@ -559,7 +559,7 @@ export async function boardRoutes(app: FastifyInstance) {
         return reply.notFound('Batch run not found');
       }
 
-      const cancelled = cancelAgentBatchRun(request.params.runId);
+      const cancelled = await cancelAgentBatchRun(request.params.runId);
       return reply.send(cancelled ?? run);
     },
   );
@@ -608,7 +608,7 @@ export async function boardRoutes(app: FastifyInstance) {
         params: z.object({ id: z.uuid() }),
         body: z.object({
           agentId: z.uuid(),
-          prompt: z.string().min(1).max(10000),
+          prompt: z.string().max(10000).optional(),
           cardIds: z.array(z.uuid()).min(1).optional(),
           columnIds: z.array(z.uuid()).optional(),
           textFilter: z.string().max(200).optional(),
@@ -753,7 +753,7 @@ export async function boardRoutes(app: FastifyInstance) {
         return reply.notFound('Batch run not found');
       }
 
-      const cancelled = cancelAgentBatchRun(request.params.runId);
+      const cancelled = await cancelAgentBatchRun(request.params.runId);
       return reply.send(cancelled ?? run);
     },
   );
@@ -770,7 +770,7 @@ export async function boardRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const deleted = deleteBoardCronTemplate(request.params.templateId);
+      const deleted = await deleteBoardCronTemplate(request.params.templateId);
       if (!deleted) return reply.notFound('Cron template not found');
       return reply.status(204).send();
     },

@@ -18,7 +18,7 @@ export interface CollectionBatchCardFilters {
 export interface CollectionBatchOptions {
   collectionId: string;
   agentId: string;
-  prompt: string;
+  prompt?: string;
   maxParallel?: number;
   cardIds?: string[];
   cardFilters?: CollectionBatchCardFilters;

@@ -3,6 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { store } from '../db/index.js';
+import {
+  deleteSkillRecord,
+  getSkillRecord,
+  insertSkillRecord,
+  listSkillRecords,
+  updateSkillRecord,
+} from '../db/repositories/skills-repository.js';
 import { env } from '../config/env.js';
 import { resolveAgentWorkspacePath } from './agent-workspaces.js';
 
@@ -93,21 +100,20 @@ function humanizeSlug(value: string): string {
 // ---------------------------------------------------------------------------
 
 export function listSkills(): SkillRecord[] {
-  return store
-    .getAll('skills')
+  return listSkillRecords()
     .map(asSkill)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function getSkill(id: string): SkillRecord | null {
-  const rec = store.getById('skills', id);
+  const rec = getSkillRecord(id);
   return rec ? asSkill(rec) : null;
 }
 
 export function createSkill(params: { name: string; description: string }): SkillRecord {
   ensureSkillsDir();
 
-  const record = store.insert('skills', {
+  const record = insertSkillRecord({
     id: randomUUID(),
     name: params.name.trim(),
     description: params.description.trim(),
@@ -130,22 +136,22 @@ export function updateSkill(
   id: string,
   data: Partial<Pick<SkillRecord, 'name' | 'description'>>,
 ): SkillRecord | null {
-  const existing = store.getById('skills', id);
+  const existing = getSkillRecord(id);
   if (!existing) return null;
 
   const patch: Record<string, unknown> = {};
   if (data.name !== undefined) patch.name = data.name.trim();
   if (data.description !== undefined) patch.description = data.description.trim();
 
-  const updated = store.update('skills', id, patch);
+  const updated = updateSkillRecord(id, patch);
   return updated ? asSkill(updated) : null;
 }
 
 export function deleteSkill(id: string): boolean {
-  const existing = store.getById('skills', id);
+  const existing = getSkillRecord(id);
   if (!existing) return false;
 
-  store.delete('skills', id);
+  deleteSkillRecord(id);
 
   // Remove skill source folder
   const dir = skillDir(id);
@@ -683,7 +689,7 @@ export function seedBuiltinSkills(): void {
   ensureSkillsDir();
 
   const builtins = loadBuiltinSkills();
-  const existing = store.getAll('skills');
+  const existing = listSkillRecords();
 
   for (const def of builtins) {
     const match = existing.find(
@@ -693,7 +699,7 @@ export function seedBuiltinSkills(): void {
     if (match) {
       // Sync description from manifest
       if ((match.description as string) !== def.description) {
-        store.update('skills', match.id as string, { description: def.description });
+        updateSkillRecord(match.id as string, { description: def.description });
       }
 
       // Sync folder contents from source into the data skill dir
@@ -702,7 +708,7 @@ export function seedBuiltinSkills(): void {
     }
 
     // Create the skill record and copy the whole folder
-    const record = store.insert('skills', {
+    const record = insertSkillRecord({
       id: randomUUID(),
       name: def.name,
       description: def.description,

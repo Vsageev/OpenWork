@@ -2,6 +2,8 @@ import { randomBytes, createHash } from 'node:crypto';
 import bcrypt from 'bcrypt';
 import type { FastifyInstance } from 'fastify';
 import { store } from '../db/index.js';
+import { deleteRefreshTokensForUserId, findValidRefreshTokenByHash } from '../db/repositories/refresh-tokens-repository.js';
+import { getUserRecordById } from '../db/repositories/users-repository.js';
 import { env } from '../config/env.js';
 
 const SALT_ROUNDS = 12;
@@ -28,10 +30,7 @@ function parseExpiry(duration: string): number {
 }
 
 function generateAccessToken(app: FastifyInstance, userId: string): string {
-  return app.jwt.sign(
-    { sub: userId },
-    { expiresIn: env.JWT_ACCESS_EXPIRES_IN },
-  );
+  return app.jwt.sign({ sub: userId }, { expiresIn: env.JWT_ACCESS_EXPIRES_IN });
 }
 
 export async function generateTokens(app: FastifyInstance, userId: string) {
@@ -39,9 +38,9 @@ export async function generateTokens(app: FastifyInstance, userId: string) {
 
   const rawRefresh = randomBytes(48).toString('base64url');
   const tokenHash = hashToken(rawRefresh);
-  const expiresAt = new Date(Date.now() + parseExpiry(env.JWT_REFRESH_EXPIRES_IN));
+  const expiresAt = new Date(Date.now() + parseExpiry(env.JWT_REFRESH_EXPIRES_IN)).toISOString();
 
-  store.insert('refreshTokens', {
+  await store.insert('refreshTokens', {
     userId,
     tokenHash,
     expiresAt,
@@ -53,22 +52,20 @@ export async function generateTokens(app: FastifyInstance, userId: string) {
 export async function refreshAccessToken(app: FastifyInstance, rawRefreshToken: string) {
   const tokenHash = hashToken(rawRefreshToken);
 
-  const stored = store.findOne('refreshTokens', (r: any) =>
-    r.tokenHash === tokenHash && new Date(r.expiresAt).getTime() > Date.now(),
-  );
+  const stored = await findValidRefreshTokenByHash(tokenHash);
 
   if (!stored) return null;
 
-  const user = store.findOne('users', (r: any) => r.id === stored.userId);
+  const user = await getUserRecordById(stored.userId as string);
 
-  if (!user || !(user as any).isActive || (user as any).type === 'agent') return null;
+  if (!user || user.isActive !== true || user.type === 'agent') return null;
 
   return {
-    accessToken: generateAccessToken(app, (user as any).id),
+    accessToken: generateAccessToken(app, String(user.id)),
     refreshToken: rawRefreshToken,
   };
 }
 
 export async function revokeUserRefreshTokens(userId: string) {
-  store.deleteWhere('refreshTokens', (r: any) => r.userId === userId);
+  await deleteRefreshTokensForUserId(userId);
 }

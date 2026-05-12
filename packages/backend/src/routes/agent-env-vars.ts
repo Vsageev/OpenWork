@@ -64,7 +64,7 @@ export async function agentEnvVarRoutes(app: FastifyInstance) {
       if (!agent) return reply.notFound('Agent not found');
 
       return reply.send({
-        entries: listAgentEnvVars(request.params.agentId),
+        entries: await listAgentEnvVars(request.params.agentId),
       });
     },
   );
@@ -83,7 +83,7 @@ export async function agentEnvVarRoutes(app: FastifyInstance) {
       const agent = getAgent(request.params.agentId);
       if (!agent) return reply.notFound('Agent not found');
 
-      const record = getAgentEnvVar(request.params.agentId, request.params.envVarId);
+      const record = await getAgentEnvVar(request.params.agentId, request.params.envVarId);
       if (!record) return reply.notFound('Env var not found');
 
       return reply.send(record);

@@ -194,7 +194,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       },
     },
     async (_request, reply) => {
-      const count = markAllConversationsRead();
+      const count = await markAllConversationsRead();
       return reply.send({ count });
     },
   );

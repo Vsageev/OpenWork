@@ -1,0 +1,2047 @@
+{
+  "mode": "import",
+  "dataDir": "/Users/vladislav/Documents/projects/workspace-suite/OpenWork/packages/backend/data",
+  "databaseUrl": "postgres://openwork:***@localhost:5433/openwork",
+  "startedAt": "2026-05-10T23:53:29.599Z",
+  "finishedAt": "2026-05-10T23:54:02.929Z",
+  "elapsedMs": 33330,
+  "dryRunRolledBack": false,
+  "targetEmptyCheck": "passed",
+  "totals": {
+    "source": 7416,
+    "inserted": 7180,
+    "skipped": 236,
+    "validationSkipped": 0,
+    "constraintSkipped": 236
+  },
+  "collections": [
+    {
+      "collection": "users",
+      "table": "users",
+      "sourceCount": 106,
+      "insertedCount": 106,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 71
+    },
+    {
+      "collection": "refreshTokens",
+      "table": "refresh_tokens",
+      "sourceCount": 208,
+      "insertedCount": 208,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 92
+    },
+    {
+      "collection": "apiKeys",
+      "table": "api_keys",
+      "sourceCount": 31,
+      "insertedCount": 31,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 17
+    },
+    {
+      "collection": "settings",
+      "table": "settings",
+      "sourceCount": 2,
+      "insertedCount": 2,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 1
+    },
+    {
+      "collection": "auditLogs",
+      "table": "audit_logs",
+      "sourceCount": 612,
+      "insertedCount": 612,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 275
+    },
+    {
+      "collection": "agentGroups",
+      "table": "agent_groups",
+      "sourceCount": 4,
+      "insertedCount": 4,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 2
+    },
+    {
+      "collection": "skills",
+      "table": "skills",
+      "sourceCount": 11,
+      "insertedCount": 11,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 4
+    },
+    {
+      "collection": "collections",
+      "table": "collections",
+      "sourceCount": 1,
+      "insertedCount": 1,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 1
+    },
+    {
+      "collection": "workspaces",
+      "table": "workspaces",
+      "sourceCount": 1,
+      "insertedCount": 1,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 1
+    },
+    {
+      "collection": "agents",
+      "table": "agents",
+      "sourceCount": 30,
+      "insertedCount": 30,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 17
+    },
+    {
+      "collection": "agentAvatarPresets",
+      "table": "agent_avatar_presets",
+      "sourceCount": 1,
+      "insertedCount": 1,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "agentColorPresets",
+      "table": "agent_color_presets",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "agentExternalApiKeys",
+      "table": "agent_external_api_keys",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "agentEnvVars",
+      "table": "agent_env_vars",
+      "sourceCount": 2,
+      "insertedCount": 2,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 1
+    },
+    {
+      "collection": "boards",
+      "table": "boards",
+      "sourceCount": 9,
+      "insertedCount": 9,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 4
+    },
+    {
+      "collection": "boardColumns",
+      "table": "board_columns",
+      "sourceCount": 32,
+      "insertedCount": 32,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 14
+    },
+    {
+      "collection": "cards",
+      "table": "cards",
+      "sourceCount": 165,
+      "insertedCount": 165,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 73
+    },
+    {
+      "collection": "boardCards",
+      "table": "board_cards",
+      "sourceCount": 150,
+      "insertedCount": 150,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 58
+    },
+    {
+      "collection": "tags",
+      "table": "tags",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "cardTags",
+      "table": "card_tags",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "cardLinks",
+      "table": "card_links",
+      "sourceCount": 16,
+      "insertedCount": 16,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 7
+    },
+    {
+      "collection": "cardComments",
+      "table": "card_comments",
+      "sourceCount": 160,
+      "insertedCount": 160,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 79
+    },
+    {
+      "collection": "boardCronTemplates",
+      "table": "board_cron_templates",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "conversations",
+      "table": "conversations",
+      "sourceCount": 670,
+      "insertedCount": 670,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 282
+    },
+    {
+      "collection": "messages",
+      "table": "messages",
+      "sourceCount": 3790,
+      "insertedCount": 3554,
+      "skippedCount": 236,
+      "validationSkipped": 0,
+      "constraintSkipped": 236,
+      "schema": "validated",
+      "elapsedMs": 1673
+    },
+    {
+      "collection": "messageDrafts",
+      "table": "message_drafts",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "telegramBots",
+      "table": "telegram_bots",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "connectors",
+      "table": "connectors",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "webhookDeliveries",
+      "table": "webhook_deliveries",
+      "sourceCount": 0,
+      "insertedCount": 0,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 0
+    },
+    {
+      "collection": "agent_runs",
+      "table": "agent_runs",
+      "sourceCount": 1302,
+      "insertedCount": 1302,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "validated",
+      "elapsedMs": 28239
+    },
+    {
+      "collection": "agentChatQueue",
+      "table": "agent_chat_queue",
+      "sourceCount": 30,
+      "insertedCount": 30,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 22
+    },
+    {
+      "collection": "agentBatchRuns",
+      "table": "agent_batch_runs",
+      "sourceCount": 3,
+      "insertedCount": 3,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 2
+    },
+    {
+      "collection": "agentBatchRunItems",
+      "table": "agent_batch_run_items",
+      "sourceCount": 79,
+      "insertedCount": 79,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 42
+    },
+    {
+      "collection": "migrations",
+      "table": "json_migrations",
+      "sourceCount": 1,
+      "insertedCount": 1,
+      "skippedCount": 0,
+      "validationSkipped": 0,
+      "constraintSkipped": 0,
+      "schema": "missing",
+      "elapsedMs": 0
+    }
+  ],
+  "issues": [
+    {
+      "collection": "messages",
+      "index": 221,
+      "id": "f24af543-3cef-4569-a128-5e7fb00ab215",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.924c56b2-8676-492e-9d0f-892ca5d5dfaf"
+    },
+    {
+      "collection": "messages",
+      "index": 222,
+      "id": "4371347f-de46-4aac-991f-0c7bb096d87f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8e07b149-a368-4242-a8f7-3f6cf977b16c"
+    },
+    {
+      "collection": "messages",
+      "index": 223,
+      "id": "39a38efe-c67e-4991-b0ca-1e3186b85f8c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.96a81dd7-fbb5-4f81-9771-150a4bef3218"
+    },
+    {
+      "collection": "messages",
+      "index": 224,
+      "id": "cbb15528-9999-4c8f-b674-409736854d66",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.1792dfb9-71a2-4bc8-912b-58e705353c28"
+    },
+    {
+      "collection": "messages",
+      "index": 225,
+      "id": "8aba19f9-07eb-4608-ad21-9c309f755b56",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f028177a-d334-4c38-8fa6-6f1c261b81b4"
+    },
+    {
+      "collection": "messages",
+      "index": 226,
+      "id": "9b889d15-e26f-40a6-9637-b701c092e7e0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b08ab995-1083-428d-a41f-cfec02985254"
+    },
+    {
+      "collection": "messages",
+      "index": 227,
+      "id": "5ba5c966-7145-4097-a4fd-b71847b7cab0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.0cadf82a-dc18-493c-8796-417bbe20f93b"
+    },
+    {
+      "collection": "messages",
+      "index": 228,
+      "id": "815945bc-542d-418f-b02b-1e9dbf736983",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.5d1042ac-a312-43b9-8ab0-2afeec427af7"
+    },
+    {
+      "collection": "messages",
+      "index": 229,
+      "id": "09a31cf7-48fc-4e7f-8b18-a66b5a5566df",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b4198d96-a3ba-4515-a42b-2934e1d149d9"
+    },
+    {
+      "collection": "messages",
+      "index": 230,
+      "id": "c316f6ab-103f-4e20-8fe6-daa4312ec685",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f46aa66-2d09-4732-9a71-72691195c0d4"
+    },
+    {
+      "collection": "messages",
+      "index": 231,
+      "id": "2f69e326-a3ab-4001-b06e-dd65468d83a9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7b8c04d4-d3e5-47a3-a00a-bb959f186d77"
+    },
+    {
+      "collection": "messages",
+      "index": 232,
+      "id": "0529042a-82ff-470b-940c-5e492d8ddab2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3ccd251e-22f5-4b64-929f-a412d285e6e1"
+    },
+    {
+      "collection": "messages",
+      "index": 233,
+      "id": "1c94295e-6aa6-4eda-ae72-06f1af652281",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.23453b76-c372-4a47-9a69-67c6ac3d4a58"
+    },
+    {
+      "collection": "messages",
+      "index": 234,
+      "id": "20b820a0-3992-4ee4-a032-e272bae557b7",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7d64ca4a-d6f0-4b49-9dfa-d509aecd5dad"
+    },
+    {
+      "collection": "messages",
+      "index": 235,
+      "id": "de21d154-551e-4cff-8e9e-f33f39ba113e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8669c9f3-c75f-48a9-9e80-f97563298197"
+    },
+    {
+      "collection": "messages",
+      "index": 236,
+      "id": "b3aaa550-58aa-451e-a412-627d49995aa4",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.85cd7d80-7c48-4728-af6c-b45f7ce3a8c5"
+    },
+    {
+      "collection": "messages",
+      "index": 237,
+      "id": "88bfb6ea-ef64-4b90-9c76-26426cca2198",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.e3f95944-a657-48a5-a258-f11512de08c0"
+    },
+    {
+      "collection": "messages",
+      "index": 238,
+      "id": "41e87353-1d64-4ce7-8d2c-bab1159bd48e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3b8936b4-32d4-464a-8b01-0e416703dc3e"
+    },
+    {
+      "collection": "messages",
+      "index": 239,
+      "id": "3b7d6dc2-ad6e-44df-8247-5ac4499f11c5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a09dca63-325b-4377-b260-1f327896dd19"
+    },
+    {
+      "collection": "messages",
+      "index": 240,
+      "id": "d0012c02-7212-449e-96b4-bcd3eab9c5ae",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 241,
+      "id": "cad1e791-1c0e-4727-975c-874303da020b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.5dcce40f-465b-4307-9358-7833cb7ec62e"
+    },
+    {
+      "collection": "messages",
+      "index": 242,
+      "id": "efdc4912-ffe7-475f-b323-5f18269e1790",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6303b5af-3c85-4a85-9424-3d817630a5e2"
+    },
+    {
+      "collection": "messages",
+      "index": 243,
+      "id": "29077dbe-795c-4770-87a2-20822ed4200b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.13a311ca-18cb-42df-b2ab-fc67a29c29d0"
+    },
+    {
+      "collection": "messages",
+      "index": 244,
+      "id": "a7822937-fd92-4b18-bdd8-4b225926a042",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f77c7d2b-156f-471c-9f82-5444346344af"
+    },
+    {
+      "collection": "messages",
+      "index": 245,
+      "id": "89fafdcd-c8aa-462d-96fa-7864e4c34340",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.14f8c468-263c-4e63-984e-6bbc5640d2ac"
+    },
+    {
+      "collection": "messages",
+      "index": 246,
+      "id": "7e80fdbb-785a-4dbb-af32-48e60a3ddfdb",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b5727bd3-e64e-4354-a831-d4fb978419c8"
+    },
+    {
+      "collection": "messages",
+      "index": 247,
+      "id": "920891b7-ca75-47c3-b408-cabf6cd895ee",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2fa53e5a-5fc8-439b-bde0-17189b566401"
+    },
+    {
+      "collection": "messages",
+      "index": 248,
+      "id": "0068a807-dfe1-477b-8196-d1cc1d03f9bf",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.59dd5d22-7cc0-4ef4-9c57-4d184e959fd0"
+    },
+    {
+      "collection": "messages",
+      "index": 250,
+      "id": "a3804624-fd41-4cdd-a507-fafc1e6cb815",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bb9194e1-2c96-4942-ae62-3c42c0dc637e"
+    },
+    {
+      "collection": "messages",
+      "index": 251,
+      "id": "ae947ecb-b587-4202-83da-8fddd33b2643",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a09dca63-325b-4377-b260-1f327896dd19"
+    },
+    {
+      "collection": "messages",
+      "index": 252,
+      "id": "0b56a3df-0d54-4c00-892a-a3997031fe83",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 253,
+      "id": "5bcaed1a-0ee7-4a2e-8b03-955eca6d2438",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 254,
+      "id": "43cac322-6ac5-4857-a7b2-c6d6e6177975",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 255,
+      "id": "b284e205-daba-4c51-be8a-34e07459a809",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 256,
+      "id": "99c411df-9be9-4bae-bbd4-167a56dd0333",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 257,
+      "id": "2f39840f-8be8-4f20-b7ad-56ee63caf9d8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 258,
+      "id": "d6248926-5d10-402c-b899-439fccd05155",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a7b2659c-cc6b-4c3a-8025-20a75542fcd5"
+    },
+    {
+      "collection": "messages",
+      "index": 259,
+      "id": "bd9f1207-af9a-4372-9cd5-426299a23380",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6303b5af-3c85-4a85-9424-3d817630a5e2"
+    },
+    {
+      "collection": "messages",
+      "index": 260,
+      "id": "7e4f9df9-c72e-463d-9cb7-6ab7e3118d23",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f77c7d2b-156f-471c-9f82-5444346344af"
+    },
+    {
+      "collection": "messages",
+      "index": 261,
+      "id": "0dde13f7-eecd-41aa-a9a6-c5ca39f439b2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f77c7d2b-156f-471c-9f82-5444346344af"
+    },
+    {
+      "collection": "messages",
+      "index": 262,
+      "id": "9326041e-b042-4c44-882f-490ef7a44b9f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6303b5af-3c85-4a85-9424-3d817630a5e2"
+    },
+    {
+      "collection": "messages",
+      "index": 263,
+      "id": "b9c52a6f-fe0f-4863-9607-bdf5d04b3699",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6303b5af-3c85-4a85-9424-3d817630a5e2"
+    },
+    {
+      "collection": "messages",
+      "index": 264,
+      "id": "47aeced1-67b6-4f59-87ab-48d80e1f7aa3",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6303b5af-3c85-4a85-9424-3d817630a5e2"
+    },
+    {
+      "collection": "messages",
+      "index": 265,
+      "id": "34d5c3d6-a209-4b2d-9140-6154225b1c87",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.14f8c468-263c-4e63-984e-6bbc5640d2ac"
+    },
+    {
+      "collection": "messages",
+      "index": 266,
+      "id": "134118d9-92d6-476b-84f6-25cb7e22b216",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.13a311ca-18cb-42df-b2ab-fc67a29c29d0"
+    },
+    {
+      "collection": "messages",
+      "index": 267,
+      "id": "4c079650-1a23-449b-9cdf-7f68d4d6701b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b5727bd3-e64e-4354-a831-d4fb978419c8"
+    },
+    {
+      "collection": "messages",
+      "index": 268,
+      "id": "01405fbe-128d-42dc-b027-8529515f39e5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b5727bd3-e64e-4354-a831-d4fb978419c8"
+    },
+    {
+      "collection": "messages",
+      "index": 269,
+      "id": "ae5c3c4c-e6c7-42d3-b146-6de9459d7bee",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.b5727bd3-e64e-4354-a831-d4fb978419c8"
+    },
+    {
+      "collection": "messages",
+      "index": 270,
+      "id": "de3559e1-573e-4a0b-afd8-4f82931ee955",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.59dd5d22-7cc0-4ef4-9c57-4d184e959fd0"
+    },
+    {
+      "collection": "messages",
+      "index": 271,
+      "id": "09fddcc8-3d95-478f-899f-a58cc9112f2f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2fa53e5a-5fc8-439b-bde0-17189b566401"
+    },
+    {
+      "collection": "messages",
+      "index": 272,
+      "id": "3cc3d133-9470-4775-bb0d-75f020a0764d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bb9194e1-2c96-4942-ae62-3c42c0dc637e"
+    },
+    {
+      "collection": "messages",
+      "index": 273,
+      "id": "430216bf-848d-4296-87cc-f2dcf901422a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bb9194e1-2c96-4942-ae62-3c42c0dc637e"
+    },
+    {
+      "collection": "messages",
+      "index": 274,
+      "id": "cde9e0b3-03d0-4f48-b253-506a00f6692e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.cb55aa1a-67d7-4641-868e-f8ecf2257eca"
+    },
+    {
+      "collection": "messages",
+      "index": 275,
+      "id": "98c93af1-66e2-404d-b9a2-0a77f69ec0fd",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.cb55aa1a-67d7-4641-868e-f8ecf2257eca"
+    },
+    {
+      "collection": "messages",
+      "index": 276,
+      "id": "448830c6-3ba0-4430-b5e8-2d944092225d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.cb55aa1a-67d7-4641-868e-f8ecf2257eca"
+    },
+    {
+      "collection": "messages",
+      "index": 285,
+      "id": "4d28e58a-0b5a-4186-9721-94ec3810abe5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.dc04d52d-324f-401d-8c82-bff9e1223222"
+    },
+    {
+      "collection": "messages",
+      "index": 286,
+      "id": "58e7323c-9d9c-493b-958e-0f13f01bb5cc",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.dc04d52d-324f-401d-8c82-bff9e1223222"
+    },
+    {
+      "collection": "messages",
+      "index": 287,
+      "id": "bb53f946-73d9-4398-a23b-a73f3b0fd1f4",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 288,
+      "id": "8c673cb9-10bd-415a-b22c-7d41e6c0f6c4",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 289,
+      "id": "c38636a2-6913-44a4-8c86-b241fc1a83a5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 290,
+      "id": "edfc9d09-a4fd-4660-951a-265a6588010e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 291,
+      "id": "17079eed-91e8-407f-9d00-283c6856e449",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8b83aed8-4f30-4558-8f26-3f2050587d98"
+    },
+    {
+      "collection": "messages",
+      "index": 292,
+      "id": "a8d59566-e9a2-40b3-8b27-8186831da9f1",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 293,
+      "id": "7c14ec42-f7b1-4240-8765-088028014a94",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.438f881d-aeef-42c0-9c8f-3a1aaf9014a9"
+    },
+    {
+      "collection": "messages",
+      "index": 294,
+      "id": "5e92943b-a0e9-4caf-996d-9e4cdf3bf7a9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8c54b6db-6e41-4d24-b352-110221d5ebba"
+    },
+    {
+      "collection": "messages",
+      "index": 295,
+      "id": "14da9622-2014-4f34-b52f-23d4cefa6d65",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 296,
+      "id": "d7350646-a67c-4a38-840c-668cda9e37b4",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.9dc718a9-98a7-4195-8cd4-77657cc83965"
+    },
+    {
+      "collection": "messages",
+      "index": 297,
+      "id": "54ac898f-1522-4375-9552-8900f165fb5a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8b83aed8-4f30-4558-8f26-3f2050587d98"
+    },
+    {
+      "collection": "messages",
+      "index": 298,
+      "id": "90c5bfa7-72b1-4ded-97ff-f7e2ca154841",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8b83aed8-4f30-4558-8f26-3f2050587d98"
+    },
+    {
+      "collection": "messages",
+      "index": 299,
+      "id": "af71ebff-488e-4537-8768-2beb7dffdd58",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 300,
+      "id": "b1f01b69-75c4-4e28-9a86-f1b8b291b06d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d7e04002-9a55-4185-b1c1-2f0b44164ae5"
+    },
+    {
+      "collection": "messages",
+      "index": 301,
+      "id": "d37dd7ee-1f37-408d-8ffa-f0f3dfe65ec0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.8b83aed8-4f30-4558-8f26-3f2050587d98"
+    },
+    {
+      "collection": "messages",
+      "index": 302,
+      "id": "01849c2f-fb60-4a9d-9c8f-a477d4ca5dd7",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c0309eb3-a31a-45cd-94c8-ba61c207def7"
+    },
+    {
+      "collection": "messages",
+      "index": 303,
+      "id": "b7526992-cf06-4111-a4c3-159ac642c6ff",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7b9ff7d9-efee-4e1b-8c3b-488015762c84"
+    },
+    {
+      "collection": "messages",
+      "index": 304,
+      "id": "0c1863ca-f3ec-4641-9d92-909044514311",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a4726437-6721-4adc-bf48-905f95519661"
+    },
+    {
+      "collection": "messages",
+      "index": 305,
+      "id": "877365da-cd1d-4e0b-a823-abe7ce9de16a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a4726437-6721-4adc-bf48-905f95519661"
+    },
+    {
+      "collection": "messages",
+      "index": 308,
+      "id": "87d53959-b37d-4844-a72c-64ebed4e1e39",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7842ccad-77ed-4f32-b1cc-3cc6add21290"
+    },
+    {
+      "collection": "messages",
+      "index": 362,
+      "id": "63179a96-c3a2-400d-8b7d-43b3935f4d69",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f403cf72-67c9-45f4-8959-d565fe7d30ca"
+    },
+    {
+      "collection": "messages",
+      "index": 363,
+      "id": "fb2d9eed-866c-45ca-937d-357cb3d7455d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2a3cbc95-dbd6-474f-b2d1-b57e6333205e"
+    },
+    {
+      "collection": "messages",
+      "index": 364,
+      "id": "c1fcfa4b-80cd-4dd8-8e92-9e59fe61a361",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f2495717-4d36-45fd-9258-fb67cd946f0b"
+    },
+    {
+      "collection": "messages",
+      "index": 365,
+      "id": "b5443c9a-4eb0-4de9-bb0c-72cfe1ad1925",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2a3cbc95-dbd6-474f-b2d1-b57e6333205e"
+    },
+    {
+      "collection": "messages",
+      "index": 366,
+      "id": "a4c40a2c-331f-4f57-be39-5d8f76e31066",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f403cf72-67c9-45f4-8959-d565fe7d30ca"
+    },
+    {
+      "collection": "messages",
+      "index": 367,
+      "id": "3797f810-0279-434d-8507-ffcf133b4d0b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 368,
+      "id": "eeb0268c-2f57-4eda-a695-f2fa24e493f9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 369,
+      "id": "86526c40-b5fc-4d86-be46-5084d450f7ec",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 370,
+      "id": "e0ddd25c-a6f6-4424-982a-a017ece89fa2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 371,
+      "id": "a503be6e-11c1-4fc2-ba54-2735b343f554",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 372,
+      "id": "70accf53-97ad-4bc7-82a3-a82ea1bace3e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f2495717-4d36-45fd-9258-fb67cd946f0b"
+    },
+    {
+      "collection": "messages",
+      "index": 373,
+      "id": "f49c26cc-ee6b-4739-aa57-97e14349a5ad",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f2495717-4d36-45fd-9258-fb67cd946f0b"
+    },
+    {
+      "collection": "messages",
+      "index": 374,
+      "id": "de2cd324-ae91-448b-9038-50b140c47d09",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.44736c37-578c-4e10-baf3-7cfb012e8bc5"
+    },
+    {
+      "collection": "messages",
+      "index": 375,
+      "id": "0130b14f-d72d-45d3-af17-5d255ef6e6ea",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 376,
+      "id": "07ba490a-6633-4d2a-848a-89d682610837",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.44736c37-578c-4e10-baf3-7cfb012e8bc5"
+    },
+    {
+      "collection": "messages",
+      "index": 377,
+      "id": "00cc1177-2a5f-4455-8ef9-979884c39b17",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.06c6d091-8974-480b-b882-f5a3cd37bf27"
+    },
+    {
+      "collection": "messages",
+      "index": 378,
+      "id": "33b167e7-b707-4157-ae08-6dcc23d571dc",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.98bbe683-2685-4c65-bab6-a8fdc582b050"
+    },
+    {
+      "collection": "messages",
+      "index": 379,
+      "id": "35a39d11-5506-4589-a046-28efb6c0e0e9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4fc9e1e2-d162-4a33-8594-33f61a7972a4"
+    },
+    {
+      "collection": "messages",
+      "index": 380,
+      "id": "ec8dfa3d-6741-49f9-bbfb-5f1530f106de",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.44736c37-578c-4e10-baf3-7cfb012e8bc5"
+    },
+    {
+      "collection": "messages",
+      "index": 381,
+      "id": "367206fb-0ec9-4e2d-98d9-affb324d5308",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4fc9e1e2-d162-4a33-8594-33f61a7972a4"
+    },
+    {
+      "collection": "messages",
+      "index": 382,
+      "id": "2cff66d8-e889-4ac2-874a-4572bac06837",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4fc9e1e2-d162-4a33-8594-33f61a7972a4"
+    },
+    {
+      "collection": "messages",
+      "index": 383,
+      "id": "021776af-8ac5-4783-97b8-f45487194ddf",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.98bbe683-2685-4c65-bab6-a8fdc582b050"
+    },
+    {
+      "collection": "messages",
+      "index": 384,
+      "id": "41dbdc46-5bf9-4dbd-a39d-aa20e045ae7c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.98bbe683-2685-4c65-bab6-a8fdc582b050"
+    },
+    {
+      "collection": "messages",
+      "index": 385,
+      "id": "3021d58b-966e-4d9a-9025-f3764d3a0f35",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c0b0fc9b-b4ff-4593-bad4-9b91d303a4ac"
+    },
+    {
+      "collection": "messages",
+      "index": 386,
+      "id": "8a7f759f-1e02-4951-aaac-eae294f0971e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.98bbe683-2685-4c65-bab6-a8fdc582b050"
+    },
+    {
+      "collection": "messages",
+      "index": 387,
+      "id": "ad4d8f57-ec36-423b-b3a3-06324820815a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bfbb01fd-6414-40c3-ac47-a55590fbf7de"
+    },
+    {
+      "collection": "messages",
+      "index": 741,
+      "id": "d3731c20-7906-4145-b67c-7df246e39644",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bdb639af-053e-4b15-93e0-ebe548ac401a"
+    },
+    {
+      "collection": "messages",
+      "index": 837,
+      "id": "60af2d20-3bf4-4bac-b830-323c598a9d5c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bdb639af-053e-4b15-93e0-ebe548ac401a"
+    },
+    {
+      "collection": "messages",
+      "index": 838,
+      "id": "0ef5d25b-4bb3-412c-9aa8-6fd5311b004b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bdb639af-053e-4b15-93e0-ebe548ac401a"
+    },
+    {
+      "collection": "messages",
+      "index": 927,
+      "id": "7da0d458-5162-4602-9e11-fcd015b7ef72",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f0fce9c8-7329-4812-851a-f8f5c044d8df"
+    },
+    {
+      "collection": "messages",
+      "index": 928,
+      "id": "c2ded894-2a03-4f6e-adf3-8d617b47fbf5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f0fce9c8-7329-4812-851a-f8f5c044d8df"
+    },
+    {
+      "collection": "messages",
+      "index": 929,
+      "id": "58ae2e56-c31a-4c40-8dd2-ff3b10103bbe",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.42a538dc-a710-4841-9cfd-ee4c40def9b6"
+    },
+    {
+      "collection": "messages",
+      "index": 930,
+      "id": "eb9f7422-b3d9-4fed-bc78-82406b5f2a1a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.51267a01-49fa-4231-97a1-0002a1302882"
+    },
+    {
+      "collection": "messages",
+      "index": 931,
+      "id": "2760b6d4-2a2d-43da-9bc6-b74019f63e83",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.51267a01-49fa-4231-97a1-0002a1302882"
+    },
+    {
+      "collection": "messages",
+      "index": 932,
+      "id": "77bb4e34-7ba5-474d-a87c-00afa2d16f91",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.51267a01-49fa-4231-97a1-0002a1302882"
+    },
+    {
+      "collection": "messages",
+      "index": 933,
+      "id": "57a91a1f-2041-489f-9d42-b17c832ff4b8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7c692700-6050-44c2-9021-d7969ee93c66"
+    },
+    {
+      "collection": "messages",
+      "index": 934,
+      "id": "f1a3a6d0-3a72-4f8d-8d71-8d3f9e2d4c27",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f042eda1-b4a1-482d-8d07-eeb7e4141fba"
+    },
+    {
+      "collection": "messages",
+      "index": 935,
+      "id": "69af6eb6-c3df-4ec6-a4bb-49b6f8c89d96",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.229e16c4-eb5c-4f37-b9dd-2dc824c1a045"
+    },
+    {
+      "collection": "messages",
+      "index": 936,
+      "id": "5998b04e-29d0-4b1c-80a5-047227eac47d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.a0eb6876-7480-4f73-ab05-c867d3fe3b43"
+    },
+    {
+      "collection": "messages",
+      "index": 937,
+      "id": "502c832f-b5a3-4aac-bc69-e705cf862a5e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 938,
+      "id": "4cdd744d-743f-48f2-9794-e7932a5a8314",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 939,
+      "id": "b3195e7e-0c46-4150-9016-4921808a1e79",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 940,
+      "id": "2e06cd87-bdf2-4bc8-900a-8b0fecc98d8a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 941,
+      "id": "958b0644-9198-4a11-a006-d4ebf271c5cb",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 942,
+      "id": "e22ba1be-7e0a-4d6a-955f-6218cdebb655",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 943,
+      "id": "41302a90-1a6e-46fe-a4fe-be6eef5d9a14",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 944,
+      "id": "6d8d7b06-0baa-450d-ab03-56285f49e236",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c16883fd-e7e3-4d0e-974f-3811843e188c"
+    },
+    {
+      "collection": "messages",
+      "index": 945,
+      "id": "ed394b14-6ca9-4d09-81cc-795cb70bee2e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 946,
+      "id": "8e66f39b-3516-454e-ac97-4fa200e7c8a9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 947,
+      "id": "97fb8895-22d1-4fc1-9979-2f8dad1703e5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 948,
+      "id": "9c4e7d27-0f25-42c1-89ca-4aecce4f2a9b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 949,
+      "id": "42e25ba9-8765-4a4a-90a7-b12a0780b915",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 950,
+      "id": "d8d6664d-2651-4f55-bfb6-0a4fde2981f2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fdfa4ca0-493f-445b-a267-294a2f18f2b0"
+    },
+    {
+      "collection": "messages",
+      "index": 951,
+      "id": "e427af60-f8c4-4ff1-845b-aff57e9eeeb4",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fcb6e811-0f60-4e93-82cf-f8109d450df4"
+    },
+    {
+      "collection": "messages",
+      "index": 952,
+      "id": "fa0a54ea-31af-4c36-970e-7f9d0b4e9902",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.186d4833-b35a-46b4-a37a-24117f500933"
+    },
+    {
+      "collection": "messages",
+      "index": 953,
+      "id": "bbb7e53f-c798-4d1f-ad9a-9cafcc431964",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2a21207b-801b-4419-b2ae-a06769eda1f9"
+    },
+    {
+      "collection": "messages",
+      "index": 1688,
+      "id": "7337acce-f4bb-4479-bc1e-3db336980fb1",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.0af61fbd-099c-43c2-b8ad-ad8a8ecbfbc1"
+    },
+    {
+      "collection": "messages",
+      "index": 1689,
+      "id": "d90a0a56-d61b-42b2-b9a4-662c2b7e5497",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.24e6ccd0-e86e-4f29-a3bd-88fbe4ee2a1d"
+    },
+    {
+      "collection": "messages",
+      "index": 1690,
+      "id": "8f3ffa7c-b2f0-4d85-bb51-16caa914d64c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.24e6ccd0-e86e-4f29-a3bd-88fbe4ee2a1d"
+    },
+    {
+      "collection": "messages",
+      "index": 1691,
+      "id": "6faaf69e-fdc6-4348-ac52-27bf4411b790",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.fcbae064-a715-48ed-8f04-6617370a20cc"
+    },
+    {
+      "collection": "messages",
+      "index": 1692,
+      "id": "d55aedc2-fa96-429d-8d88-afa3871b0b23",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.63448a43-7de8-404c-80b6-dbaeab773e01"
+    },
+    {
+      "collection": "messages",
+      "index": 1693,
+      "id": "9f0c43de-9200-4e02-b0a8-d55f2db55c5c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.63448a43-7de8-404c-80b6-dbaeab773e01"
+    },
+    {
+      "collection": "messages",
+      "index": 1694,
+      "id": "6422a04d-b453-4e44-985a-2eb70b08e610",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c783e50c-afb6-4adb-af74-ca7458207445"
+    },
+    {
+      "collection": "messages",
+      "index": 1700,
+      "id": "210fdc2b-f0ae-4314-bab1-9b7474ac3d7f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.da76ce64-7941-4535-b7c6-c456adca8679"
+    },
+    {
+      "collection": "messages",
+      "index": 1808,
+      "id": "003cf3e2-a6ea-47c4-97c1-ed2a8ddd28bb",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.93a08713-ac40-4723-83a5-2287f19feda9"
+    },
+    {
+      "collection": "messages",
+      "index": 1809,
+      "id": "8412a860-ff95-4067-a5a9-7b994b016963",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.28a3ff63-0641-4bd1-a8f6-a67528f03d42"
+    },
+    {
+      "collection": "messages",
+      "index": 1810,
+      "id": "36bed9d9-d36f-42fd-af1b-fe4514434264",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.671c6aaf-1a9b-499a-a7ab-b873edb84f4d"
+    },
+    {
+      "collection": "messages",
+      "index": 1990,
+      "id": "cb85e737-dbdb-4b93-bf99-5da04ea27b55",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.778cee35-3c3d-4364-a556-0004f01bda1c"
+    },
+    {
+      "collection": "messages",
+      "index": 1991,
+      "id": "030d648e-bca5-46b2-9441-7f0c014622b6",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.778cee35-3c3d-4364-a556-0004f01bda1c"
+    },
+    {
+      "collection": "messages",
+      "index": 1992,
+      "id": "e47db1e8-1f06-4ee2-a0fe-20cbea99586c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4b7523a2-525b-4278-9fff-4385fe3a06d9"
+    },
+    {
+      "collection": "messages",
+      "index": 1993,
+      "id": "a73224a1-c90e-4187-8145-45bd78eb525c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4b7523a2-525b-4278-9fff-4385fe3a06d9"
+    },
+    {
+      "collection": "messages",
+      "index": 1994,
+      "id": "3b5affdf-d8e3-410e-87df-703b7426f60c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4b7523a2-525b-4278-9fff-4385fe3a06d9"
+    },
+    {
+      "collection": "messages",
+      "index": 1995,
+      "id": "fd7302c5-1709-4f5e-937e-515fb62b77f5",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4b7523a2-525b-4278-9fff-4385fe3a06d9"
+    },
+    {
+      "collection": "messages",
+      "index": 1996,
+      "id": "1f1af894-ebd2-4c1a-a652-ad6c7050066a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.4b7523a2-525b-4278-9fff-4385fe3a06d9"
+    },
+    {
+      "collection": "messages",
+      "index": 1997,
+      "id": "c05c1884-952a-4398-80aa-bc56de72f5e9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f648f56-8e96-4a3c-a39e-4daad2b04529"
+    },
+    {
+      "collection": "messages",
+      "index": 1998,
+      "id": "7dace370-3f1d-40b2-989c-da205d7787fe",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f648f56-8e96-4a3c-a39e-4daad2b04529"
+    },
+    {
+      "collection": "messages",
+      "index": 1999,
+      "id": "327912d7-58df-4a96-a94c-7977b055e49d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f0e0765-47a2-4959-bfb8-c63d6a2a21c7"
+    },
+    {
+      "collection": "messages",
+      "index": 2000,
+      "id": "2256c0f8-62c8-4699-87fd-4288f550be7b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f0e0765-47a2-4959-bfb8-c63d6a2a21c7"
+    },
+    {
+      "collection": "messages",
+      "index": 2001,
+      "id": "983bac7b-862c-453b-bb0d-c8da462381da",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f0e0765-47a2-4959-bfb8-c63d6a2a21c7"
+    },
+    {
+      "collection": "messages",
+      "index": 2002,
+      "id": "7b717c57-b192-4dd6-8cce-859d23f8a470",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6d66ba5d-f5b8-41c6-8edf-1abd5dbd236d"
+    },
+    {
+      "collection": "messages",
+      "index": 2003,
+      "id": "2a9fe3e9-4782-4967-97e7-dd5fd6fe8ed8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.eed30c4c-fdb8-4bcf-b176-595d93ab6583"
+    },
+    {
+      "collection": "messages",
+      "index": 2004,
+      "id": "1e7e42b7-c0b1-4701-a71c-4d85a1d03e5f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.eed30c4c-fdb8-4bcf-b176-595d93ab6583"
+    },
+    {
+      "collection": "messages",
+      "index": 2005,
+      "id": "54f04880-5a84-48ca-8b1a-f3771c8e6d33",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.eed30c4c-fdb8-4bcf-b176-595d93ab6583"
+    },
+    {
+      "collection": "messages",
+      "index": 2006,
+      "id": "d32b369c-f79e-44b6-9dd9-fe7742d024a0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.eed30c4c-fdb8-4bcf-b176-595d93ab6583"
+    },
+    {
+      "collection": "messages",
+      "index": 2007,
+      "id": "cb6c6a66-8230-445d-a72f-0584bae921e0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.eed30c4c-fdb8-4bcf-b176-595d93ab6583"
+    },
+    {
+      "collection": "messages",
+      "index": 2089,
+      "id": "7735ce45-b788-4c7c-9b18-d1179e854969",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c7a9fecd-c6fa-4c8e-995d-7a5b6d59ffcf"
+    },
+    {
+      "collection": "messages",
+      "index": 2090,
+      "id": "4179ac30-9894-4551-a7cc-308efdb0d73e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c7a9fecd-c6fa-4c8e-995d-7a5b6d59ffcf"
+    },
+    {
+      "collection": "messages",
+      "index": 2091,
+      "id": "2732578c-f07a-47b3-bf4b-a17e7d1f1987",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c7a9fecd-c6fa-4c8e-995d-7a5b6d59ffcf"
+    },
+    {
+      "collection": "messages",
+      "index": 2092,
+      "id": "54f3d466-389f-4208-9331-0cef804aa044",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.c7a9fecd-c6fa-4c8e-995d-7a5b6d59ffcf"
+    },
+    {
+      "collection": "messages",
+      "index": 2093,
+      "id": "b6285e1c-a915-4f94-b778-61e54f54973d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.28314625-ea42-4c2a-a4f7-8dd35c89be48"
+    },
+    {
+      "collection": "messages",
+      "index": 2094,
+      "id": "dbd3dcbf-d9e4-40c6-bc7c-b8198f0ff462",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.28314625-ea42-4c2a-a4f7-8dd35c89be48"
+    },
+    {
+      "collection": "messages",
+      "index": 2095,
+      "id": "29004552-5313-4b6e-92f1-71995a2fd10b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.41e57bfc-9e94-440f-86b1-5e0187d4ac16"
+    },
+    {
+      "collection": "messages",
+      "index": 2096,
+      "id": "05135b64-e96a-48d8-87ea-b0f61b53303a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.41e57bfc-9e94-440f-86b1-5e0187d4ac16"
+    },
+    {
+      "collection": "messages",
+      "index": 2097,
+      "id": "7c422796-97cd-48b1-8e76-3b4b3878b94b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.41e57bfc-9e94-440f-86b1-5e0187d4ac16"
+    },
+    {
+      "collection": "messages",
+      "index": 2098,
+      "id": "92189102-cdf6-487e-9c22-94a8b94dfb5f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6e009e0f-26da-4c43-b36c-98a064264a30"
+    },
+    {
+      "collection": "messages",
+      "index": 2099,
+      "id": "4ebeeb1d-3795-4523-9eb4-87c98de20cb0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6e009e0f-26da-4c43-b36c-98a064264a30"
+    },
+    {
+      "collection": "messages",
+      "index": 2100,
+      "id": "f3cd75ed-2d5d-4c47-8357-eb4965ac125c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6e009e0f-26da-4c43-b36c-98a064264a30"
+    },
+    {
+      "collection": "messages",
+      "index": 2101,
+      "id": "d0158e44-8ad2-4da6-b2c1-7a2dd87e8906",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6e009e0f-26da-4c43-b36c-98a064264a30"
+    },
+    {
+      "collection": "messages",
+      "index": 2102,
+      "id": "bea90a5a-ad82-47e0-a458-440b2893f12b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.6e009e0f-26da-4c43-b36c-98a064264a30"
+    },
+    {
+      "collection": "messages",
+      "index": 2103,
+      "id": "defdf47e-1c55-4926-95b7-68774b994f8e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7fa6d75e-42e0-4e2b-bced-5f6d7fe82a45"
+    },
+    {
+      "collection": "messages",
+      "index": 2104,
+      "id": "b7dc428f-ebf5-4b93-b084-9c25e3df2619",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7fa6d75e-42e0-4e2b-bced-5f6d7fe82a45"
+    },
+    {
+      "collection": "messages",
+      "index": 2105,
+      "id": "6de5d099-985c-4eb0-ad50-8d8662d81090",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7fa6d75e-42e0-4e2b-bced-5f6d7fe82a45"
+    },
+    {
+      "collection": "messages",
+      "index": 2106,
+      "id": "c1efa009-240b-47bf-a40a-39835deb5aef",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7fa6d75e-42e0-4e2b-bced-5f6d7fe82a45"
+    },
+    {
+      "collection": "messages",
+      "index": 2107,
+      "id": "e56452e5-cc3b-4873-bd90-25d4f8900ca8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.7fa6d75e-42e0-4e2b-bced-5f6d7fe82a45"
+    },
+    {
+      "collection": "messages",
+      "index": 2108,
+      "id": "1f3bd025-85d3-44f1-bc47-3787e22ec53d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.52ee1a7f-dab3-4387-b80b-c6a8d976d999"
+    },
+    {
+      "collection": "messages",
+      "index": 2109,
+      "id": "a60a7cd2-0ef8-4265-a13c-381a92a9d216",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.db9d2211-dd9f-4466-aada-1a68a255d0e7"
+    },
+    {
+      "collection": "messages",
+      "index": 2110,
+      "id": "a009000e-248d-48fa-bd9c-8c9c0ced6aa2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.db9d2211-dd9f-4466-aada-1a68a255d0e7"
+    },
+    {
+      "collection": "messages",
+      "index": 2111,
+      "id": "12385f9b-3b67-46b8-9001-5becd5240c68",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.db9d2211-dd9f-4466-aada-1a68a255d0e7"
+    },
+    {
+      "collection": "messages",
+      "index": 2112,
+      "id": "002e6cfb-4e4b-4dc1-8a84-4bf6bc11dcd9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.52ee1a7f-dab3-4387-b80b-c6a8d976d999"
+    },
+    {
+      "collection": "messages",
+      "index": 2113,
+      "id": "6d227da6-bdfd-42e8-99a3-48c52ac851fa",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.72d6e406-144d-4787-9bfc-e1780e75b35c"
+    },
+    {
+      "collection": "messages",
+      "index": 2114,
+      "id": "3e5115ad-8fff-4a73-b182-ccb075dc26e2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.72d6e406-144d-4787-9bfc-e1780e75b35c"
+    },
+    {
+      "collection": "messages",
+      "index": 2115,
+      "id": "fb42e459-25da-45b5-a07b-c32bd15f6b5d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.19dac349-19fe-4a87-b555-280cc0043d66"
+    },
+    {
+      "collection": "messages",
+      "index": 2116,
+      "id": "476d0f8d-008f-4446-a27d-e5081dff6845",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.19dac349-19fe-4a87-b555-280cc0043d66"
+    },
+    {
+      "collection": "messages",
+      "index": 2117,
+      "id": "4c62fd81-5c97-40bf-bee5-fa7e9b3b6216",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.19dac349-19fe-4a87-b555-280cc0043d66"
+    },
+    {
+      "collection": "messages",
+      "index": 2118,
+      "id": "6c21f6b9-058c-4baf-85a5-86ce924c0d1a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.19dac349-19fe-4a87-b555-280cc0043d66"
+    },
+    {
+      "collection": "messages",
+      "index": 2119,
+      "id": "c9f912d7-085f-43d4-b688-0c36f25f1e90",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.ef84cc16-eda4-4130-98ae-4ffbf7a24895"
+    },
+    {
+      "collection": "messages",
+      "index": 2120,
+      "id": "589996fa-4b86-42dd-856f-fe917cededff",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.ef84cc16-eda4-4130-98ae-4ffbf7a24895"
+    },
+    {
+      "collection": "messages",
+      "index": 2121,
+      "id": "1da04dbb-09f3-4ca3-9064-7ed1f827b13e",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f41115da-4eb4-41e7-a11d-16a0a72b5679"
+    },
+    {
+      "collection": "messages",
+      "index": 2122,
+      "id": "1a4e477d-d7ec-4feb-a9ed-2db75db3d55f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f41115da-4eb4-41e7-a11d-16a0a72b5679"
+    },
+    {
+      "collection": "messages",
+      "index": 2123,
+      "id": "158d7345-680f-445f-935b-a234837b9500",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f41115da-4eb4-41e7-a11d-16a0a72b5679"
+    },
+    {
+      "collection": "messages",
+      "index": 2124,
+      "id": "314227ff-ea4a-44f0-a809-83135877c9a7",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f41115da-4eb4-41e7-a11d-16a0a72b5679"
+    },
+    {
+      "collection": "messages",
+      "index": 2125,
+      "id": "fdb95ca6-3580-4d23-99fb-2aeddf846e4d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2126,
+      "id": "84ceb628-f361-48cc-95f3-afbf08a19f28",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2127,
+      "id": "c958f59b-f3b1-4ca3-9551-d4f4f99d7d0a",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2128,
+      "id": "60435edc-3b84-4a80-8ecd-6a4e7da0cfc3",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2129,
+      "id": "53c70bc9-cb86-4b1f-9587-2ba122b95839",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2130,
+      "id": "67212fa5-3c2d-4867-8bdc-cd7f2f4cde79",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2bae0190-998c-4121-99b2-abd2fa50dbc6"
+    },
+    {
+      "collection": "messages",
+      "index": 2131,
+      "id": "3799b8a2-8475-4609-b20a-ceab9aa42e93",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.1c55e180-4506-448e-a932-cf04c2eeba2b"
+    },
+    {
+      "collection": "messages",
+      "index": 2132,
+      "id": "a30eecfb-2dc4-4e87-a260-fff2984e9d1f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.72d6e406-144d-4787-9bfc-e1780e75b35c"
+    },
+    {
+      "collection": "messages",
+      "index": 2133,
+      "id": "e285f3cb-2790-4dac-8a11-35d21153063b",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.5a2a40fb-b6dd-4945-81e6-aeba3e6a3920"
+    },
+    {
+      "collection": "messages",
+      "index": 2134,
+      "id": "26b39253-f882-4403-b2ee-7d0b56cbb63c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.5a2a40fb-b6dd-4945-81e6-aeba3e6a3920"
+    },
+    {
+      "collection": "messages",
+      "index": 2310,
+      "id": "bfc2ee4f-6190-4cba-9ccd-5ed3bafc5d58",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.f060f1f9-be73-44ec-9db0-04f1d2062d7f"
+    },
+    {
+      "collection": "messages",
+      "index": 2311,
+      "id": "2ba88177-d4b1-4331-913d-c4a6ac5762b3",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.d627ef85-14f5-4731-8e13-36c3233bcb89"
+    },
+    {
+      "collection": "messages",
+      "index": 2819,
+      "id": "3b1fad2b-717f-4233-ba7b-9befe1e9eb55",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.601f4bc4-b61b-4cb8-a376-e3a0221abfc7"
+    },
+    {
+      "collection": "messages",
+      "index": 3025,
+      "id": "b45cb210-637d-4edb-b916-6e828d430800",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.bab9e2af-82ed-4dd1-b266-acee7f8cca65"
+    },
+    {
+      "collection": "messages",
+      "index": 3026,
+      "id": "be033708-1958-4add-b21f-a4648d92c2d2",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3027,
+      "id": "ca09a6ef-1351-4d10-8bfd-9afaf49f5a16",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3028,
+      "id": "b3a0694d-6365-4a58-bcda-ae62f7d4077c",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3029,
+      "id": "d579b399-8016-4dd5-8cfb-72b81d50d92f",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3030,
+      "id": "89ec4db2-11df-4f7c-bf43-fb5db72f3e77",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3031,
+      "id": "5547ccc6-68ea-4882-9c25-bf4d8602e191",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3032,
+      "id": "0248e313-97bf-4a80-b025-d605cf8fdfc1",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3033,
+      "id": "b59911ea-8387-41b1-ab43-911eb3d9fddf",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3034,
+      "id": "62e341db-7428-4262-9089-bb30a3c07c33",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3035,
+      "id": "7b35648f-1c58-4906-8158-c42e8b94d1e8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3036,
+      "id": "46b6e251-03a4-4713-b537-391359fbb2cb",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.df30ddf3-517b-4818-bec6-5a177af6de7d"
+    },
+    {
+      "collection": "messages",
+      "index": 3037,
+      "id": "514b89a1-13ba-43f3-9cbb-17210786ec95",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2c03cb6a-f7ca-4c3d-9a0f-604fd36d7125"
+    },
+    {
+      "collection": "messages",
+      "index": 3038,
+      "id": "8c08190c-3838-4262-b5a5-3e8c17b75f09",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.2c03cb6a-f7ca-4c3d-9a0f-604fd36d7125"
+    },
+    {
+      "collection": "messages",
+      "index": 3039,
+      "id": "58a9f09e-d111-4535-86b3-c8cf9c7d8ac0",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.1b63500c-df4a-4816-a7f8-348244e62c3a"
+    },
+    {
+      "collection": "messages",
+      "index": 3040,
+      "id": "c44b9174-1eca-4844-8390-5ac3c863c7c8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.13f72c62-7994-4c6c-9759-9deb48d89dbe"
+    },
+    {
+      "collection": "messages",
+      "index": 3041,
+      "id": "c4efbc4d-3c8f-46fc-9192-43d48ca726c8",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.13f72c62-7994-4c6c-9759-9deb48d89dbe"
+    },
+    {
+      "collection": "messages",
+      "index": 3042,
+      "id": "3e4d2fc6-8cf5-4ac8-ab21-04a2ca504627",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.13f72c62-7994-4c6c-9759-9deb48d89dbe"
+    },
+    {
+      "collection": "messages",
+      "index": 3043,
+      "id": "6ae0b006-7d50-490b-9cd2-5fd4957b7c25",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.487f46fa-59c9-414a-8051-e59c3c6982ee"
+    },
+    {
+      "collection": "messages",
+      "index": 3044,
+      "id": "72f57eb0-b620-4b46-83c6-b12588560d7d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.487f46fa-59c9-414a-8051-e59c3c6982ee"
+    },
+    {
+      "collection": "messages",
+      "index": 3045,
+      "id": "d681192b-13ab-4f3a-af98-0e1a5ce9cd3d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.9031760d-40ab-46d7-aafb-c6dbc2182ed5"
+    },
+    {
+      "collection": "messages",
+      "index": 3229,
+      "id": "10390e0f-6713-439d-9167-fc38d2af2a66",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.3f4e1927-870c-4e9f-ab55-ef34f064ffe2"
+    },
+    {
+      "collection": "messages",
+      "index": 3230,
+      "id": "e8a69638-467d-4768-a917-ddd4158be84d",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.04ea4020-221b-4acc-bf1d-ddbbfa6d1786"
+    },
+    {
+      "collection": "messages",
+      "index": 3231,
+      "id": "7009fd15-1c2c-4572-95db-b1ec401adcb9",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.09f2bff1-9bdc-48d0-96b3-93191bc9ab7f"
+    },
+    {
+      "collection": "messages",
+      "index": 3232,
+      "id": "4b3947ce-bc46-4a15-aeeb-ebd11e9510fb",
+      "type": "constraint",
+      "message": "conversationId references missing conversations.5eeb2c56-1c17-4625-a2e6-bc447111c928"
+    }
+  ]
+}

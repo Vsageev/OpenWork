@@ -1,4 +1,11 @@
 import { store } from '../db/index.js';
+import {
+  findAgentEnvVarIdByAgentAndKey,
+  getAgentEnvVarRecordById,
+  listActiveAgentEnvVarIdsForAgent,
+  listAgentEnvVarIdsForAgent,
+  listAgentEnvVarRecordsForAgent,
+} from '../db/repositories/agent-env-vars-repository.js';
 import { createAuditLog } from './audit-log.js';
 import { decryptSecret, encryptSecret } from '../lib/secret-crypto.js';
 
@@ -101,33 +108,20 @@ function sanitize(record: Record<string, unknown>): PublicAgentEnvVarRecord {
   };
 }
 
-function assertNoKeyCollision(agentId: string, key: string, excludeId?: string): void {
-  const existing = store.find(COLLECTION, (record) => {
-    if (record.agentId !== agentId) return false;
-    if (excludeId && record.id === excludeId) return false;
-    return normalizeEnvVarKey(String(record.key ?? '')) === key;
-  });
-
-  if (existing.length > 0) {
+async function assertNoKeyCollision(agentId: string, key: string, excludeId?: string): Promise<void> {
+  const existingId = await findAgentEnvVarIdByAgentAndKey(agentId, key, excludeId);
+  if (existingId) {
     throw new Error(`key "${key}" already exists for this agent`);
   }
 }
 
-export function listAgentEnvVars(agentId: string): PublicAgentEnvVarRecord[] {
-  return store
-    .find(COLLECTION, (record) => record.agentId === agentId)
-    .sort((left, right) => {
-      const leftActive = left.isActive !== false ? 1 : 0;
-      const rightActive = right.isActive !== false ? 1 : 0;
-      if (leftActive !== rightActive) return rightActive - leftActive;
-
-      return String(left.key ?? '').localeCompare(String(right.key ?? ''));
-    })
-    .map(sanitize);
+export async function listAgentEnvVars(agentId: string): Promise<PublicAgentEnvVarRecord[]> {
+  const rows = await listAgentEnvVarRecordsForAgent(agentId);
+  return rows.map(sanitize);
 }
 
-export function getAgentEnvVar(agentId: string, id: string): PublicAgentEnvVarRecord | null {
-  const record = store.getById(COLLECTION, id);
+export async function getAgentEnvVar(agentId: string, id: string): Promise<PublicAgentEnvVarRecord | null> {
+  const record = await getAgentEnvVarRecordById(id);
   if (!record || record.agentId !== agentId) return null;
   return sanitize(record);
 }
@@ -138,9 +132,9 @@ export async function createAgentEnvVar(
 ): Promise<PublicAgentEnvVarRecord> {
   const key = assertValidEnvVarKey(params.key);
   const value = assertNonEmptyValue(params.value, 'value');
-  assertNoKeyCollision(params.agentId, key);
+  await assertNoKeyCollision(params.agentId, key);
 
-  const record = store.insert(COLLECTION, {
+  const record = await store.insert(COLLECTION, {
     agentId: params.agentId,
     key,
     description: params.description?.trim() || null,
@@ -177,7 +171,7 @@ export async function updateAgentEnvVar(
   params: UpdateAgentEnvVarParams,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ): Promise<PublicAgentEnvVarRecord | null> {
-  const existing = store.getById(COLLECTION, id);
+  const existing = await getAgentEnvVarRecordById(id);
   if (!existing || existing.agentId !== agentId) return null;
 
   const patch: Record<string, unknown> = {};
@@ -185,7 +179,7 @@ export async function updateAgentEnvVar(
 
   if (params.key !== undefined) {
     const key = assertValidEnvVarKey(params.key);
-    assertNoKeyCollision(agentId, key, id);
+    await assertNoKeyCollision(agentId, key, id);
     patch.key = key;
     changes.key = key;
   }
@@ -209,7 +203,7 @@ export async function updateAgentEnvVar(
     changes.isActive = params.isActive;
   }
 
-  const updated = store.update(COLLECTION, id, patch);
+  const updated = await store.update(COLLECTION, id, patch);
   if (!updated) return null;
 
   if (audit) {
@@ -232,10 +226,10 @@ export async function deleteAgentEnvVar(
   id: string,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ): Promise<boolean> {
-  const existing = store.getById(COLLECTION, id);
+  const existing = await getAgentEnvVarRecordById(id);
   if (!existing || existing.agentId !== agentId) return false;
 
-  const deleted = store.delete(COLLECTION, id);
+  const deleted = await store.delete(COLLECTION, id);
   if (!deleted) return false;
 
   if (audit) {
@@ -252,29 +246,35 @@ export async function deleteAgentEnvVar(
   return true;
 }
 
-export function deleteAgentEnvVarsByAgentId(agentId: string): void {
-  store.deleteWhere(COLLECTION, (record) => record.agentId === agentId);
+export async function deleteAgentEnvVarsByAgentId(agentId: string): Promise<void> {
+  const ids = await listAgentEnvVarIdsForAgent(agentId);
+  for (const envId of ids) {
+    await store.delete(COLLECTION, envId);
+  }
 }
 
-export function listRuntimeAgentEnvVarBindings(
+export async function listRuntimeAgentEnvVarBindings(
   agentId: string,
-): Array<{ key: string; value: string; description: string | null }> {
-  const activeRecords = store.find(
-    COLLECTION,
-    (record) => record.agentId === agentId && record.isActive !== false,
-  );
+): Promise<Array<{ key: string; value: string; description: string | null }>> {
+  const ids = await listActiveAgentEnvVarIdsForAgent(agentId);
 
-  if (activeRecords.length === 0) return [];
+  if (ids.length === 0) return [];
 
   const now = new Date().toISOString();
+  const result: Array<{ key: string; value: string; description: string | null }> = [];
 
-  return activeRecords.map((record) => {
-    store.update(COLLECTION, String(record.id), { lastUsedAt: now });
+  for (const id of ids) {
+    const record = await getAgentEnvVarRecordById(id);
+    if (!record || record.agentId !== agentId || record.isActive === false) continue;
 
-    return {
+    await store.update(COLLECTION, id, { lastUsedAt: now });
+
+    result.push({
       key: String(record.key ?? ''),
       value: decryptSecret(String(record.encryptedValue ?? '')),
       description: typeof record.description === 'string' ? record.description : null,
-    };
-  });
+    });
+  }
+
+  return result;
 }

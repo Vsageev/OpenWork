@@ -1,6 +1,5 @@
-import { store } from '../db/index.js';
+import { getSetting, upsertSetting } from '../db/repositories/settings-repository.js';
 
-const SETTINGS_COLLECTION = 'settings';
 const PROJECT_SETTINGS_ID = 'project';
 
 export interface ProjectSettings {
@@ -31,7 +30,7 @@ function asProjectSettings(rec: Record<string, unknown>): ProjectSettings {
       ? rec.autoAttachOversizedPasteAsTextFile
       : typeof rec.autoConvertLargePastedTextToAttachment === 'boolean'
         ? rec.autoConvertLargePastedTextToAttachment
-      : true;
+        : true;
 
   return {
     id: typeof rec.id === 'string' ? rec.id : PROJECT_SETTINGS_ID,
@@ -46,9 +45,9 @@ function asProjectSettings(rec: Record<string, unknown>): ProjectSettings {
   };
 }
 
-export function getProjectSettings(): ProjectSettings {
-  const existing = store.getById(SETTINGS_COLLECTION, PROJECT_SETTINGS_ID) as ProjectSettings | null;
-  if (existing) return asProjectSettings(existing as unknown as Record<string, unknown>);
+export async function getProjectSettings(): Promise<ProjectSettings> {
+  const existing = await getSetting(PROJECT_SETTINGS_ID);
+  if (existing) return asProjectSettings(existing as Record<string, unknown>);
   return {
     id: PROJECT_SETTINGS_ID,
     defaultAgentKeyId: null,
@@ -60,26 +59,28 @@ export function getProjectSettings(): ProjectSettings {
   };
 }
 
-export function getProjectDefaultAgentKeyId(): string | null {
-  return getProjectSettings().defaultAgentKeyId;
+export async function getProjectDefaultAgentKeyId(): Promise<string | null> {
+  return (await getProjectSettings()).defaultAgentKeyId;
 }
 
-export function getFallbackModelConfig(): { model: string; modelId: string | null } | null {
-  const settings = getProjectSettings();
+export async function getFallbackModelConfig(): Promise<{
+  model: string;
+  modelId: string | null;
+} | null> {
+  const settings = await getProjectSettings();
   if (!settings.fallbackModel) return null;
   return { model: settings.fallbackModel, modelId: settings.fallbackModelId };
 }
 
-export function updateProjectSettings(
+export async function updateProjectSettings(
   data: {
     defaultAgentKeyId?: string | null;
     fallbackModel?: string | null;
     fallbackModelId?: string | null;
     autoAttachOversizedPasteAsTextFile?: boolean;
   },
-): ProjectSettings {
-  const existing = store.getById(SETTINGS_COLLECTION, PROJECT_SETTINGS_ID);
-  const current = getProjectSettings();
+): Promise<ProjectSettings> {
+  const current = await getProjectSettings();
   const updated = {
     ...current,
     ...(data.defaultAgentKeyId !== undefined
@@ -98,18 +99,6 @@ export function updateProjectSettings(
       : {}),
   };
 
-  if (existing) {
-    const saved = store.update(
-      SETTINGS_COLLECTION,
-      PROJECT_SETTINGS_ID,
-      updated as unknown as Record<string, unknown>,
-    );
-    return asProjectSettings(saved as Record<string, unknown>);
-  }
-
-  const created = store.insert(
-    SETTINGS_COLLECTION,
-    updated as unknown as Record<string, unknown>,
-  );
-  return asProjectSettings(created);
+  const saved = upsertSetting(updated as unknown as Record<string, unknown>);
+  return asProjectSettings(saved as Record<string, unknown>);
 }

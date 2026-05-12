@@ -6,7 +6,7 @@ This is an experimenal preview. If anything broke - ask your cli agent to fix or
 
 OpenWork is a workspace platform with boards, cards, folders, unified inbox, Telegram integration, AI agents, and webhook automation.
 
-**Tech stack:** Fastify 5, JSON file store, React 19, Vite, TypeScript, Zod v4, pnpm workspaces.
+**Tech stack:** Fastify 5, PostgreSQL (Drizzle ORM), React 19, Vite, TypeScript, Zod v4, pnpm workspaces.
 
 ## Quick Start
 
@@ -31,11 +31,13 @@ cp packages/backend/.env.example packages/backend/.env
 
 ### 3. Bootstrap backend data (optional)
 
+Requires a running Postgres instance and `DATABASE_URL` in `packages/backend/.env`.
+
 ```bash
 pnpm db:bootstrap
 ```
 
-Initializes the backend JSON store with the default workspace records needed for a fresh environment: admin and starter users, project settings, the general collection, the `auto-dev-cards` board, and the default workspace. See [Bootstrap Data](#bootstrap-data) for details.
+Applies migrations and seeds default workspace records for a fresh environment: admin and starter users, project settings, the general collection, the `auto-dev-cards` board, and the default workspace. See [Bootstrap Data](#bootstrap-data) for details.
 
 ### 4. Generate HTTPS certs (optional)
 
@@ -58,7 +60,7 @@ pnpm dev
 
 ```
 packages/
-  backend/     Fastify API server, JSON file store
+  backend/     Fastify API server, PostgreSQL data store
   frontend/    React 19 SPA, Vite, React Router
   landing/     Public OpenWork landing page
   shared/      Shared TypeScript types
@@ -69,7 +71,7 @@ docs/          Design system and developer guides
 
 ### `packages/backend`
 
-REST API server handling all workspace logic. Built with Fastify 5 and fastify-type-provider-zod, uses a JSON file-based data store.
+REST API server handling all workspace logic. Built with Fastify 5 and fastify-type-provider-zod, uses PostgreSQL with Drizzle ORM for relational data.
 
 Key areas:
 
@@ -114,20 +116,20 @@ Usage example:
 
 ## Key Commands
 
-| Command                 | Description                                         |
-| ----------------------- | --------------------------------------------------- |
-| `pnpm dev`              | Start all dev servers in parallel                   |
-| `pnpm dev:backend`      | Start backend only                                  |
-| `pnpm dev:frontend`     | Start frontend only                                 |
-| `pnpm dev:landing`      | Start landing page only                             |
-| `pnpm build`            | Build all packages                                  |
-| `pnpm lint`             | Lint all packages                                   |
-| `pnpm typecheck`        | Type-check all packages                             |
-| `pnpm docker:full`      | Start everything in Docker                          |
-| `pnpm docker:full:stop` | Stop Docker containers                              |
-| `pnpm docker:down`      | Stop and remove Docker containers                   |
-| `pnpm db:bootstrap`     | Bootstrap backend JSON data for a fresh environment |
-| `pnpm certs:generate`   | Generate local HTTPS certs via mkcert               |
+| Command                 | Description                                        |
+| ----------------------- | -------------------------------------------------- |
+| `pnpm dev`              | Start all dev servers in parallel                  |
+| `pnpm dev:backend`      | Start backend only                                 |
+| `pnpm dev:frontend`     | Start frontend only                                |
+| `pnpm dev:landing`      | Start landing page only                            |
+| `pnpm build`            | Build all packages                                 |
+| `pnpm lint`             | Lint all packages                                  |
+| `pnpm typecheck`        | Type-check all packages                            |
+| `pnpm docker:full`      | Start everything in Docker                         |
+| `pnpm docker:full:stop` | Stop Docker containers                             |
+| `pnpm docker:down`      | Stop and remove Docker containers                  |
+| `pnpm db:bootstrap`     | Bootstrap backend SQL data for a fresh environment |
+| `pnpm certs:generate`   | Generate local HTTPS certs via mkcert              |
 
 ## Features
 
@@ -144,7 +146,7 @@ Usage example:
 
 ## Bootstrap Data
 
-Run `pnpm db:bootstrap` from the repo root, or `cd packages/backend && pnpm db:bootstrap`, to initialize a fresh backend data directory.
+Run `pnpm db:bootstrap` from the repo root, or `cd packages/backend && pnpm db:bootstrap`, to initialize a fresh backend database.
 
 **Test accounts:**
 

@@ -1,3 +1,4 @@
+import { listMessagesByConversationIdNative } from '../db/repositories/messages-repository.js';
 import { store } from '../db/index.js';
 import { createAuditLog } from './audit-log.js';
 import { isAgentConversationRecord } from './conversation-scope.js';
@@ -28,18 +29,13 @@ export async function listMessages(query: MessageListQuery) {
     return { entries: [], total: 0 };
   }
 
-  const allMatching = store.find(
-    'messages',
-    (r) => r.conversationId === query.conversationId,
-  );
-  const total = allMatching.length;
+  const { entries: messages, total } = await listMessagesByConversationIdNative(query.conversationId, {
+    order: 'desc',
+    limit,
+    offset,
+  });
 
-  const sorted = allMatching.sort(
-    (a, b) =>
-      new Date(b.createdAt as string).getTime() - new Date(a.createdAt as string).getTime(),
-  );
-
-  const entries = sorted.slice(offset, offset + limit).map((message) => {
+  const entries = messages.map((message) => {
     const sender = message.senderId
       ? store.getById('users', message.senderId as string)
       : null;
@@ -89,22 +85,26 @@ export async function sendMessage(
   const conversation = store.getById('conversations', data.conversationId);
   if (!conversation || isAgentConversationRecord(conversation)) return null;
 
-  const message = store.insert('messages', {
-    conversationId: data.conversationId,
-    senderId: data.senderId,
-    direction: data.direction,
-    type: data.type ?? 'text',
-    content: data.content,
-    status: data.direction === 'outbound' ? 'sent' : 'delivered',
-    externalId: data.externalId,
-    attachments: data.attachments,
-    metadata: data.metadata,
-  });
+  const message = await store.transaction(async () => {
+    const created = await store.insert('messages', {
+      conversationId: data.conversationId,
+      senderId: data.senderId,
+      direction: data.direction,
+      type: data.type ?? 'text',
+      content: data.content,
+      status: data.direction === 'outbound' ? 'sent' : 'delivered',
+      externalId: data.externalId,
+      attachments: data.attachments,
+      metadata: data.metadata,
+    });
 
-  // Update conversation's lastMessageAt and mark unread for inbound
-  store.update('conversations', data.conversationId, {
-    lastMessageAt: new Date(),
-    isUnread: data.direction === 'inbound',
+    // Update conversation's lastMessageAt and mark unread for inbound
+    await store.update('conversations', data.conversationId, {
+      lastMessageAt: new Date().toISOString(),
+      isUnread: data.direction === 'inbound',
+    });
+
+    return created;
   });
 
   if (audit) {
@@ -134,6 +134,6 @@ export async function updateMessageStatus(
   if (!message) return null;
   const conversation = store.getById('conversations', message.conversationId as string);
   if (!conversation || isAgentConversationRecord(conversation)) return null;
-  const updated = store.update('messages', id, { status });
+  const updated = await store.update('messages', id, { status });
   return updated ?? null;
 }
