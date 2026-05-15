@@ -61,6 +61,7 @@ import {
   RotateCcw,
   OctagonX,
   Cpu,
+  Monitor,
 } from 'lucide-react';
 import { formatDate } from 'shared';
 import {
@@ -142,6 +143,13 @@ interface ApiKeysResponse {
 
 interface AgentDefaultsResponse {
   defaultAgentKeyId: string | null;
+}
+
+interface RunnerDevice {
+  id: string;
+  workspaceId: string;
+  status: 'online' | 'offline' | 'busy' | 'stale' | 'revoked';
+  revoked: boolean;
 }
 
 interface ChatComposerSettingsResponse {
@@ -409,6 +417,9 @@ type ReplyComposerEditingProp =
 
 interface ReplyComposerProps {
   streaming: boolean;
+  activeAgentId?: string | null;
+  activeConversationId?: string | null;
+  disabledReason?: string | null;
   editingMessage?: ReplyComposerEditingProp | null;
   autoAttachOversizedPasteAsTextFile: boolean;
   onSendAttachments: (caption: string, files: File[]) => Promise<void>;
@@ -518,6 +529,9 @@ function createPastedTextAttachmentName(now: Date = new Date()): string {
 
 export const ReplyComposer = memo(function ReplyComposer({
   streaming,
+  activeAgentId = null,
+  activeConversationId = null,
+  disabledReason = null,
   editingMessage = null,
   autoAttachOversizedPasteAsTextFile,
   onSendAttachments,
@@ -540,6 +554,7 @@ export const ReplyComposer = memo(function ReplyComposer({
   const isEditingChatMessage = editingMessage?.kind === 'message';
   const isEditingQueueItem = editingMessage?.kind === 'queue';
   const editingSubmitting = isEditing && editingMessage.isSubmitting;
+  const composerDisabled = Boolean(disabledReason) && !isEditing;
   const composerValue = isEditing ? editingMessage.value : input;
   const draftStagedImages = draftStagedAttachments.filter(
     (attachment): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
@@ -727,6 +742,10 @@ export const ReplyComposer = memo(function ReplyComposer({
 
   const handleSend = useCallback(async () => {
     if (uploading || editingSubmitting) return;
+    if (composerDisabled) {
+      if (disabledReason) toast.error(disabledReason);
+      return;
+    }
 
     if (isEditingChatMessage) {
       const nextValue = editingMessage.value.trim();
@@ -796,6 +815,8 @@ export const ReplyComposer = memo(function ReplyComposer({
   }, [
     clearDraftStagedAttachments,
     clearEditStagedAttachments,
+    composerDisabled,
+    disabledReason,
     draftStagedAttachments,
     editingSubmitting,
     editStagedAttachments,
@@ -911,6 +932,9 @@ export const ReplyComposer = memo(function ReplyComposer({
   return (
     <div
       className={`${styles.replyBox} ${draggingOver ? styles.replyBoxDragOver : ''}`}
+      data-testid="reply-composer"
+      data-active-agent-id={activeAgentId ?? ''}
+      data-active-conversation-id={activeConversationId ?? ''}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -1087,6 +1111,7 @@ export const ReplyComposer = memo(function ReplyComposer({
               className={styles.attachBtn}
               onClick={() => imageInputRef.current?.click()}
               disabled={
+                composerDisabled ||
                 uploading ||
                 editingSubmitting ||
                 isEditingQueueItem ||
@@ -1097,6 +1122,8 @@ export const ReplyComposer = memo(function ReplyComposer({
               title={
                 totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
                   ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
+                  : composerDisabled && disabledReason
+                    ? disabledReason
                   : 'Attach images'
               }
             >
@@ -1107,6 +1134,7 @@ export const ReplyComposer = memo(function ReplyComposer({
                 className={styles.attachBtn}
                 onClick={() => fileInputRef.current?.click()}
                 disabled={
+                  composerDisabled ||
                   uploading ||
                   editingSubmitting ||
                   (!isEditing && streaming) ||
@@ -1116,6 +1144,8 @@ export const ReplyComposer = memo(function ReplyComposer({
                 title={
                   totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
                     ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
+                    : composerDisabled && disabledReason
+                      ? disabledReason
                     : 'Attach files'
                 }
               >
@@ -1145,12 +1175,13 @@ export const ReplyComposer = memo(function ReplyComposer({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           rows={1}
-          disabled={uploading || editingSubmitting}
+          disabled={composerDisabled || uploading || editingSubmitting}
         />
         <button
           className={styles.sendBtn}
           onClick={() => void handleSend()}
           disabled={
+            composerDisabled ||
             uploading ||
             editingSubmitting ||
             (isEditing
@@ -1169,6 +1200,8 @@ export const ReplyComposer = memo(function ReplyComposer({
               ? 'Save edited message'
               : isEditingQueueItem
                 ? 'Save queued message'
+                : composerDisabled && disabledReason
+                  ? disabledReason
                 : 'Send message'
           }
         >
@@ -1728,6 +1761,10 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
             return (
               <div
                 key={conversation.id}
+                data-testid="agent-conversation-item"
+                data-agent-id={agent.id}
+                data-conversation-id={conversation.id}
+                data-active={isActive && activeConversationId === conversation.id ? 'true' : 'false'}
                 className={`${styles.convItem} ${
                   isActive && activeConversationId === conversation.id ? styles.convItemActive : ''
                 }`}
@@ -1858,6 +1895,16 @@ function areChatConversationListsEqual(a: ChatConversation[], b: ChatConversatio
 
 function agentConversationKey(agentId: string, conversationId: string): string {
   return `${agentId}:${conversationId}`;
+}
+
+function isDeletedConversationKey(
+  deletedConversationKeys: Set<string>,
+  agentId: string,
+  conversationId: string | null | undefined,
+): boolean {
+  return (
+    !!conversationId && deletedConversationKeys.has(agentConversationKey(agentId, conversationId))
+  );
 }
 
 function mergeConversationIntoList(
@@ -2238,7 +2285,7 @@ function localSkillSlug(skillId: string): string {
 
 export function AgentsPage() {
   useDocumentTitle('Agents');
-  const { activeWorkspaceId } = useWorkspace();
+  const { activeWorkspaceId, workspaces } = useWorkspace();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -2279,6 +2326,7 @@ export function AgentsPage() {
   // ── Selection state ──
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
 
   // ── Per-agent conversations ──
   const [convsByAgent, setConvsByAgent] = useState<Record<string, ChatConversation[]>>({});
@@ -2288,6 +2336,8 @@ export function AgentsPage() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [showChatLoading, setShowChatLoading] = useState(false);
+  const [runnerDevices, setRunnerDevices] = useState<RunnerDevice[]>([]);
+  const [runnerLoading, setRunnerLoading] = useState(true);
   const chatLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Message search state ──
@@ -2350,6 +2400,7 @@ export function AgentsPage() {
   const activeConvIdRef = useRef<string | null>(null);
   const convsByAgentRef = useRef<Record<string, ChatConversation[]>>({});
   const pendingConversationKeysRef = useRef<Set<string>>(new Set());
+  const deletedConversationKeysRef = useRef<Set<string>>(new Set());
   const pendingConversationCountRef = useRef<Map<string, number>>(new Map());
   const runHandoffTimersRef = useRef<Map<string, number>>(new Map());
   const runHandoffStartedAtRef = useRef<Map<string, number>>(new Map());
@@ -2702,6 +2753,7 @@ export function AgentsPage() {
     effectivePendingBranchExecutionsByMessageId,
     errorsByMessageId,
     orphanErrorItems,
+    activeConversationRun,
     showStreamingBubble,
   } = useMemo(
     () =>
@@ -2739,22 +2791,57 @@ export function AgentsPage() {
     ? runHandoffKeys.has(activeConversationKey) &&
       (!optimisticActiveTargetId || activeMessageIds.has(optimisticActiveTargetId))
     : false;
-  const activeConversationRun = useMemo(
-    () =>
-      activeConversationRuns.find(
-        (run) =>
-          run.status === 'running' &&
-          Boolean(run.responseParentId) &&
-          activeMessageIds.has(run.responseParentId!),
-      ) ?? null,
-    [activeConversationRuns, activeMessageIds],
-  );
   const streaming =
     activeConversationPending ||
     activeConversationHandoff ||
     showStreamingBubble ||
     activeConversationRun !== null ||
     effectivePendingBranchExecutionsByMessageId.size > 0;
+  const activeAgentWorkspaceIds = useMemo(() => {
+    if (!activeAgent?.groupId) return [];
+    return workspaces
+      .filter((workspace) => workspace.agentGroupIds.includes(activeAgent.groupId!))
+      .map((workspace) => workspace.id);
+  }, [activeAgent?.groupId, workspaces]);
+  const runnerDevicesForActiveAgent = useMemo(() => {
+    if (!activeAgent) return runnerDevices;
+    if (activeAgentWorkspaceIds.length === 0) return [];
+    const workspaceIds = new Set(activeAgentWorkspaceIds);
+    return runnerDevices.filter((runner) => workspaceIds.has(runner.workspaceId));
+  }, [activeAgent, activeAgentWorkspaceIds, runnerDevices]);
+  const activeRunnerCount = useMemo(
+    () =>
+      runnerDevicesForActiveAgent.filter(
+        (runner) => !runner.revoked && (runner.status === 'online' || runner.status === 'busy'),
+      ).length,
+    [runnerDevicesForActiveAgent],
+  );
+  const busyRunnerCount = useMemo(
+    () =>
+      runnerDevicesForActiveAgent.filter((runner) => !runner.revoked && runner.status === 'busy')
+        .length,
+    [runnerDevicesForActiveAgent],
+  );
+  const hasConnectedRunner = activeRunnerCount > 0 || busyRunnerCount > 0;
+  const runnerDisabledReason = useMemo(() => {
+    if (streaming) return null;
+    if (activeAgent && activeAgentWorkspaceIds.length === 0) {
+      return 'Add this agent to a workspace before sending messages.';
+    }
+    if (activeRunnerCount > 0) return null;
+    if (runnerLoading && runnerDevices.length === 0) return 'Checking runner connection...';
+    return activeWorkspaceId
+      ? 'Connect an OpenWork runner for this workspace before sending agent messages.'
+      : 'Connect an OpenWork runner for this agent workspace before sending agent messages.';
+  }, [
+    activeAgent,
+    activeAgentWorkspaceIds.length,
+    activeRunnerCount,
+    activeWorkspaceId,
+    runnerDevices.length,
+    runnerLoading,
+    streaming,
+  ]);
   const isNearMessagesBottom = useCallback((element: HTMLDivElement) => {
     return (
       element.scrollHeight - element.scrollTop - element.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX
@@ -2824,6 +2911,21 @@ export function AgentsPage() {
     }
   }, []);
 
+  const fetchRunnerDevices = useCallback(async () => {
+    setRunnerLoading(true);
+    try {
+      const query = activeWorkspaceId ? `?workspaceId=${activeWorkspaceId}` : '';
+      const data = await api<{ entries: RunnerDevice[] }>(`/agent-runners${query}`);
+      setRunnerDevices(data.entries);
+      return data.entries;
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : 'Failed to load runners');
+      return [];
+    } finally {
+      setRunnerLoading(false);
+    }
+  }, [activeWorkspaceId]);
+
   const ensureAgentCliAvailable = useCallback(
     (agentId: string) => {
       const agent = agents.find((entry) => entry.id === agentId);
@@ -2891,7 +2993,20 @@ export function AgentsPage() {
                 (conv) => conv.id === activeConvIdRef.current,
               ) ?? null)
             : null;
-        const nextEntries = mergeConversationIntoList(data.entries, preservedConversation);
+        const filteredEntries = data.entries.filter(
+          (conversation) =>
+            !deletedConversationKeysRef.current.has(agentConversationKey(agentId, conversation.id)),
+        );
+        const nextEntries = mergeConversationIntoList(
+          filteredEntries,
+          isDeletedConversationKey(
+            deletedConversationKeysRef.current,
+            agentId,
+            preservedConversation?.id,
+          )
+            ? null
+            : preservedConversation,
+        );
         for (const conversation of nextEntries) {
           if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
             clearRunHandoff(agentId, conversation.id);
@@ -2938,7 +3053,20 @@ export function AgentsPage() {
           activeAgentIdRef.current === agentId && activeConvIdRef.current
             ? ((prev[agentId] || []).find((conv) => conv.id === activeConvIdRef.current) ?? null)
             : null;
-        const nextEntries = mergeConversationIntoList(incoming, preservedConversation);
+        const filteredIncoming = incoming.filter(
+          (conversation) =>
+            !deletedConversationKeysRef.current.has(agentConversationKey(agentId, conversation.id)),
+        );
+        const nextEntries = mergeConversationIntoList(
+          filteredIncoming,
+          isDeletedConversationKey(
+            deletedConversationKeysRef.current,
+            agentId,
+            preservedConversation?.id,
+          )
+            ? null
+            : preservedConversation,
+        );
         for (const conversation of nextEntries) {
           if (conversation.isBusy || toQueueCount(conversation.queuedCount) > 0) {
             clearRunHandoff(agentId, conversation.id);
@@ -3278,8 +3406,11 @@ export function AgentsPage() {
         body: JSON.stringify({ conversationId: activeConvId }),
       });
       await syncActiveConversation(activeAgentId, activeConvId);
-    } catch {
-      // silently fail
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to retry queued message';
+      setChatError(message);
+      toast.error(message);
+      void fetchRunnerDevices();
     }
   }
 
@@ -3297,8 +3428,10 @@ export function AgentsPage() {
         removedItem?.queuedMessageId ?? null,
       );
       await syncActiveConversation(activeAgentId, activeConvId);
-    } catch {
-      // silently fail
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to dismiss queued message';
+      setChatError(message);
+      toast.error(message);
     }
   }
 
@@ -3310,6 +3443,7 @@ export function AgentsPage() {
       fetchAvatarPresets();
       fetchColorPresets();
       fetchCliStatus();
+      fetchRunnerDevices();
       const entries = await fetchAgents();
       if (cancelled || entries.length === 0) return;
 
@@ -3340,7 +3474,14 @@ export function AgentsPage() {
                 (conv) => conv.id === currentConvId,
               ) ??
               null);
-        if (preservedConversation) {
+        if (
+          preservedConversation &&
+          !isDeletedConversationKey(
+            deletedConversationKeysRef.current,
+            currentAgentId,
+            preservedConversation.id,
+          )
+        ) {
           allConvs[currentAgentId] = mergeConversationIntoList(
             allConvs[currentAgentId] || [],
             preservedConversation,
@@ -3436,6 +3577,7 @@ export function AgentsPage() {
     fetchCliStatus,
     fetchConversationById,
     fetchGroups,
+    fetchRunnerDevices,
     syncActiveConversation,
     requestedAgentId,
     requestedConversationId,
@@ -3698,10 +3840,37 @@ export function AgentsPage() {
         highlightClearTimerRef.current = null;
       }
       setHighlightedMessageId(null);
-      await selectConversation(result.agentId, result.conversationId);
-      setHighlightedMessageId(result.messageId);
+      try {
+        const data = await api<{ entries: ChatMessage[] }>(
+          `/agents/${result.agentId}/chat/conversations/${result.conversationId}/activate-message`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ messageId: result.messageId }),
+          },
+        );
+
+        setActiveConversation(result.agentId, result.conversationId);
+        setActiveConversationMessages(result.agentId, result.conversationId, data.entries);
+        setChatError(null);
+        void markConversationRead(result.agentId, result.conversationId);
+        void Promise.all([
+          fetchQueueItems(result.agentId, result.conversationId),
+          fetchConversations(result.agentId),
+          fetchConversationRun(result.agentId, result.conversationId),
+        ]);
+        setHighlightedMessageId(result.messageId);
+      } catch {
+        toast.error('Failed to open message result');
+      }
     },
-    [selectConversation],
+    [
+      fetchConversationRun,
+      fetchConversations,
+      fetchQueueItems,
+      markConversationRead,
+      setActiveConversation,
+      setActiveConversationMessages,
+    ],
   );
 
   /* ── Create conversation ── */
@@ -3732,8 +3901,10 @@ export function AgentsPage() {
         setMessages([]);
         isFirstMessageRef.current = true;
         setChatError(null);
-      } catch {
-        setChatError('Failed to create conversation');
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : 'Failed to create conversation';
+        setChatError(message);
+        toast.error(message);
       }
     },
     [setActiveConversation],
@@ -3742,6 +3913,8 @@ export function AgentsPage() {
   /* ── Delete conversation ── */
   const deleteConversation = useCallback(
     async (agentId: string, convId: string) => {
+      const deletedKey = agentConversationKey(agentId, convId);
+      deletedConversationKeysRef.current.add(deletedKey);
       try {
         await api(`/agents/${agentId}/chat/conversations/${convId}`, { method: 'DELETE' });
         const deletingActiveConversation = activeAgentId === agentId && activeConvId === convId;
@@ -3790,6 +3963,7 @@ export function AgentsPage() {
           setMessages([]);
         }
       } catch {
+        deletedConversationKeysRef.current.delete(deletedKey);
         setChatError('Failed to delete conversation');
       }
     },
@@ -3880,18 +4054,29 @@ export function AgentsPage() {
           Boolean(c.isBusy) || pendingConversationKeys.has(agentConversationKey(agentId, c.id));
         return !isActive && !c.isUnread && !isStreaming;
       });
-      await Promise.allSettled(
+      const pendingDeletedKeys = toDelete.map((c) => agentConversationKey(agentId, c.id));
+      for (const key of pendingDeletedKeys) {
+        deletedConversationKeysRef.current.add(key);
+      }
+      const deleteResults = await Promise.allSettled(
         toDelete.map((c) =>
           api(`/agents/${agentId}/chat/conversations/${c.id}`, { method: 'DELETE' }),
         ),
       );
-      const deletedIds = new Set(toDelete.map((c) => c.id));
+      const deletedConversations = toDelete.filter(
+        (_conversation, index) => deleteResults[index]?.status === 'fulfilled',
+      );
+      const deletedIds = new Set(deletedConversations.map((c) => c.id));
+      for (const conversation of toDelete) {
+        if (deletedIds.has(conversation.id)) continue;
+        deletedConversationKeysRef.current.delete(agentConversationKey(agentId, conversation.id));
+      }
       const remainingConversations = convs.filter((c) => !deletedIds.has(c.id));
       setConvsByAgent((prev) => ({
         ...prev,
         [agentId]: (prev[agentId] || []).filter((c) => !deletedIds.has(c.id)),
       }));
-      for (const c of toDelete) {
+      for (const c of deletedConversations) {
         pendingConversationCountRef.current.delete(agentConversationKey(agentId, c.id));
         clearRunHandoff(agentId, c.id);
         setOptimisticResponseParent(agentId, c.id, null);
@@ -3899,7 +4084,7 @@ export function AgentsPage() {
       setPendingConversationKeys((prev) => {
         let changed = false;
         const next = new Set(prev);
-        for (const c of toDelete) {
+        for (const c of deletedConversations) {
           changed = next.delete(agentConversationKey(agentId, c.id)) || changed;
         }
         return changed ? next : prev;
@@ -4036,12 +4221,15 @@ export function AgentsPage() {
             prev.filter((item) => item.id !== optimisticQueueItem.id),
           );
           setChatError(err instanceof Error ? err.message : 'Failed to queue agent response');
+          void fetchRunnerDevices();
           throw err;
         } finally {
           setConversationPending(sentAgentId, sentConvId, false);
         }
       } catch (err) {
-        setChatError(err instanceof Error ? err.message : 'Failed to upload attachments');
+        const message = err instanceof Error ? err.message : 'Failed to upload attachments';
+        setChatError(message);
+        toast.error(message);
         throw err;
       }
 
@@ -4057,6 +4245,7 @@ export function AgentsPage() {
       ensureAgentCliAvailable,
       fetchConversations,
       fetchQueueItems,
+      fetchRunnerDevices,
       isActiveConversation,
       requestAutoScrollToBottom,
       setActiveConversationMessages,
@@ -4168,7 +4357,10 @@ export function AgentsPage() {
           prev.filter((message) => message.id !== messageId),
         );
         setOptimisticResponseParent(sentAgentId, sentConvId, null);
-        setChatError(err instanceof Error ? err.message : 'Failed to send message');
+        const message = err instanceof Error ? err.message : 'Failed to send message';
+        setChatError(message);
+        toast.error(message);
+        void fetchRunnerDevices();
         throw err;
       } finally {
         if (!alreadyBusy) {
@@ -4185,6 +4377,7 @@ export function AgentsPage() {
       fetchConversations,
       fetchMessages,
       fetchQueueItems,
+      fetchRunnerDevices,
       requestAutoScrollToBottom,
       setActiveConversationMessages,
       setActiveConversationQueueItems,
@@ -4502,12 +4695,15 @@ export function AgentsPage() {
     try {
       const group = await api<AgentGroup>('/agent-groups', {
         method: 'POST',
-        body: JSON.stringify({ name: newGroupName.trim() }),
+        body: JSON.stringify({
+          name: newGroupName.trim(),
+          workspaceId: activeWorkspaceId || undefined,
+        }),
       });
       setGroups((prev) => [...prev, group]);
       setNewGroupName('');
-    } catch {
-      /* silently fail */
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to create group');
     }
   }
 
@@ -4688,12 +4884,12 @@ export function AgentsPage() {
     try {
       const updated = await api<Agent>(`/agents/${agentId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ groupId }),
+        body: JSON.stringify({ groupId, workspaceId: activeWorkspaceId || undefined }),
       });
       setAgents((prev) => prev.map((a) => (a.id === agentId ? updated : a)));
       if (settingsAgent?.id === agentId) setSettingsAgent(updated);
-    } catch {
-      /* silently fail */
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : 'Failed to move agent');
     }
   }
 
@@ -5009,7 +5205,6 @@ export function AgentsPage() {
   }
 
   /* ── Derived data ── */
-  const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
   const deferredSearch = useDeferredValue(search);
   const normalizedSearch = deferredSearch.trim().toLowerCase();
   const showMessageSearchSection = normalizedSearch.length >= 2;
@@ -5334,9 +5529,15 @@ export function AgentsPage() {
 
   return (
     <div className={styles.wrapper}>
-      <div className={styles.container}>
+      <div className={styles.container} data-testid="agents-layout-container">
         {/* ── Left sidebar ── */}
-        <div className={`${styles.sidebar} ${mobileChatOpen ? styles.sidebarMobileHidden : styles.sidebarMobileOpen}`}>
+        <div
+          className={`${styles.sidebar} ${mobileChatOpen ? styles.sidebarMobileHidden : styles.sidebarMobileOpen}`}
+          data-testid="agents-sidebar"
+          data-layout-state={mobileChatOpen ? 'mobile-chat-open' : 'mobile-sidebar-open'}
+          data-active-agent-id={activeAgentId ?? ''}
+          data-active-conversation-id={activeConvId ?? ''}
+        >
           <div className={styles.sidebarHeader}>
             <span className={styles.sidebarTitle}>Agents</span>
             <div style={{ display: 'flex', gap: 4 }}>
@@ -5721,7 +5922,13 @@ export function AgentsPage() {
         </div>
 
         {/* ── Right panel: Chat ── */}
-        <div className={`${styles.chatPanel} ${mobileChatOpen ? styles.chatPanelMobileOpen : styles.chatPanelMobileHidden}`}>
+        <div
+          className={`${styles.chatPanel} ${mobileChatOpen ? styles.chatPanelMobileOpen : styles.chatPanelMobileHidden}`}
+          data-testid="agents-chat-panel"
+          data-layout-state={mobileChatOpen ? 'mobile-chat-open' : 'mobile-sidebar-open'}
+          data-active-agent-id={activeAgentId ?? ''}
+          data-active-conversation-id={activeConvId ?? ''}
+        >
           {activeAgent && activeConvId ? (
             <>
               {/* Chat header */}
@@ -5787,6 +5994,37 @@ export function AgentsPage() {
                 <AgentFiles agentId={activeAgent.id} />
               ) : (
                 <>
+                  {runnerDisabledReason && (
+                    <div className={styles.runnerBanner} role="status">
+                      <div className={styles.runnerBannerIcon}>
+                        {runnerLoading ? (
+                          <Loader size={16} className={styles.spinIcon} />
+                        ) : (
+                          <AlertTriangle size={16} />
+                        )}
+                      </div>
+                      <div className={styles.runnerBannerBody}>
+                        <div className={styles.runnerBannerTitle}>
+                          {hasConnectedRunner ? 'Runner unavailable' : 'Runner required'}
+                        </div>
+                        <div className={styles.runnerBannerText}>{runnerDisabledReason}</div>
+                      </div>
+                      <div className={styles.runnerBannerActions}>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void fetchRunnerDevices()}
+                        >
+                          Refresh
+                        </Button>
+                        <Button size="sm" onClick={() => navigate('/settings?tab=runners')}>
+                          <Monitor size={14} />
+                          Connect
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Error banner */}
                   {chatError && <div className={styles.errorBanner}>{chatError}</div>}
 
@@ -5812,6 +6050,7 @@ export function AgentsPage() {
                       className={styles.messagesArea}
                       ref={messagesRef}
                       onScroll={handleMessagesScroll}
+                      data-testid="agents-messages-area"
                     >
                       {visibleMessages.map((msg) => {
                         const messageMeta = parseAgentMessageMetadata(msg.metadata);
@@ -6198,6 +6437,12 @@ export function AgentsPage() {
                             return (
                               <div
                                 key={message.id}
+                                data-testid="queued-message-row"
+                                data-message-id={message.id}
+                                data-queue-item-id={queueItemId ?? ''}
+                                data-queue-status={status}
+                                data-active-agent-id={activeAgentId ?? ''}
+                                data-active-conversation-id={activeConvId ?? ''}
                                 className={`${styles.messageRow} ${styles.messageRowUser} ${styles.queuedMessageRow}`}
                               >
                                 <div className={styles.messageContent}>
@@ -6368,6 +6613,9 @@ export function AgentsPage() {
                         : null
                     }
                     autoAttachOversizedPasteAsTextFile={autoAttachOversizedPasteAsTextFile}
+                    activeAgentId={activeAgentId}
+                    activeConversationId={activeConvId}
+                    disabledReason={runnerDisabledReason}
                     onSendAttachments={sendAttachmentMessage}
                     onSendText={sendTextMessage}
                   />

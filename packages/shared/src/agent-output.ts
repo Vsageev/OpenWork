@@ -97,14 +97,9 @@ function extractToolResultContent(content: unknown): string | null {
 
 function looksLikeStreamJsonEvent(event: JsonRecord): boolean {
   if (typeof event.type !== 'string') return false;
-  return [
-    'system',
-    'assistant',
-    'user',
-    'result',
-    'stream_event',
-    'rate_limit_event',
-  ].includes(event.type);
+  return ['system', 'assistant', 'user', 'result', 'stream_event', 'rate_limit_event'].includes(
+    event.type,
+  );
 }
 
 function getOpenCodePart(event: JsonRecord): JsonRecord | null {
@@ -139,6 +134,158 @@ function looksLikeOpenCodeEvent(event: JsonRecord): boolean {
     'tool-call',
     'tool-result',
   ].includes(partType);
+}
+
+function looksLikeCodexEvent(event: JsonRecord): boolean {
+  if (typeof event.type !== 'string') return false;
+  return [
+    'thread.started',
+    'turn.started',
+    'turn.completed',
+    'turn.failed',
+    'item.started',
+    'item.completed',
+    'error',
+  ].includes(event.type);
+}
+
+function getCodexItem(event: JsonRecord): JsonRecord | null {
+  return asRecord(event.item);
+}
+
+function getCodexItemType(event: JsonRecord): string | null {
+  const item = getCodexItem(event);
+  return typeof item?.type === 'string' ? item.type : null;
+}
+
+function getCodexItemId(event: JsonRecord): string | undefined {
+  const item = getCodexItem(event);
+  const id = item?.id ?? item?.call_id ?? item?.callId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+function extractCodexTextValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+
+  const rec = asRecord(value);
+  if (rec) {
+    const direct =
+      typeof rec.text === 'string'
+        ? rec.text
+        : typeof rec.content === 'string'
+          ? rec.content
+          : typeof rec.output === 'string'
+            ? rec.output
+            : typeof rec.summary === 'string'
+              ? rec.summary
+              : null;
+    if (direct?.trim()) return direct.trim();
+  }
+
+  if (!Array.isArray(value)) return null;
+
+  const parts: string[] = [];
+  for (const part of value) {
+    const partText = extractCodexTextValue(part);
+    if (partText) parts.push(partText);
+  }
+
+  return parts.length > 0 ? parts.join('\n').trim() : null;
+}
+
+function extractFromCodexAgentMessageEvent(event: JsonRecord): string | null {
+  if (event.type !== 'item.completed' || getCodexItemType(event) !== 'agent_message') return null;
+
+  const item = getCodexItem(event);
+  if (!item) return null;
+
+  return extractCodexTextValue(item.text ?? item.content);
+}
+
+function extractFromCodexOpenWorkFinalMessageEvent(event: JsonRecord): string | null {
+  if (event.type !== 'item.completed' || getCodexItemType(event) !== 'openwork_final_message') {
+    return null;
+  }
+
+  const item = getCodexItem(event);
+  if (!item) return null;
+
+  return extractCodexTextValue(item.text ?? item.content);
+}
+
+function extractFromCodexReasoningEvent(event: JsonRecord): string | null {
+  if (event.type !== 'item.completed') return null;
+
+  const itemType = getCodexItemType(event);
+  if (itemType !== 'reasoning' && itemType !== 'agent_reasoning') return null;
+
+  const item = getCodexItem(event);
+  if (!item) return null;
+
+  return extractCodexTextValue(item.text ?? item.content ?? item.summary);
+}
+
+function getCodexToolName(item: JsonRecord): string {
+  const name = item.name ?? item.tool_name ?? item.toolName ?? item.command;
+  return typeof name === 'string' && name.trim() ? name.trim() : 'tool';
+}
+
+function getCodexToolInput(item: JsonRecord): string | undefined {
+  const input =
+    item.input ?? item.arguments ?? item.args ?? item.command ?? item.params ?? item.raw_input;
+  return formatCompactJson(input) || undefined;
+}
+
+function getCodexToolOutput(item: JsonRecord): string | null {
+  const output =
+    item.aggregated_output ??
+    item.output ??
+    item.result ??
+    item.content ??
+    item.text ??
+    item.stdout ??
+    item.stderr;
+  return formatScalar(output);
+}
+
+function getCodexToolResultContent(item: JsonRecord): string | null {
+  const lines: string[] = [];
+  const output = getCodexToolOutput(item);
+  if (output) lines.push(output);
+
+  const exitCode = typeof item.exit_code === 'number' ? item.exit_code : null;
+  const status = typeof item.status === 'string' && item.status.trim() ? item.status.trim() : null;
+  if (exitCode !== null && exitCode !== 0) lines.push(`Exit code: ${exitCode}`);
+  if (lines.length === 0) {
+    if (status) lines.push(`Status: ${status}`);
+    if (exitCode !== null) lines.push(`Exit code: ${exitCode}`);
+  }
+
+  return lines.length > 0 ? lines.join('\n').trim() : null;
+}
+
+function isCodexToolLikeItemType(itemType: string): boolean {
+  return (
+    itemType.includes('call') ||
+    itemType.includes('tool') ||
+    itemType.includes('command') ||
+    itemType === 'exec' ||
+    itemType === 'command_execution'
+  );
+}
+
+function parseCodexUsageRecord(usage: unknown): ResultBlock['usage'] | undefined {
+  const rec = asRecord(usage);
+  if (!rec) return undefined;
+
+  const u: ResultBlock['usage'] = {};
+  if (typeof rec.input_tokens === 'number') u.inputTokens = rec.input_tokens;
+  if (typeof rec.output_tokens === 'number') u.outputTokens = rec.output_tokens;
+  if (typeof rec.cached_input_tokens === 'number') u.cacheRead = rec.cached_input_tokens;
+  return Object.keys(u).length > 0 ? u : undefined;
 }
 
 function getOpenCodeMessageId(event: JsonRecord): string | null {
@@ -365,8 +512,8 @@ function appendStreamDelta(existing: string | undefined, incoming: string): stri
   const existingTrimmed = existing.trim();
   const incomingTrimmed = incoming.trim();
   if (
-    (existingTrimmed === '{}' && incomingTrimmed.startsWith('{'))
-    || (existingTrimmed === '[]' && incomingTrimmed.startsWith('['))
+    (existingTrimmed === '{}' && incomingTrimmed.startsWith('{')) ||
+    (existingTrimmed === '[]' && incomingTrimmed.startsWith('['))
   ) {
     return incoming;
   }
@@ -438,9 +585,142 @@ function extractJsonObjects(output: string): string[] | null {
   return start === -1 ? chunks : null;
 }
 
+/** Matches stream-json lines emitted by Claude Code for rate-limit notices. */
+const CLAUDE_RATE_LIMIT_EVENT_NEEDLE = '{"type":"rate_limit_event"';
+
+function tryParseStructuredJsonLine(line: string): JsonRecord | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function lineBoundsAt(s: string, pos: number): [number, number] {
+  const start = pos > 0 ? s.lastIndexOf('\n', pos - 1) + 1 : 0;
+  const nextNl = s.indexOf('\n', pos);
+  const end = nextNl === -1 ? s.length : nextNl;
+  return [start, end];
+}
+
+function isStandaloneClaudeRateLimitNdjsonLine(s: string, needleIdx: number): boolean {
+  const [lineStart, lineEnd] = lineBoundsAt(s, needleIdx);
+  const lineSlice = s.slice(lineStart, lineEnd);
+  return lineSlice.trimStart().startsWith(CLAUDE_RATE_LIMIT_EVENT_NEEDLE);
+}
+
+function endOfBalancedJsonObject(s: string, start: number): number | null {
+  if (start >= s.length || s[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+  for (let i = start; i < s.length; i += 1) {
+    const char = s[i];
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaping = true;
+        continue;
+      }
+      if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Claude Code can inject `rate_limit_event` objects mid-NDJSON line (inside an assistant `text`
+ * field), which corrupts the stream. See anthropics/claude-code#49640.
+ * Removes only injected blobs; leaves well-formed standalone rate_limit lines intact.
+ */
+function stripInjectedClaudeRateLimitEvents(output: string): string {
+  let s = output;
+  let idx = s.indexOf(CLAUDE_RATE_LIMIT_EVENT_NEEDLE);
+  while (idx !== -1) {
+    if (isStandaloneClaudeRateLimitNdjsonLine(s, idx)) {
+      idx = s.indexOf(CLAUDE_RATE_LIMIT_EVENT_NEEDLE, idx + CLAUDE_RATE_LIMIT_EVENT_NEEDLE.length);
+      continue;
+    }
+    const end = endOfBalancedJsonObject(s, idx);
+    if (end === null) break;
+    s = s.slice(0, idx) + s.slice(end);
+    idx = s.indexOf(CLAUDE_RATE_LIMIT_EVENT_NEEDLE, idx);
+  }
+  return s;
+}
+
+function mergeBrokenClaudeNdjsonLines(output: string): string {
+  const lines = output.split(/\r?\n/);
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      out.push(line);
+      i += 1;
+      continue;
+    }
+    if (tryParseStructuredJsonLine(line)) {
+      out.push(line);
+      i += 1;
+      continue;
+    }
+    let merged = line;
+    let j = i;
+    let fixed = false;
+    while (j + 1 < lines.length && j - i < 64) {
+      const nextLine = lines[j + 1];
+      const candidate = stripInjectedClaudeRateLimitEvents(merged + nextLine);
+      if (tryParseStructuredJsonLine(candidate)) {
+        out.push(candidate);
+        i = j + 2;
+        fixed = true;
+        break;
+      }
+      if (j > i && tryParseStructuredJsonLine(nextLine)) {
+        break;
+      }
+      merged += nextLine;
+      j += 1;
+    }
+    if (!fixed) {
+      out.push(line);
+      i += 1;
+    }
+  }
+  return out.join('\n');
+}
+
+/** Undo Claude stream-json corruption so downstream NDJSON parsing can see terminal events again. */
+function preprocessClaudeStreamJsonStdout(output: string): string {
+  const stripped = stripInjectedClaudeRateLimitEvents(output);
+  const merged = mergeBrokenClaudeNdjsonLines(stripped);
+  return stripInjectedClaudeRateLimitEvents(merged);
+}
+
 function parseStructuredEvents(output: string): JsonRecord[] | null {
-  const rawEvents = extractJsonObjects(output.trim());
-  if (!rawEvents || rawEvents.length === 0) return null;
+  const preprocessed = preprocessClaudeStreamJsonStdout(output.trim());
+  const rawEvents = extractJsonObjects(preprocessed);
+  if (!rawEvents || rawEvents.length === 0) return parseStructuredJsonLines(preprocessed);
 
   const parsedEvents: JsonRecord[] = [];
   let structuredEventCount = 0;
@@ -451,11 +731,52 @@ function parseStructuredEvents(output: string): JsonRecord[] | null {
       const event = asRecord(parsed);
       if (!event) continue;
       parsedEvents.push(event);
-      if (looksLikeStreamJsonEvent(event) || looksLikeOpenCodeEvent(event)) {
+      if (
+        looksLikeStreamJsonEvent(event) ||
+        looksLikeOpenCodeEvent(event) ||
+        looksLikeCodexEvent(event)
+      ) {
         structuredEventCount += 1;
       }
     } catch {
-      return null;
+      return parseStructuredJsonLines(preprocessed);
+    }
+  }
+
+  return structuredEventCount > 0 ? parsedEvents : null;
+}
+
+function parseStructuredJsonLines(output: string): JsonRecord[] | null {
+  const parsedEvents: JsonRecord[] = [];
+  let structuredEventCount = 0;
+
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+      parsedEvents.push({ type: 'plain_text', text: line });
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      const event = asRecord(parsed);
+      if (!event) {
+        parsedEvents.push({ type: 'plain_text', text: line });
+        continue;
+      }
+
+      parsedEvents.push(event);
+      if (
+        looksLikeStreamJsonEvent(event) ||
+        looksLikeOpenCodeEvent(event) ||
+        looksLikeCodexEvent(event)
+      ) {
+        structuredEventCount += 1;
+      }
+    } catch {
+      parsedEvents.push({ type: 'plain_text', text: line });
     }
   }
 
@@ -521,7 +842,11 @@ function renderAssistantEvent(event: JsonRecord): string | null {
   const sections: string[] = [];
 
   const message = asRecord(event.message);
-  const content = Array.isArray(message?.content) ? message.content : Array.isArray(event.content) ? event.content : null;
+  const content = Array.isArray(message?.content)
+    ? message.content
+    : Array.isArray(event.content)
+      ? event.content
+      : null;
   if (content) {
     for (const block of content) {
       const rec = asRecord(block);
@@ -639,6 +964,98 @@ function renderOpenCodeStepFinishEvent(event: JsonRecord): string | null {
   const usage = formatOpenCodeUsage(part.tokens);
   if (usage) lines.push(`Usage: ${usage}`);
   return lines.length > 1 ? lines.join('\n') : null;
+}
+
+function formatCodexUsage(usage: unknown): string | null {
+  const rec = asRecord(usage);
+  if (!rec) return null;
+
+  const parts: string[] = [];
+  appendLabeledValue(parts, 'Input', rec.input_tokens);
+  appendLabeledValue(parts, 'Output', rec.output_tokens);
+  appendLabeledValue(parts, 'Reasoning', rec.reasoning_output_tokens);
+  appendLabeledValue(parts, 'Cache read', rec.cached_input_tokens);
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+function getCodexEventMessage(event: JsonRecord): string | null {
+  const direct =
+    typeof event.message === 'string'
+      ? event.message
+      : typeof event.error === 'string'
+        ? event.error
+        : null;
+  if (direct?.trim()) return direct.trim();
+
+  const error = asRecord(event.error);
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message.trim();
+
+  return null;
+}
+
+function renderCodexEvent(event: JsonRecord): string | null {
+  if (event.type === 'thread.started') {
+    const lines = ['Thread started'];
+    appendLabeledValue(lines, 'Thread ID', event.thread_id);
+    return lines.length > 1 ? lines.join('\n') : null;
+  }
+
+  if (event.type === 'turn.started') {
+    return 'Turn started';
+  }
+
+  const assistantText = extractFromCodexAgentMessageEvent(event);
+  if (assistantText) return `Assistant\n${assistantText}`;
+
+  const reasoning = extractFromCodexReasoningEvent(event);
+  if (reasoning) return `Thinking\n${reasoning}`;
+
+  if (event.type === 'item.started' || event.type === 'item.completed') {
+    const item = getCodexItem(event);
+    if (!item) return null;
+
+    const itemType = getCodexItemType(event) ?? '';
+    const isToolResult = itemType.includes('result') || itemType.includes('output');
+    const isToolCall = isCodexToolLikeItemType(itemType);
+
+    if (event.type === 'item.completed' && (isToolResult || isToolCall)) {
+      const lines = ['Tool result'];
+      appendLabeledValue(lines, 'ID', getCodexItemId(event));
+      const output = getCodexToolResultContent(item);
+      if (output) lines.push(output);
+      return lines.length > 1 ? lines.join('\n') : null;
+    }
+
+    if (event.type === 'item.started' && isToolCall) {
+      const lines = [`Tool call: ${getCodexToolName(item)}`];
+      appendLabeledValue(lines, 'ID', getCodexItemId(event));
+      const input = getCodexToolInput(item);
+      if (input) lines.push(`Input:\n${input}`);
+      return lines.join('\n').trim();
+    }
+  }
+
+  if (event.type === 'turn.completed') {
+    const lines = ['Turn completed'];
+    const usage = formatCodexUsage(event.usage);
+    if (usage) lines.push(`Usage: ${usage}`);
+    appendLabeledValue(lines, 'Stop reason', event.stop_reason);
+    return lines.length > 1 ? lines.join('\n') : null;
+  }
+
+  if (event.type === 'turn.failed' || event.type === 'error') {
+    const lines = [event.type === 'turn.failed' ? 'Turn failed' : 'Error'];
+    appendLabeledValue(lines, 'Message', getCodexEventMessage(event));
+    return lines.join('\n').trim();
+  }
+
+  return null;
+}
+
+function extractPlainTextEvent(event: JsonRecord): string | null {
+  if (event.type !== 'plain_text' || typeof event.text !== 'string') return null;
+  const text = event.text.trim();
+  return text || null;
 }
 
 function createStreamBlock(contentBlock: JsonRecord): StreamBlockState {
@@ -792,6 +1209,12 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
 
     flushTopLevelThinking();
 
+    const plainText = extractPlainTextEvent(event);
+    if (plainText) {
+      parts.push(plainText);
+      continue;
+    }
+
     if (event.type === 'system') {
       const rendered = renderSystemInitEvent(event);
       if (rendered) parts.push(rendered);
@@ -841,6 +1264,12 @@ function formatStructuredEventsForDisplay(events: JsonRecord[]): string {
 
     if (event.type === 'step_finish') {
       const rendered = renderOpenCodeStepFinishEvent(event);
+      if (rendered) parts.push(rendered);
+      continue;
+    }
+
+    if (looksLikeCodexEvent(event)) {
+      const rendered = renderCodexEvent(event);
       if (rendered) parts.push(rendered);
       continue;
     }
@@ -1029,36 +1458,39 @@ function outputBlocksEqual(left: OutputBlock, right: OutputBlock): boolean {
     case 'thinking':
     case 'assistant_text':
     case 'plain_text':
-      return left.content.trim() === (right as ThinkingBlock | AssistantTextBlock | PlainTextBlock).content.trim();
+      return (
+        left.content.trim() ===
+        (right as ThinkingBlock | AssistantTextBlock | PlainTextBlock).content.trim()
+      );
     case 'tool_call':
       return (
-        left.toolName === (right as ToolCallBlock).toolName
-        && (left.toolId || '') === ((right as ToolCallBlock).toolId || '')
-        && (left.input || '').trim() === (((right as ToolCallBlock).input || '').trim())
+        left.toolName === (right as ToolCallBlock).toolName &&
+        (left.toolId || '') === ((right as ToolCallBlock).toolId || '') &&
+        (left.input || '').trim() === ((right as ToolCallBlock).input || '').trim()
       );
     case 'tool_result':
       return (
-        (left.toolId || '') === ((right as ToolResultBlock).toolId || '')
-        && left.content.trim() === (right as ToolResultBlock).content.trim()
+        (left.toolId || '') === ((right as ToolResultBlock).toolId || '') &&
+        left.content.trim() === (right as ToolResultBlock).content.trim()
       );
     case 'result':
       return (
-        (left.text || '').trim() === (((right as ResultBlock).text || '').trim())
-        && left.durationMs === (right as ResultBlock).durationMs
-        && left.stopReason === (right as ResultBlock).stopReason
-        && left.isError === (right as ResultBlock).isError
+        (left.text || '').trim() === ((right as ResultBlock).text || '').trim() &&
+        left.durationMs === (right as ResultBlock).durationMs &&
+        left.stopReason === (right as ResultBlock).stopReason &&
+        left.isError === (right as ResultBlock).isError
       );
     case 'message_meta':
       return (
-        left.label === (right as MessageMetaBlock).label
-        && JSON.stringify(left.details) === JSON.stringify((right as MessageMetaBlock).details)
+        left.label === (right as MessageMetaBlock).label &&
+        JSON.stringify(left.details) === JSON.stringify((right as MessageMetaBlock).details)
       );
     case 'system_init':
       return JSON.stringify(left) === JSON.stringify(right);
     case 'rate_limit':
       return (
-        (left.message || '') === ((right as RateLimitBlock).message || '')
-        && (left.retryAfter || '') === ((right as RateLimitBlock).retryAfter || '')
+        (left.message || '') === ((right as RateLimitBlock).message || '') &&
+        (left.retryAfter || '') === ((right as RateLimitBlock).retryAfter || '')
       );
     default:
       return false;
@@ -1194,7 +1626,8 @@ function parseUsageRecord(usage: unknown): ResultBlock['usage'] | undefined {
   else if (typeof rec.outputTokens === 'number') u.outputTokens = rec.outputTokens;
   if (typeof rec.cache_read_input_tokens === 'number') u.cacheRead = rec.cache_read_input_tokens;
   else if (typeof rec.cacheReadTokens === 'number') u.cacheRead = rec.cacheReadTokens;
-  if (typeof rec.cache_creation_input_tokens === 'number') u.cacheCreate = rec.cache_creation_input_tokens;
+  if (typeof rec.cache_creation_input_tokens === 'number')
+    u.cacheCreate = rec.cache_creation_input_tokens;
   else if (typeof rec.cacheWriteTokens === 'number') u.cacheCreate = rec.cacheWriteTokens;
   return Object.keys(u).length > 0 ? u : undefined;
 }
@@ -1223,11 +1656,103 @@ function buildOpenCodeToolBlocks(event: JsonRecord): OutputBlock[] {
   return blocks;
 }
 
+function buildCodexItemBlocks(event: JsonRecord, startedItemIds: Set<string>): OutputBlock[] {
+  if (event.type !== 'item.started' && event.type !== 'item.completed') return [];
+
+  const assistantText = extractFromCodexAgentMessageEvent(event);
+  if (assistantText) return [{ type: 'assistant_text', content: assistantText }];
+
+  const reasoning = extractFromCodexReasoningEvent(event);
+  if (reasoning) return [{ type: 'thinking', content: reasoning }];
+
+  const item = getCodexItem(event);
+  if (!item) return [];
+
+  const itemType = getCodexItemType(event) ?? '';
+  const isToolResult = itemType.includes('result') || itemType.includes('output');
+  const isToolCall = isCodexToolLikeItemType(itemType);
+  const itemId = getCodexItemId(event);
+
+  if (event.type === 'item.started' && isToolCall) {
+    if (itemId) startedItemIds.add(itemId);
+    const block: ToolCallBlock = {
+      type: 'tool_call',
+      toolName: getCodexToolName(item),
+    };
+    if (itemId) block.toolId = itemId;
+    const input = getCodexToolInput(item);
+    if (input) block.input = input;
+    return [block];
+  }
+
+  if (event.type === 'item.completed' && (isToolResult || isToolCall)) {
+    const output = getCodexToolResultContent(item);
+    if (!output) return [];
+    const blocks: OutputBlock[] = [];
+    if (isToolCall && (!itemId || !startedItemIds.has(itemId))) {
+      const callBlock: ToolCallBlock = {
+        type: 'tool_call',
+        toolName: getCodexToolName(item),
+      };
+      if (itemId) callBlock.toolId = itemId;
+      const input = getCodexToolInput(item);
+      if (input) callBlock.input = input;
+      blocks.push(callBlock);
+    }
+    blocks.push(
+      {
+        type: 'tool_result',
+        toolId: itemId,
+        content: output,
+      },
+    );
+    return blocks;
+  }
+
+  return [];
+}
+
+function buildCodexResultBlock(event: JsonRecord): ResultBlock | null {
+  if (event.type === 'turn.completed') {
+    const block: ResultBlock = { type: 'result' };
+    const usage = parseCodexUsageRecord(event.usage);
+    if (usage) block.usage = usage;
+    if (typeof event.stop_reason === 'string') block.stopReason = event.stop_reason;
+    return block.usage || block.stopReason ? block : null;
+  }
+
+  if (event.type === 'turn.failed' || event.type === 'error') {
+    const block: ResultBlock = { type: 'result', isError: true };
+    const message = getCodexEventMessage(event);
+    if (message) block.text = message;
+    return block;
+  }
+
+  return null;
+}
+
+function extractStructuredErrorText(event: JsonRecord): string | null {
+  if (event.type === 'turn.failed' || event.type === 'error') {
+    return getCodexEventMessage(event);
+  }
+
+  if (event.type === 'result' && event.is_error === true) {
+    const resultText = extractFromResultEvent(event);
+    if (resultText) return resultText;
+    if (typeof event.error === 'string' && event.error.trim()) return event.error.trim();
+    const error = asRecord(event.error);
+    if (typeof error?.message === 'string' && error.message.trim()) return error.message.trim();
+  }
+
+  return null;
+}
+
 function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
   const blocks: OutputBlock[] = [];
   const streamBlocks = new Map<number, StreamBlockState>();
   let currentMessageBlocks: OutputBlock[] = [];
   let topLevelThinking = '';
+  const codexStartedItemIds = new Set<string>();
 
   const flushBlock = (index: number) => {
     const sb = streamBlocks.get(index);
@@ -1260,6 +1785,12 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
 
     flushTopLevelThinking();
 
+    const plainText = extractPlainTextEvent(event);
+    if (plainText) {
+      blocks.push({ type: 'plain_text', content: plainText });
+      continue;
+    }
+
     if (event.type === 'system') {
       if (event.subtype === 'init') blocks.push(buildSystemInitBlock(event));
       continue;
@@ -1281,7 +1812,10 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
       if (text) {
         // Skip result text if it duplicates the last assistant text block
         const lastAssistant = [...blocks].reverse().find((b) => b.type === 'assistant_text');
-        if (!lastAssistant || (lastAssistant as AssistantTextBlock).content.trim() !== text.trim()) {
+        if (
+          !lastAssistant ||
+          (lastAssistant as AssistantTextBlock).content.trim() !== text.trim()
+        ) {
           rb.text = text;
         }
       }
@@ -1343,6 +1877,18 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
       continue;
     }
 
+    if (looksLikeCodexEvent(event)) {
+      const itemBlocks = buildCodexItemBlocks(event, codexStartedItemIds);
+      if (itemBlocks.length > 0) {
+        blocks.push(...itemBlocks);
+        continue;
+      }
+
+      const resultBlock = buildCodexResultBlock(event);
+      if (resultBlock) blocks.push(resultBlock);
+      continue;
+    }
+
     if (event.type !== 'stream_event') continue;
 
     const inner = asRecord(event.event);
@@ -1400,7 +1946,8 @@ function structuredEventsToBlocks(events: JsonRecord[]): OutputBlock[] {
       const delta = asRecord(inner.delta);
       const usage = parseUsageRecord(inner.usage);
       const details: Record<string, string> = {};
-      if (delta && typeof delta.stop_reason === 'string') details['Stop reason'] = delta.stop_reason;
+      if (delta && typeof delta.stop_reason === 'string')
+        details['Stop reason'] = delta.stop_reason;
       if (usage?.outputTokens) details['Output tokens'] = String(usage.outputTokens);
       if (Object.keys(details).length > 0) {
         blocks.push({ type: 'message_meta', label: 'Message completed', details });
@@ -1443,7 +1990,89 @@ export function formatAgentOutputForDisplay(output: string): string {
   const parsedEvents = parseStructuredEvents(output);
   if (!parsedEvents) return trimmed;
 
-  return formatStructuredEventsForDisplay(parsedEvents) || formatPartialStreamContent(parsedEvents) || trimmed;
+  return (
+    formatStructuredEventsForDisplay(parsedEvents) ||
+    formatPartialStreamContent(parsedEvents) ||
+    trimmed
+  );
+}
+
+export const DEFAULT_AGENT_RUN_ERROR_MESSAGE = 'Agent run failed. See Full Logs for stdout/stderr.';
+
+function isDisplayableAgentRunErrorMessage(message: string): boolean {
+  if (message.length > 500) return false;
+  const lines = message.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length > 4) return false;
+  if (!/^[A-Za-z0-9]/.test(message)) return false;
+  if (/^[A-Za-z_$][\w$]*:\s*['"]/.test(message)) return false;
+  if (/[`{}]|=>/.test(message)) return false;
+  return true;
+}
+
+/**
+ * Formats an explicit run error for UI display.
+ * This deliberately does not mine stdout/stderr transcripts; the input must
+ * already be a backend-owned error message, not a log blob.
+ */
+export function formatAgentRunErrorMessage(
+  errorMessage: string | null | undefined,
+  fallback = DEFAULT_AGENT_RUN_ERROR_MESSAGE,
+): string | null {
+  const trimmed = errorMessage?.trim();
+  if (!trimmed) return null;
+  return isDisplayableAgentRunErrorMessage(trimmed) ? trimmed : fallback;
+}
+
+/**
+ * Extracts an explicit structured failure from agent stdout when the CLI
+ * reports errors as JSON events. Plain stdout is deliberately ignored.
+ */
+export function extractAgentOutputErrorText(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (!trimmed) return '';
+
+  const parsedEvents = parseStructuredEvents(stdout);
+  if (!parsedEvents) return '';
+
+  for (let i = parsedEvents.length - 1; i >= 0; i -= 1) {
+    const text = extractStructuredErrorText(parsedEvents[i]);
+    if (text) return text;
+  }
+
+  return '';
+}
+
+export const CODEX_INCOMPLETE_OUTPUT_ERROR_MESSAGE =
+  'Codex output ended before the turn reached a terminal event.';
+export const STREAM_JSON_INCOMPLETE_OUTPUT_ERROR_MESSAGE =
+  'Agent stream-json output ended without a terminal result event.';
+
+export function extractAgentOutputIncompleteText(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (!trimmed) return '';
+
+  const parsedEvents = parseStructuredEvents(trimmed);
+  if (!parsedEvents) return '';
+
+  const hasCodexEvents = parsedEvents.some(looksLikeCodexEvent);
+  if (hasCodexEvents) {
+    const hasTerminalCodexEvent = parsedEvents.some(
+      (event) =>
+        event.type === 'turn.completed' ||
+        event.type === 'turn.failed' ||
+        event.type === 'error' ||
+        Boolean(extractFromCodexOpenWorkFinalMessageEvent(event)),
+    );
+    return hasTerminalCodexEvent ? '' : CODEX_INCOMPLETE_OUTPUT_ERROR_MESSAGE;
+  }
+
+  const hasStreamJsonEvents = parsedEvents.some(looksLikeStreamJsonEvent);
+  if (hasStreamJsonEvents) {
+    const hasTerminalResult = parsedEvents.some((event) => event.type === 'result');
+    return hasTerminalResult ? '' : STREAM_JSON_INCOMPLETE_OUTPUT_ERROR_MESSAGE;
+  }
+
+  return '';
 }
 
 /**
@@ -1464,7 +2093,17 @@ export function extractFinalResponseText(stdout: string): string {
   }
 
   for (let i = parsedEvents.length - 1; i >= 0; i -= 1) {
+    const text = extractFromCodexOpenWorkFinalMessageEvent(parsedEvents[i]);
+    if (text) return text;
+  }
+
+  for (let i = parsedEvents.length - 1; i >= 0; i -= 1) {
     const text = extractFromAssistantEvent(parsedEvents[i]);
+    if (text) return text;
+  }
+
+  for (let i = parsedEvents.length - 1; i >= 0; i -= 1) {
+    const text = extractFromCodexAgentMessageEvent(parsedEvents[i]);
     if (text) return text;
   }
 

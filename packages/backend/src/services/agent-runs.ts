@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { store } from '../db/index.js';
+import type { StoreRecord } from '../db/store.js';
 import {
   findAgentRunIdsForRetentionCleanup,
   findAgentRunsByListFilterPaged,
@@ -8,16 +9,26 @@ import {
   findRunningAgentRunsAsync,
 } from '../db/repositories/agent-execution-repository.js';
 import { env } from '../config/env.js';
-import { extractFinalResponseText } from '../lib/agent-output.js';
+import {
+  DEFAULT_AGENT_RUN_ERROR_MESSAGE,
+  extractAgentOutputErrorText,
+  extractAgentOutputIncompleteText,
+  extractFinalResponseText,
+  formatAgentRunErrorMessage,
+} from '../lib/agent-output.js';
+import { cancelRemoteAgentRun } from './agent-runners.js';
 
 type TriggerType = 'chat' | 'cron_job' | 'card_assignment';
-type RunStatus = 'running' | 'completed' | 'error';
+type RunStatus = 'queued' | 'running' | 'completed' | 'error';
 type LegacyTriggerType = 'cron' | 'card';
 
 const RUNS_DIR = path.resolve(env.DATA_DIR, 'agent-runs');
 const LOG_RETENTION_DAYS = 7;
+const MAX_CARD_AUTO_COMMENT_LENGTH = 5000;
+const CARD_COMMENT_TERMINAL_STATUSES = new Set<RunStatus>(['completed', 'error']);
 
 interface CreateAgentRunParams {
+  id?: string;
   agentId: string;
   agentName: string;
   avatarIcon?: string | null;
@@ -29,15 +40,18 @@ interface CreateAgentRunParams {
   conversationId?: string | null;
   cardId?: string | null;
   cronJobId?: string | null;
+  executor?: 'local' | 'remote';
   pid?: number | null;
   stdoutPath?: string | null;
   stderrPath?: string | null;
   triggerPrompt?: string | null;
   responseParentId?: string | null;
+  status?: Extract<RunStatus, 'queued' | 'running'>;
 }
 
 export function createAgentRun(params: CreateAgentRunParams): Record<string, unknown> {
   return store.insert('agent_runs', {
+    ...(params.id ? { id: params.id } : {}),
     agentId: params.agentId,
     agentName: params.agentName,
     avatarIcon: params.avatarIcon ?? null,
@@ -46,10 +60,11 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
     model: params.model ?? null,
     modelId: params.modelId ?? null,
     triggerType: params.triggerType,
-    status: 'running' as RunStatus,
+    status: params.status ?? ('running' as RunStatus),
     conversationId: params.conversationId ?? null,
     cardId: params.cardId ?? null,
     cronJobId: params.cronJobId ?? null,
+    executor: params.executor ?? 'remote',
     pid: params.pid ?? null,
     stdoutPath: params.stdoutPath ?? null,
     stderrPath: params.stderrPath ?? null,
@@ -91,19 +106,154 @@ function buildAgentRunCompletionPatch(
   }
 
   const finalStdout = stdout ?? (run.stdout as string | null) ?? null;
+  const finalStderr = stderr ?? (run.stderr as string | null) ?? null;
+  if (logs?.stdout !== undefined && typeof run.stdoutPath === 'string' && run.stdoutPath) {
+    try {
+      fs.mkdirSync(path.dirname(run.stdoutPath), { recursive: true });
+      fs.writeFileSync(run.stdoutPath, logs.stdout);
+    } catch {
+      // Keep the DB snapshot even if the file cache cannot be refreshed.
+    }
+  }
+  if (logs?.stderr !== undefined && typeof run.stderrPath === 'string' && run.stderrPath) {
+    try {
+      fs.mkdirSync(path.dirname(run.stderrPath), { recursive: true });
+      fs.writeFileSync(run.stderrPath, logs.stderr);
+    } catch {
+      // Keep the DB snapshot even if the file cache cannot be refreshed.
+    }
+  }
   const previousResponseText =
     typeof run.responseText === 'string' ? run.responseText : null;
-  const responseText = finalStdout ? extractFinalResponseText(finalStdout) : '';
+  let extractionErrorMessage: string | null = null;
+  let structuredErrorMessage = '';
+  let incompleteOutputMessage = '';
+  let responseText = '';
+  try {
+    structuredErrorMessage = finalStdout ? extractAgentOutputErrorText(finalStdout) : '';
+    incompleteOutputMessage = finalStdout ? extractAgentOutputIncompleteText(finalStdout) : '';
+    const displayErrorMessage = formatAgentRunErrorMessage(
+      structuredErrorMessage || errorMessage || incompleteOutputMessage || null,
+    );
+    responseText =
+      !displayErrorMessage && finalStdout ? extractFinalResponseText(finalStdout) : '';
+    const missingFinalResponseMessage =
+      !displayErrorMessage && !responseText
+        ? 'Agent run completed without a final response.'
+        : null;
+    return {
+      status: (displayErrorMessage || missingFinalResponseMessage ? 'error' : 'completed') as RunStatus,
+      errorMessage: displayErrorMessage || missingFinalResponseMessage,
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      stdout: finalStdout,
+      stderr: finalStderr,
+      responseText: responseText || previousResponseText,
+    };
+  } catch (err) {
+    extractionErrorMessage = `Failed to extract agent final response: ${(err as Error).message}`;
+  }
 
   return {
-    status: (errorMessage ? 'error' : 'completed') as RunStatus,
-    errorMessage,
+    status: 'error' as RunStatus,
+    errorMessage: formatAgentRunErrorMessage(extractionErrorMessage),
     finishedAt: new Date().toISOString(),
     durationMs,
     stdout: finalStdout,
-    stderr: stderr ?? (run.stderr as string | null) ?? null,
-    responseText: responseText || previousResponseText,
+    stderr: finalStderr,
+    responseText: previousResponseText,
   };
+}
+
+function buildCardAssignmentTerminalComment(params: {
+  run: Record<string, unknown>,
+  patch: Record<string, unknown>,
+}): string {
+  const { run, patch } = params;
+  const status = String(patch.status ?? run.status ?? 'unknown');
+  const runId = String(run.id ?? '');
+  const cardId = String(run.cardId ?? '');
+  const agentId = String(run.agentId ?? '');
+  const triggerType = String(run.triggerType ?? 'card_assignment');
+  const responseText = typeof patch.responseText === 'string' ? patch.responseText.trim() : '';
+  const stdout = typeof patch.stdout === 'string' ? patch.stdout : '';
+  const stderr = typeof patch.stderr === 'string' ? patch.stderr.trim() : '';
+  const rawErrorMessage =
+    typeof patch.errorMessage === 'string'
+      ? patch.errorMessage
+      : typeof run.errorMessage === 'string'
+        ? run.errorMessage
+        : null;
+  const errorMessage = formatAgentRunErrorMessage(rawErrorMessage);
+
+  let summary = responseText || errorMessage;
+  if (!summary && stdout) {
+    summary = extractFinalResponseText(stdout).trim() || extractAgentOutputErrorText(stdout).trim();
+  }
+  if (!summary && stderr) summary = stderr;
+  if (!summary) summary = '(empty response)';
+
+  if (summary.length > MAX_CARD_AUTO_COMMENT_LENGTH) {
+    summary = `${summary.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 3)}...`;
+  }
+
+  return [
+    `Agent run terminal status: ${status}`,
+    `Run ID: ${runId}`,
+    `Card ID: ${cardId}`,
+    `Agent ID: ${agentId}`,
+    `Trigger type: ${triggerType}`,
+    '',
+    'Final summary:',
+    summary,
+    '',
+    'Links:',
+    `- GET /api/agent-runs/${runId}`,
+    `- GET /api/cards/${cardId}/comments`,
+  ].join('\n');
+}
+
+function persistTerminalCardAssignmentComment(
+  run: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): { ok: true } | { ok: false; errorMessage: string } {
+  const status = patch.status as RunStatus;
+  if (
+    run.triggerType !== 'card_assignment' ||
+    !CARD_COMMENT_TERMINAL_STATUSES.has(status)
+  ) {
+    return { ok: true };
+  }
+
+  const runId = typeof run.id === 'string' ? run.id : null;
+  const cardId = typeof run.cardId === 'string' ? run.cardId : null;
+  const agentId = typeof run.agentId === 'string' ? run.agentId : null;
+  if (!runId || !cardId || !agentId) {
+    return {
+      ok: false,
+      errorMessage: 'Cannot persist card completion comment because run, card, or agent attribution is missing.',
+    };
+  }
+
+  const existing = store
+    .getAll('cardComments')
+    .some((comment: Record<string, unknown>) => comment.cardId === cardId && comment.agentRunId === runId);
+  if (existing) return { ok: true };
+
+  try {
+    store.insert('cardComments', {
+      cardId,
+      authorId: agentId,
+      content: buildCardAssignmentTerminalComment({ run, patch }),
+      agentRunId: runId,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      errorMessage: `Failed to persist card completion comment: ${(err as Error).message}`,
+    };
+  }
 }
 
 export async function completeAgentRun(
@@ -116,11 +266,77 @@ export async function completeAgentRun(
     const run = store.getById('agent_runs', runId);
     if (!run || run.status !== 'running') return null;
     const patch = buildAgentRunCompletionPatch(run, errorMessage, logs);
-    return store.update('agent_runs', runId, patch);
+    let updated = store.update('agent_runs', runId, patch);
+    if (!updated) return null;
+
+    const sideEffect = persistTerminalCardAssignmentComment(run, patch);
+    if (!sideEffect.ok) {
+      updated = store.update('agent_runs', runId, {
+        status: 'error' as RunStatus,
+        errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
+        finishedAt: new Date().toISOString(),
+      });
+    }
+    return updated;
   });
 }
 
-export function getAgentRun(runId: string) {
+export async function failAgentRunCompletionSideEffect(
+  runId: string,
+  errorMessage: string,
+  logs?: { stdout?: string; stderr?: string },
+): Promise<Record<string, unknown> | null> {
+  return store.transaction(async () => {
+    await store.lockAgentRunRowForUpdate(runId);
+    const run = store.getById('agent_runs', runId);
+    if (!run || run.status === 'error') return null;
+
+    if (logs?.stdout !== undefined && typeof run.stdoutPath === 'string' && run.stdoutPath) {
+      try {
+        fs.mkdirSync(path.dirname(run.stdoutPath), { recursive: true });
+        fs.writeFileSync(run.stdoutPath, logs.stdout);
+      } catch {
+        // Keep the DB snapshot even if the file cache cannot be refreshed.
+      }
+    }
+    if (logs?.stderr !== undefined && typeof run.stderrPath === 'string' && run.stderrPath) {
+      try {
+        fs.mkdirSync(path.dirname(run.stderrPath), { recursive: true });
+        fs.writeFileSync(run.stderrPath, logs.stderr);
+      } catch {
+        // Keep the DB snapshot even if the file cache cannot be refreshed.
+      }
+    }
+
+    const patch = {
+      status: 'error' as RunStatus,
+      errorMessage: formatAgentRunErrorMessage(errorMessage),
+      finishedAt: new Date().toISOString(),
+      stdout: logs?.stdout ?? (run.stdout as string | null) ?? null,
+      stderr: logs?.stderr ?? (run.stderr as string | null) ?? null,
+    };
+    let updated = store.update('agent_runs', runId, patch);
+    if (!updated) return null;
+    const sideEffect = persistTerminalCardAssignmentComment(run, patch);
+    if (!sideEffect.ok) {
+      updated = store.update('agent_runs', runId, {
+        status: 'error' as RunStatus,
+        errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
+        finishedAt: new Date().toISOString(),
+      });
+    }
+    return updated;
+  });
+}
+
+export function getAgentRun(
+  runId: string,
+): (StoreRecord & {
+  errorMessage: string | null;
+  stdout: string | null;
+  stderr: string | null;
+  responseText: string | null;
+}) | null {
   const run = store.getById('agent_runs', runId);
   if (!run) return null;
 
@@ -147,7 +363,7 @@ export function getAgentRun(runId: string) {
 
   const storedResponseText =
     typeof run.responseText === 'string' ? run.responseText : null;
-  const shouldExtractResponse = run.status !== 'running';
+  const shouldExtractResponse = run.status === 'completed';
   const extractedResponseText =
     shouldExtractResponse && stdout ? extractFinalResponseText(stdout) : '';
   const responseText = extractedResponseText || storedResponseText;
@@ -158,6 +374,9 @@ export function getAgentRun(runId: string) {
 
   return {
     ...run,
+    errorMessage: formatAgentRunErrorMessage(
+      typeof run.errorMessage === 'string' ? run.errorMessage : null,
+    ),
     stdout,
     stderr,
     responseText,
@@ -172,7 +391,9 @@ export async function killAgentRun(runId: string): Promise<{ ok: boolean; error?
     if (run.status !== 'running') return { ok: false, error: 'Run is not active' };
 
     const pid = run.pid as number | null;
-    if (pid) {
+    if (run.executor === 'remote') {
+      cancelRemoteAgentRun(runId);
+    } else if (pid) {
       try {
         process.kill(pid, 'SIGTERM');
       } catch {
@@ -181,7 +402,16 @@ export async function killAgentRun(runId: string): Promise<{ ok: boolean; error?
     }
 
     const patch = buildAgentRunCompletionPatch(run, 'Killed by user', undefined);
-    store.update('agent_runs', runId, { ...patch, killedByUser: true });
+    const finalPatch = { ...patch, killedByUser: true };
+    store.update('agent_runs', runId, finalPatch);
+    const sideEffect = persistTerminalCardAssignmentComment(run, finalPatch);
+    if (!sideEffect.ok) {
+      store.update('agent_runs', runId, {
+        status: 'error' as RunStatus,
+        errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
+        finishedAt: new Date().toISOString(),
+      });
+    }
     return { ok: true };
   });
 }
@@ -196,6 +426,9 @@ interface ListAgentRunsParams {
 }
 
 function toAgentRunSummary(run: Record<string, unknown>) {
+  const rawErrorMessage = typeof run.errorMessage === 'string' ? run.errorMessage : null;
+  const errorMessage = formatAgentRunErrorMessage(rawErrorMessage);
+
   return {
     id: run.id,
     agentId: run.agentId,
@@ -211,7 +444,7 @@ function toAgentRunSummary(run: Record<string, unknown>) {
     cardId: run.cardId ?? null,
     cronJobId: run.cronJobId ?? null,
     responseParentId: run.responseParentId ?? null,
-    errorMessage: run.errorMessage ?? null,
+    errorMessage,
     responseText: run.responseText ?? null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,
@@ -258,11 +491,11 @@ function isPidAlive(pid: number): boolean {
 
 /**
  * On startup, check all 'running' agent runs.
- * - If PID is alive → call reattach callback so agent-chat can re-monitor
- * - If PID is dead → read output from log files and mark completed/error
+ * - If a legacy local PID is alive and a reattach callback is available, re-monitor it
+ * - If PID is dead or no callback is available, read output from log files and mark completed/error
  */
 export async function reconcileRunsOnStartup(
-  reattach: (run: Record<string, unknown>) => void,
+  reattach?: (run: Record<string, unknown>) => void,
 ) {
   const stale = await findRunningAgentRunsAsync();
   if (stale.length === 0) return [];
@@ -272,8 +505,15 @@ export async function reconcileRunsOnStartup(
   for (const run of stale) {
     const id = run.id as string;
     const pid = run.pid as number | null;
+    const executor = typeof run.executor === 'string' ? run.executor : 'local';
+    const hasRemoteLogPaths = Boolean(run.stdoutPath || run.stderrPath);
 
-    if (pid && isPidAlive(pid)) {
+    if (executor === 'remote' && !pid && hasRemoteLogPaths) {
+      console.log(`[agent-runs] Preserving remote run ${id} for runner reconnection`);
+      continue;
+    }
+
+    if (pid && reattach && isPidAlive(pid)) {
       console.log(`[agent-runs] PID ${pid} still alive for run ${id}, re-attaching`);
       reattach(run);
       continue;
@@ -296,28 +536,41 @@ export async function reconcileRunsOnStartup(
     const startedAt = new Date(run.startedAt as string).getTime();
     const now = Date.now();
 
-    if (hasOutput) {
-      console.log(`[agent-runs] PID dead but stdout exists for run ${id}, marking completed`);
-      const responseText = extractFinalResponseText(stdout);
-      store.update('agent_runs', id, {
-        status: 'completed',
-        errorMessage: null,
-        finishedAt: new Date().toISOString(),
-        durationMs: now - startedAt,
+    const structuredErrorMessage = hasOutput ? extractAgentOutputErrorText(stdout) : '';
+
+    if (structuredErrorMessage) {
+      console.log(`[agent-runs] PID dead and stdout reports an error for run ${id}`);
+      await completeAgentRun(id, structuredErrorMessage, {
         stdout,
         stderr,
-        responseText: responseText || null,
+      });
+    } else if (hasOutput) {
+      console.log(`[agent-runs] PID dead but stdout exists for run ${id}, marking completed`);
+      await completeAgentRun(id, null, {
+        stdout,
+        stderr,
       });
     } else {
       console.log(`[agent-runs] PID dead, no output for run ${id}, marking error`);
-      store.update('agent_runs', id, {
+      const patch = {
         status: 'error',
-        errorMessage: stderr.trim() || 'Process died (server restarted or process killed)',
+        errorMessage: stderr.trim()
+          ? DEFAULT_AGENT_RUN_ERROR_MESSAGE
+          : 'Process died (server restarted or process killed)',
         finishedAt: new Date().toISOString(),
         durationMs: now - startedAt,
         stdout,
         stderr,
-      });
+      };
+      store.update('agent_runs', id, patch);
+      const sideEffect = persistTerminalCardAssignmentComment(run, patch);
+      if (!sideEffect.ok) {
+        store.update('agent_runs', id, {
+          status: 'error',
+          errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
+          finishedAt: new Date().toISOString(),
+        });
+      }
     }
   }
 

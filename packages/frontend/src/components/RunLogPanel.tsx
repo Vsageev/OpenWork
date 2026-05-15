@@ -22,6 +22,7 @@ import { MarkdownContent } from '../ui/MarkdownContent';
 import {
   extractFinalResponseText,
   formatAgentOutputForDisplay,
+  formatAgentRunErrorMessage,
   parseAgentOutputBlocks,
 } from 'shared';
 import type { OutputBlock } from 'shared';
@@ -443,7 +444,8 @@ export function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: 'r
 
   const hasStdout = detail.stdout && detail.stdout.trim().length > 0;
   const hasStderr = detail.stderr && detail.stderr.trim().length > 0;
-  const hasError = detail.errorMessage && detail.errorMessage.trim().length > 0;
+  const errorText = formatAgentRunErrorMessage(detail.errorMessage);
+  const hasError = Boolean(errorText);
   const shortResponse = detail.responseText?.trim() || null;
   const stdoutText = detail.stdout?.trim() || null;
   const parsedBlocks = stdoutText ? parseAgentOutputBlocks(stdoutText) : null;
@@ -460,7 +462,7 @@ export function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: 'r
   };
   const canExpandPrompt = isExpandable(promptText);
   const canExpandResponse = isExpandable(shortResponse);
-  const canExpandError = isExpandable(detail.errorMessage);
+  const canExpandError = isExpandable(errorText);
   const canExpandStdout = isExpandable(formattedStdout);
   const canExpandStderr = isExpandable(formattedStderr);
   const toggleSection = (section: 'prompt' | 'response' | 'error' | 'stdout' | 'stderr') => {
@@ -535,9 +537,9 @@ export function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: 'r
                 {expandedSections.error ? 'Collapse' : 'View full'}
               </button>
             )}
-            <LogCopyButton text={detail.errorMessage!} />
+            <LogCopyButton text={errorText!} />
           </div>
-          <pre className={`${styles.logPre} ${styles.logPreError} ${canExpandError && !expandedSections.error ? styles.logPreCollapsed : ''} ${expandedSections.error ? styles.logPreExpanded : ''}`}>{detail.errorMessage}</pre>
+          <pre className={`${styles.logPre} ${styles.logPreError} ${canExpandError && !expandedSections.error ? styles.logPreCollapsed : ''} ${expandedSections.error ? styles.logPreExpanded : ''}`}>{errorText}</pre>
         </div>
       )}
       {hasStdout && (

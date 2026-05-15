@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type { DatabaseConfig } from '../config/database.js';
 import * as schema from './schema.js';
@@ -360,6 +361,7 @@ const MAPPINGS: CollectionMapping[] = [
     'conversationId',
     'cardId',
     'cronJobId',
+    'executor',
     'pid',
     'stdoutPath',
     'stderrPath',
@@ -375,6 +377,34 @@ const MAPPINGS: CollectionMapping[] = [
     'startedAt',
     'finishedAt',
     'durationMs',
+    'createdAt',
+    'updatedAt',
+    'legacyData',
+  ]),
+  mapping('agentRunners', 'agent_runners', [
+    'id',
+    'userId',
+    'workspaceId',
+    'displayName',
+    'credentialHash',
+    'credentialPrefix',
+    'status',
+    'lastSeenAt',
+    'version',
+    'capabilities',
+    'revokedAt',
+    'createdAt',
+    'updatedAt',
+    'legacyData',
+  ]),
+  mapping('agentRunnerPairingCodes', 'agent_runner_pairing_codes', [
+    'id',
+    'userId',
+    'workspaceId',
+    'codeHash',
+    'displayName',
+    'expiresAt',
+    'usedAt',
     'createdAt',
     'updatedAt',
     'legacyData',
@@ -539,6 +569,8 @@ export class SqlStoreAdapter implements Store, NativeQueryStore<ReturnType<typeo
   private writeError: unknown = null;
   private transactionClient: SqlClient | null = null;
   private transactionWrites: Promise<void>[] | null = null;
+  private transactionQueue: Promise<void> = Promise.resolve();
+  private transactionScope = new AsyncLocalStorage<boolean>();
 
   constructor(
     private readonly config: DatabaseConfig,
@@ -636,33 +668,37 @@ export class SqlStoreAdapter implements Store, NativeQueryStore<ReturnType<typeo
   }
 
   async transaction<T>(operation: () => Promise<T> | T): Promise<T> {
-    if (this.transactionClient) {
+    if (this.transactionClient && this.transactionScope.getStore()) {
       return operation();
     }
 
-    await this.flush();
+    return this.withTransactionLock(async () => {
+      await this.flush();
 
-    const snapshot = this.cloneCollections();
-    const client = this.requireClient();
-    if (!client.begin) throw new Error('SQL client does not support transactions.');
+      const snapshot = this.cloneCollections();
+      const client = this.requireClient();
+      if (!client.begin) throw new Error('SQL client does not support transactions.');
 
-    try {
-      return await client.begin(async (transactionClient: SqlClient) => {
-        this.transactionClient = transactionClient;
-        this.transactionWrites = [];
-        try {
-          const result = await operation();
-          await Promise.all(this.transactionWrites);
-          return result;
-        } finally {
-          this.transactionClient = null;
-          this.transactionWrites = null;
-        }
-      });
-    } catch (error) {
-      this.collections = snapshot;
-      throw error;
-    }
+      try {
+        return await client.begin(async (transactionClient: SqlClient) => {
+          this.transactionClient = transactionClient;
+          this.transactionWrites = [];
+          try {
+            return await this.transactionScope.run(true, async () => {
+              const result = await operation();
+              await Promise.all(this.transactionWrites ?? []);
+              return result;
+            });
+          } finally {
+            this.transactionClient = null;
+            this.transactionWrites = null;
+          }
+        });
+      } catch (error) {
+        this.collections = snapshot;
+        throw error;
+      }
+    });
   }
 
   async reload(): Promise<void> {
@@ -898,6 +934,21 @@ export class SqlStoreAdapter implements Store, NativeQueryStore<ReturnType<typeo
       this.writeError = error;
     });
     return run;
+  }
+
+  private async withTransactionLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.transactionQueue;
+    let release!: () => void;
+    this.transactionQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private withWritePromise<T extends StoreRecord>(record: T, write: Promise<void>): T & PromiseLike<T> {

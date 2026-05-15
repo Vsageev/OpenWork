@@ -280,6 +280,7 @@ export interface AgentRun {
   conversationId: string | null;
   cardId: string | null;
   cronJobId: string | null;
+  executor: 'local' | 'remote';
   pid: number | null;
   stdoutPath: string | null;
   stderrPath: string | null;

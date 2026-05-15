@@ -8,7 +8,7 @@ import { toast } from '../stores/toast';
 import styles from './AgentMonitorPage.module.css';
 import { MarkdownContent } from '../ui/MarkdownContent';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import { extractFinalResponseText, formatAgentOutputForDisplay, parseAgentOutputBlocks } from 'shared';
+import { extractFinalResponseText, formatAgentOutputForDisplay, formatAgentRunErrorMessage, parseAgentOutputBlocks } from 'shared';
 import type { OutputBlock } from 'shared';
 import { getAgentModelDefinition } from '../lib/agent-models';
 
@@ -626,7 +626,8 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
 
   const hasStdout = detail.stdout && detail.stdout.trim().length > 0;
   const hasStderr = detail.stderr && detail.stderr.trim().length > 0;
-  const hasError = detail.errorMessage && detail.errorMessage.trim().length > 0;
+  const errorText = formatAgentRunErrorMessage(detail.errorMessage);
+  const hasError = Boolean(errorText);
   const shortResponse = detail.responseText?.trim() || null;
   const stdoutText = detail.stdout?.trim() || null;
   const parsedBlocks = stdoutText ? parseAgentOutputBlocks(stdoutText) : null;
@@ -644,7 +645,7 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
   };
   const canExpandPrompt = isExpandable(promptText);
   const canExpandResponse = isExpandable(shortResponse);
-  const canExpandError = isExpandable(detail.errorMessage);
+  const canExpandError = isExpandable(errorText);
   const canExpandStdout = isExpandable(formattedStdout);
   const canExpandStderr = isExpandable(formattedStderr);
   const toggleSection = (section: 'prompt' | 'response' | 'error' | 'stdout' | 'stderr') => {
@@ -719,9 +720,9 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
                 {expandedSections.error ? 'Collapse' : 'View full'}
               </button>
             )}
-            <LogCopyButton text={detail.errorMessage!} />
+            <LogCopyButton text={errorText!} />
           </div>
-          <pre className={`${styles.logPre} ${styles.logPreError} ${canExpandError && !expandedSections.error ? styles.logPreCollapsed : ''} ${expandedSections.error ? styles.logPreExpanded : ''}`}>{detail.errorMessage}</pre>
+          <pre className={`${styles.logPre} ${styles.logPreError} ${canExpandError && !expandedSections.error ? styles.logPreCollapsed : ''} ${expandedSections.error ? styles.logPreExpanded : ''}`}>{errorText}</pre>
         </div>
       )}
       {hasStdout && (

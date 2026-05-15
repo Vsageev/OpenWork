@@ -136,7 +136,7 @@ export function CollectionDetailPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const { activeWorkspace } = useWorkspace();
+  const { activeWorkspace, activeWorkspaceId } = useWorkspace();
   const { user } = useAuth();
   const { isFavorite, toggleFavorite } = useFavorites();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -205,6 +205,7 @@ export function CollectionDetailPage() {
         body: JSON.stringify({
           name: newCollectionName.trim(),
           description: newCollectionDesc.trim() || null,
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       setShowCreateCollection(false);

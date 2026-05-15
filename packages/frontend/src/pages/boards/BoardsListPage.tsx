@@ -154,6 +154,7 @@ export function BoardsListPage() {
             { name: 'In Progress', color: '#3B82F6', position: 1 },
             { name: 'Done', color: '#10B981', position: 2 },
           ],
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       await fetchBoards();
@@ -209,6 +210,7 @@ export function BoardsListPage() {
             { name: 'In Progress', color: '#3B82F6', position: 1 },
             { name: 'Done', color: '#10B981', position: 2 },
           ],
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       setShowCreate(false);

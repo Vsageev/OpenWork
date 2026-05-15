@@ -12,7 +12,12 @@ import {
   updateCollection,
   deleteCollection,
 } from '../services/collections.js';
-import { getWorkspaceById } from '../services/workspaces.js';
+import {
+  addWorkspaceContent,
+  ensureDefaultWorkspaceForUser,
+  ensureWorkspaceContentAssignedToWorkspace,
+  getWorkspaceById,
+} from '../services/workspaces.js';
 import { listCards } from '../services/cards.js';
 import {
   cancelAgentBatchRun,
@@ -41,6 +46,7 @@ const agentBatchConfigSchema = z.object({
 const createCollectionBody = z.object({
   name: z.string().min(1).max(255),
   description: z.string().nullable().optional(),
+  workspaceId: z.uuid().optional(),
 });
 
 const updateCollectionBody = z.object({
@@ -93,9 +99,14 @@ export async function collectionRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      await ensureDefaultWorkspaceForUser(request.user.sub);
       let ids: string[] | undefined;
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId);
+        const workspace =
+          (await ensureWorkspaceContentAssignedToWorkspace(
+            request.query.workspaceId,
+            request.user.sub,
+          )) ?? (await getWorkspaceById(request.query.workspaceId));
         if (workspace) {
           ids = workspace.collectionIds;
         }
@@ -188,11 +199,15 @@ export async function collectionRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const collection = await createCollection(request.body, {
+      const { workspaceId, ...collectionBody } = request.body;
+      const collection = await createCollection(collectionBody, {
         userId: request.user.sub,
         ipAddress: request.ip,
         userAgent: request.headers['user-agent'],
       });
+      const targetWorkspaceId =
+        workspaceId ?? (await ensureDefaultWorkspaceForUser(request.user.sub)).id;
+      await addWorkspaceContent(targetWorkspaceId, { collectionIds: [collection.id] });
 
       return reply.status(201).send(collection);
     },

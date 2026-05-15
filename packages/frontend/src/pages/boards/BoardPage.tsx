@@ -201,7 +201,7 @@ export function BoardPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const { activeWorkspace } = useWorkspace();
+  const { activeWorkspace, activeWorkspaceId } = useWorkspace();
   const { isFavorite, toggleFavorite } = useFavorites();
   const [searchParams, setSearchParams] = useSearchParams();
   const [board, setBoard] = useState<BoardWithCards | null>(null);
@@ -261,6 +261,7 @@ export function BoardPage() {
             { name: 'In Progress', color: '#3B82F6', position: 1 },
             { name: 'Done', color: '#10B981', position: 2 },
           ],
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       setShowCreateBoard(false);

@@ -582,6 +582,7 @@ export const agentRuns = pgTable(
     conversationId: text('conversation_id').references(() => conversations.id),
     cardId: text('card_id').references(() => cards.id),
     cronJobId: text('cron_job_id'),
+    executor: text('executor').notNull().default('remote'),
     pid: integer('pid'),
     stdoutPath: text('stdout_path'),
     stderrPath: text('stderr_path'),
@@ -609,6 +610,77 @@ export const agentRuns = pgTable(
     index('agent_runs_live_chat_idx')
       .on(table.agentId, table.conversationId)
       .where(sql`${table.status} = 'running' AND ${table.triggerType} = 'chat'`),
+  ],
+);
+
+export const agentRunnerTokens = pgTable(
+  'agent_runner_tokens',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    tokenPrefix: text('token_prefix').notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    ...timestamps,
+    ...legacyPayload,
+  },
+  (table) => [
+    uniqueIndex('agent_runner_tokens_hash_idx').on(table.tokenHash),
+    index('agent_runner_tokens_user_id_idx').on(table.userId),
+  ],
+);
+
+export const agentRunners = pgTable(
+  'agent_runners',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    displayName: text('display_name').notNull(),
+    credentialHash: text('credential_hash').notNull(),
+    credentialPrefix: text('credential_prefix').notNull(),
+    status: text('status').notNull().default('offline'),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+    version: text('version'),
+    capabilities: jsonb('capabilities').notNull().default({}),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    ...timestamps,
+    ...legacyPayload,
+  },
+  (table) => [
+    uniqueIndex('agent_runners_credential_hash_idx').on(table.credentialHash),
+    index('agent_runners_user_workspace_idx').on(table.userId, table.workspaceId),
+  ],
+);
+
+export const agentRunnerPairingCodes = pgTable(
+  'agent_runner_pairing_codes',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    codeHash: text('code_hash').notNull(),
+    displayName: text('display_name').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    ...timestamps,
+    ...legacyPayload,
+  },
+  (table) => [
+    uniqueIndex('agent_runner_pairing_codes_hash_idx').on(table.codeHash),
+    index('agent_runner_pairing_codes_user_workspace_idx').on(table.userId, table.workspaceId),
   ],
 );
 

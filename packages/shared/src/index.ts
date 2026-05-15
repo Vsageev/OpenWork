@@ -63,5 +63,33 @@ export {
 } from './utils.js';
 
 export type { ListResponse } from './utils.js';
-export { extractFinalResponseText, formatAgentOutputForDisplay, parseAgentOutputBlocks } from './agent-output.js';
+export {
+  CODEX_INCOMPLETE_OUTPUT_ERROR_MESSAGE,
+  DEFAULT_AGENT_RUN_ERROR_MESSAGE,
+  STREAM_JSON_INCOMPLETE_OUTPUT_ERROR_MESSAGE,
+  extractAgentOutputErrorText,
+  extractAgentOutputIncompleteText,
+  extractFinalResponseText,
+  formatAgentOutputForDisplay,
+  formatAgentRunErrorMessage,
+  parseAgentOutputBlocks,
+} from './agent-output.js';
 export type { OutputBlock, OutputBlockType, SystemInitBlock, ThinkingBlock, AssistantTextBlock, ToolCallBlock, ToolResultBlock, ResultBlock, RateLimitBlock, MessageMetaBlock, PlainTextBlock } from './agent-output.js';
+export {
+  RUNNER_PROTOCOL_VERSION,
+  parseRunnerJobIntent,
+  parseRunnerServerMessage,
+  parseServerRunnerMessage,
+} from './runner-protocol.js';
+export type {
+  RunnerAgentKind,
+  RunnerApprovalMode,
+  RunnerCapabilities,
+  RunnerJobIntent,
+  RunnerOutputStream,
+  RunnerProvider,
+  RunnerProtocolVersion,
+  RunnerRejectionCode,
+  RunnerServerMessage,
+  ServerRunnerMessage,
+} from './runner-protocol.js';

@@ -18,7 +18,11 @@ vi.mock('../db/connection.js', () => ({
   },
 }));
 
-import { getConversationAttachmentDiskPaths } from './agent-chat.js';
+import {
+  activateMessagePathForSearchResult,
+  getActiveMessagePath,
+  getConversationAttachmentDiskPaths,
+} from './agent-chat.js';
 
 const CONV_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -39,7 +43,12 @@ describe('getConversationAttachmentDiskPaths', () => {
     mockGetById.mockImplementation((col: string, id: string) =>
       (recordsByCollection[col] ?? []).find((record) => record.id === id) ?? null,
     );
-    mockUpdate.mockReset();
+    mockUpdate.mockImplementation((col: string, id: string, patch: Record<string, unknown>) => {
+      const record = (recordsByCollection[col] ?? []).find((entry) => entry.id === id);
+      if (!record) return null;
+      Object.assign(record, patch);
+      return record;
+    });
 
     vi.spyOn(fs, 'existsSync').mockImplementation((targetPath) => {
       const normalized =
@@ -158,5 +167,84 @@ describe('getConversationAttachmentDiskPaths', () => {
       'reply.txt',
       'branch-a.txt',
     ]);
+  });
+
+  it('activates the branch path that contains a searched message', () => {
+    recordsByCollection.conversations = [
+      {
+        id: CONV_ID,
+        metadata: JSON.stringify({
+          activeBranches: {
+            'user:root': 'u1',
+            'reply:u1': 'a1',
+            'user:u1': 'u2b',
+            'reply:u2b': 'r2b',
+          },
+        }),
+      },
+    ];
+    recordsByCollection.messages = [
+      {
+        id: 'u1',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: null,
+        previousUserMessageId: null,
+        createdAt: '2026-05-07T10:00:00.000Z',
+      },
+      {
+        id: 'a1',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        parentId: 'u1',
+        createdAt: '2026-05-07T10:01:00.000Z',
+      },
+      {
+        id: 'u2a',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: 'a1',
+        previousUserMessageId: 'u1',
+        createdAt: '2026-05-07T10:02:00.000Z',
+      },
+      {
+        id: 'r2a',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        parentId: 'u2a',
+        createdAt: '2026-05-07T10:03:00.000Z',
+      },
+      {
+        id: 'u2b',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        parentId: 'a1',
+        previousUserMessageId: 'u1',
+        createdAt: '2026-05-07T10:04:00.000Z',
+      },
+      {
+        id: 'r2b',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        parentId: 'u2b',
+        createdAt: '2026-05-07T10:05:00.000Z',
+      },
+    ];
+
+    activateMessagePathForSearchResult(CONV_ID, 'r2a');
+
+    expect(getActiveMessagePath(CONV_ID).map((message) => message.id)).toEqual([
+      'u1',
+      'a1',
+      'u2a',
+      'r2a',
+    ]);
+    const metadata = JSON.parse(String(recordsByCollection.conversations[0].metadata));
+    expect(metadata.activeBranches).toMatchObject({
+      'user:root': 'u1',
+      'reply:u1': 'a1',
+      'user:u1': 'u2a',
+      'reply:u2a': 'r2a',
+    });
   });
 });

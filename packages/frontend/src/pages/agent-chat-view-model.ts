@@ -39,6 +39,8 @@ export interface AgentChatQueueItem {
 
 export interface AgentConversationRunSummary {
   id: string;
+  agentId?: string;
+  conversationId?: string | null;
   responseParentId?: string | null;
   status: 'running' | 'completed' | 'error';
   startedAt: string;
@@ -68,6 +70,7 @@ export interface AgentConversationViewModel {
   effectivePendingBranchExecutionsByMessageId: Map<string, AgentChatQueueItem[]>;
   errorsByMessageId: Map<string, AgentChatQueueItem[]>;
   orphanErrorItems: AgentChatQueueItem[];
+  activeConversationRun: AgentConversationRunSummary | null;
   activeProcessingTargetMessageId: string | null;
   showStreamingBubble: boolean;
 }
@@ -114,13 +117,21 @@ export function buildAgentConversationViewModel(
 ): AgentConversationViewModel {
   const {
     messages,
-    queueItems,
-    activeConversationRuns,
     activeAgentId,
     activeConvId,
     activeConversationKey,
     optimisticResponseParentIds,
   } = options;
+  const queueItems = options.queueItems.filter((item) => {
+    if (!activeAgentId || !activeConvId) return false;
+    return item.agentId === activeAgentId && item.conversationId === activeConvId;
+  });
+  const activeConversationRuns = options.activeConversationRuns.filter((run) => {
+    if (run.status !== 'running') return false;
+    if (activeAgentId && run.agentId && run.agentId !== activeAgentId) return false;
+    if (activeConvId && run.conversationId && run.conversationId !== activeConvId) return false;
+    return true;
+  });
 
   const activeBranchMessages = [...messages].sort(compareByCreatedAt);
   const activeBranchMessageIds = new Set(activeBranchMessages.map((message) => message.id));
@@ -178,7 +189,12 @@ export function buildAgentConversationViewModel(
       const selectionKey = previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
       const selectedMessageId = selectedUserMessageIdByPreviousMessageId.get(selectionKey) ?? null;
 
-      if (selectedMessageId && queuedMessageId && selectedMessageId !== queuedMessageId) {
+      if (
+        previousUserMessageId !== null &&
+        selectedMessageId &&
+        queuedMessageId &&
+        selectedMessageId !== queuedMessageId
+      ) {
         return false;
       }
 
@@ -227,6 +243,7 @@ export function buildAgentConversationViewModel(
   const visibleConversationRuns = activeConversationRuns.filter(
     (run) => run.status === 'running' && Boolean(run.responseParentId) && activeMessageIds.has(run.responseParentId!),
   );
+  const activeConversationRun = visibleConversationRuns[0] ?? null;
 
   for (const run of visibleConversationRuns) {
     const messageId = run.responseParentId!;
@@ -266,6 +283,32 @@ export function buildAgentConversationViewModel(
         queueItem: appendQueueItem,
       };
     });
+
+  const queuedMessageIds = new Set(queuedMessages.map(({ message }) => message.id));
+  for (const item of queuedQueueItems) {
+    const queuedMessageId = item.queuedMessageId ?? null;
+    if (!queuedMessageId) continue;
+    if (activeBranchMessageIds.has(queuedMessageId)) continue;
+    if (queuedMessageIds.has(queuedMessageId)) continue;
+
+    queuedMessages.push({
+      message: {
+        id: queuedMessageId,
+        direction: 'outbound',
+        content: item.prompt,
+        createdAt: item.createdAt,
+        type: 'text',
+        metadata: null,
+        attachments: null,
+        parentId: null,
+        previousUserMessageId: item.previousUserMessageId ?? null,
+      },
+      status: item.status === 'processing' ? 'processing' : 'queued',
+      queueItem: item,
+    });
+    queuedMessageIds.add(queuedMessageId);
+  }
+  queuedMessages.sort((a, b) => compareByCreatedAt(a.message, b.message));
 
   function shouldHideBranchError(item: AgentChatQueueItem): boolean {
     const anchorId = item.targetMessageId ?? item.queuedMessageId;
@@ -357,6 +400,7 @@ export function buildAgentConversationViewModel(
     effectivePendingBranchExecutionsByMessageId,
     errorsByMessageId,
     orphanErrorItems,
+    activeConversationRun,
     activeProcessingTargetMessageId,
     showStreamingBubble,
   };

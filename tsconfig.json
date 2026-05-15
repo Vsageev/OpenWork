@@ -4,6 +4,7 @@
     { "path": "packages/shared" },
     { "path": "packages/backend" },
     { "path": "packages/frontend" },
+    { "path": "packages/runner" },
     { "path": "packages/widget" }
   ]
 }

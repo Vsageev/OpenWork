@@ -20,7 +20,12 @@ import {
   removeCardFromBoard,
   clearBoardCards,
 } from '../services/boards.js';
-import { getWorkspaceById } from '../services/workspaces.js';
+import {
+  addWorkspaceContent,
+  ensureDefaultWorkspaceForUser,
+  ensureWorkspaceContentAssignedToWorkspace,
+  getWorkspaceById,
+} from '../services/workspaces.js';
 import {
   cancelAgentBatchRun,
   getAgentBatchRun,
@@ -54,6 +59,7 @@ const createBoardBody = z.object({
   collectionId: z.uuid().nullable().optional(),
   defaultCollectionId: z.uuid().nullable().optional(),
   columns: z.array(columnSchema).optional(),
+  workspaceId: z.uuid().optional(),
 });
 
 const updateBoardBody = z.object({
@@ -107,9 +113,14 @@ export async function boardRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      await ensureDefaultWorkspaceForUser(request.user.sub);
       let ids: string[] | undefined;
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId);
+        const workspace =
+          (await ensureWorkspaceContentAssignedToWorkspace(
+            request.query.workspaceId,
+            request.user.sub,
+          )) ?? (await getWorkspaceById(request.query.workspaceId));
         if (workspace) {
           ids = workspace.boardIds;
         }
@@ -164,10 +175,20 @@ export async function boardRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const board = await createBoard(request.body, {
+      const { workspaceId, ...boardBody } = request.body;
+      const board = await createBoard(boardBody, {
         userId: request.user.sub,
         ipAddress: request.ip,
         userAgent: request.headers['user-agent'],
+      });
+      const targetWorkspaceId =
+        workspaceId ?? (await ensureDefaultWorkspaceForUser(request.user.sub)).id;
+      await addWorkspaceContent(targetWorkspaceId, {
+        boardIds: [board.id],
+        collectionIds: [
+          ...(board.collectionId ? [board.collectionId] : []),
+          ...(board.defaultCollectionId ? [board.defaultCollectionId] : []),
+        ],
       });
 
       return reply.status(201).send(board);

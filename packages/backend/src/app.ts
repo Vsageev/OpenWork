@@ -44,6 +44,7 @@ import { agentEnvVarRoutes } from './routes/agent-env-vars.js';
 import { skillRoutes } from './routes/skills.js';
 import { agentChatRoutes } from './routes/agent-chat.js';
 import { agentRunRoutes } from './routes/agent-runs.js';
+import { agentRunnerRoutes } from './routes/agent-runners.js';
 import { settingsRoutes, initRateLimiterFromSettings } from './routes/settings.js';
 import { initAllCronJobs, shutdownAgentCronJobs } from './services/agent-cron.js';
 import { initAllBoardCronJobs } from './services/board-cron.js';
@@ -51,12 +52,13 @@ import { reconcileRunsOnStartup, cleanupOldRunLogs } from './services/agent-runs
 import {
   initializeAgentChatQueue,
   recoverCompletedChatRunsOnStartup,
-  reattachRunningProcess,
   RUNS_DIR,
+  scheduleQueuedAgentChatDrains,
 } from './services/agent-chat.js';
 import { initializeAgentBatchQueue } from './services/agent-batch-queue.js';
 import { restoreManagedTelegramWebhooks } from './services/telegram.js';
 import { seedBuiltinSkills } from './services/skills.js';
+import { onRemoteAgentRunnerAvailable, registerAgentRunnerServer } from './services/agent-runners.js';
 
 function buildHttpsOptions(): SecureContextOptions | undefined {
   if (!env.TLS_CERT_PATH || !env.TLS_KEY_PATH) return undefined;
@@ -149,7 +151,10 @@ export async function buildApp() {
   await app.register(skillRoutes);
   await app.register(agentChatRoutes);
   await app.register(agentRunRoutes);
+  await app.register(agentRunnerRoutes);
   await app.register(settingsRoutes);
+  registerAgentRunnerServer(app);
+  onRemoteAgentRunnerAvailable(() => scheduleQueuedAgentChatDrains());
   // Serve frontend static files in production
   const staticDir = process.env.STATIC_DIR;
   if (staticDir && fs.existsSync(staticDir)) {
@@ -189,7 +194,7 @@ export async function buildApp() {
 
   // Clean old run logs, then reconcile running records (re-attach or mark dead)
   cleanupOldRunLogs();
-  await reconcileRunsOnStartup((run) => reattachRunningProcess(run));
+  await reconcileRunsOnStartup();
   recoverCompletedChatRunsOnStartup();
   await initializeAgentChatQueue({ preserveActiveProcessing: true });
   await initializeAgentBatchQueue({ preserveActiveProcessing: true });

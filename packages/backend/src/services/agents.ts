@@ -307,11 +307,8 @@ export function resolveCliExecutable(idOrAlias: string): string | null {
 export function getMissingCliMessage(idOrAlias: string): string | null {
   const cliDef = getCliDef(idOrAlias);
   if (!cliDef) return null;
-  if (resolveCliExecutable(cliDef.id)) return null;
-  return (
-    `${cliDef.name} CLI is not installed or not available on the server PATH ` +
-    `(expected command: ${cliDef.command}). Install it from ${cliDef.downloadUrl}.`
-  );
+  if (resolveCommandExecutable(cliDef.command)) return null;
+  return `${cliDef.name} CLI is not installed or is not executable on PATH. Install ${cliDef.command} from ${cliDef.downloadUrl}, restart the runner, and try again.`;
 }
 
 export function assertCliAvailableForModel(model: string): void {
@@ -323,7 +320,7 @@ export function assertCliAvailableForModel(model: string): void {
 
 export function checkCliStatus(): CliInfo[] {
   return CLI_DEFS.map((def) => {
-    const resolvedCommand = resolveCliExecutable(def.id);
+    const resolvedCommand = resolveCommandExecutable(def.command);
     return {
       ...def,
       resolvedCommand,
@@ -873,7 +870,6 @@ export async function createAgent(params: CreateAgentParams): Promise<AgentRecor
   let serviceUserId: string | null = null;
   let wsKeyId: string | null = null;
   const normalizedModel = normalizeModelValue(params.model);
-  assertCliAvailableForModel(normalizedModel);
 
   try {
     // Step 1: Create service user
@@ -1027,7 +1023,6 @@ export async function updateAgent(
   if (data.description !== undefined) patch.description = data.description;
   if (data.model !== undefined) {
     const normalizedModel = normalizeModelValue(data.model);
-    assertCliAvailableForModel(normalizedModel);
     patch.model = normalizedModel;
   }
   if (data.modelId !== undefined) patch.modelId = data.modelId;

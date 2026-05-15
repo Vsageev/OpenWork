@@ -94,6 +94,7 @@ export function CollectionsListPage() {
         body: JSON.stringify({
           name: 'General',
           description: 'Default collection',
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       await fetchCollections();
@@ -144,6 +145,7 @@ export function CollectionsListPage() {
         body: JSON.stringify({
           name: createName.trim(),
           description: createDesc.trim() || null,
+          workspaceId: activeWorkspaceId || undefined,
         }),
       });
       setShowCreate(false);

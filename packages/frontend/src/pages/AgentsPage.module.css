@@ -1990,6 +1990,66 @@ button.messageMonitorBtn,
   margin: var(--space-2) var(--space-5) 0;
 }
 
+.runnerBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) var(--space-5) 0;
+  padding: var(--space-3);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.runnerBannerIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--color-warning);
+  flex-shrink: 0;
+}
+
+.runnerBannerBody {
+  min-width: 0;
+  flex: 1;
+}
+
+.runnerBannerTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.runnerBannerText {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.runnerBannerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .runnerBanner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin: var(--space-3) var(--space-3) 0;
+  }
+
+  .runnerBannerActions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
 .sidebarEmpty {
   padding: var(--space-6) var(--space-4);
   text-align: center;

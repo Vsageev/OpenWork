@@ -39,7 +39,13 @@ import {
   updateAgentGroup,
   deleteAgentGroup,
 } from '../services/agents.js';
-import { getWorkspaceById } from '../services/workspaces.js';
+import {
+  ensureDefaultWorkspaceForUser,
+  ensureAgentGroupForWorkspace,
+  ensureLegacyAgentsAssignedToWorkspace,
+  getWorkspaceById,
+  updateWorkspace,
+} from '../services/workspaces.js';
 import { listAgentCronJobsWithNextRun, syncAgentCronJobs } from '../services/agent-cron.js';
 import { getProjectDefaultAgentKeyId } from '../services/project-settings.js';
 
@@ -108,10 +114,15 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      await ensureDefaultWorkspaceForUser(request.user.sub);
       let all = await listAgents();
 
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId);
+        const workspace =
+          (await ensureLegacyAgentsAssignedToWorkspace(
+            request.query.workspaceId,
+            request.user.sub,
+          )) ?? (await getWorkspaceById(request.query.workspaceId));
         if (workspace && Array.isArray(workspace.agentGroupIds)) {
           const idSet = new Set(workspace.agentGroupIds);
           all = all.filter((agent) => agent.groupId && idSet.has(agent.groupId));
@@ -307,7 +318,7 @@ export async function agentRoutes(app: FastifyInstance) {
         presetParameters,
         apiKeyId,
         skipPermissions,
-        groupId,
+        groupId: requestedGroupId,
         avatarIcon,
         avatarBgColor,
         avatarLogoColor,
@@ -328,6 +339,17 @@ export async function agentRoutes(app: FastifyInstance) {
       const apiKey = await getApiKeyRecord(resolvedApiKeyId);
       if (!apiKey || apiKey.isActive === false) {
         return reply.badRequest('API key not found');
+      }
+
+      const targetWorkspaceId =
+        request.body.workspaceId ?? (await ensureDefaultWorkspaceForUser(request.user.sub)).id;
+      let groupId = requestedGroupId;
+      if (targetWorkspaceId) {
+        const workspace = await getWorkspaceById(targetWorkspaceId);
+        if (!workspace || workspace.userId !== request.user.sub) {
+          return reply.badRequest('Workspace not found');
+        }
+        groupId = await ensureAgentGroupForWorkspace(targetWorkspaceId, requestedGroupId);
       }
 
       try {
@@ -398,6 +420,7 @@ export async function agentRoutes(app: FastifyInstance) {
           skipPermissions: z.boolean().optional(),
           separateFolderPerChat: z.boolean().optional(),
           groupId: z.string().nullable().optional(),
+          workspaceId: z.uuid().optional(),
           avatarIcon: avatarIconSchema.optional(),
           avatarBgColor: avatarColorSchema.optional(),
           avatarLogoColor: avatarColorSchema.optional(),
@@ -420,7 +443,19 @@ export async function agentRoutes(app: FastifyInstance) {
     async (request, reply) => {
       let updated;
       try {
-        updated = await updateAgent(request.params.id, request.body);
+        const patch = { ...request.body };
+        if (request.body.workspaceId && 'groupId' in request.body) {
+          const workspace = await getWorkspaceById(request.body.workspaceId);
+          if (!workspace || workspace.userId !== request.user.sub) {
+            return reply.badRequest('Workspace not found');
+          }
+          patch.groupId = await ensureAgentGroupForWorkspace(
+            request.body.workspaceId,
+            request.body.groupId,
+          );
+        }
+        delete patch.workspaceId;
+        updated = await updateAgent(request.params.id, patch);
       } catch (err) {
         return reply.badRequest((err as Error).message);
       }
@@ -470,7 +505,11 @@ export async function agentRoutes(app: FastifyInstance) {
       let groups = await listAgentGroups();
 
       if (request.query.workspaceId) {
-        const workspace = await getWorkspaceById(request.query.workspaceId);
+        const workspace =
+          (await ensureLegacyAgentsAssignedToWorkspace(
+            request.query.workspaceId,
+            request.user.sub,
+          )) ?? (await getWorkspaceById(request.query.workspaceId));
         if (workspace && Array.isArray(workspace.agentGroupIds)) {
           const idSet = new Set(workspace.agentGroupIds);
           groups = groups.filter((group) => idSet.has(group.id));
@@ -490,11 +529,26 @@ export async function agentRoutes(app: FastifyInstance) {
         summary: 'Create an agent group',
         body: z.object({
           name: z.string().min(1).max(100),
+          workspaceId: z.uuid().optional(),
         }),
       },
     },
     async (request, reply) => {
+      let workspaceAgentGroupIds: string[] | null = null;
+      if (request.body.workspaceId) {
+        const workspace = await getWorkspaceById(request.body.workspaceId);
+        if (!workspace || workspace.userId !== request.user.sub) {
+          return reply.badRequest('Workspace not found');
+        }
+        workspaceAgentGroupIds = workspace.agentGroupIds;
+      }
+
       const group = await createAgentGroup(request.body.name);
+      if (request.body.workspaceId && workspaceAgentGroupIds) {
+        await updateWorkspace(request.body.workspaceId, {
+          agentGroupIds: [...workspaceAgentGroupIds, group.id],
+        });
+      }
       return reply.status(201).send(group);
     },
   );

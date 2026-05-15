@@ -1,12 +1,11 @@
-import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { store } from '../db/index.js';
 import {
   AGENT_CHAT_QUEUE_COLLECTION,
+  clearAgentRunConversationReferences,
   countQueuedAppendPromptsForConversation,
-  countRunningAgentRunsWithLivePid,
   deleteChatQueueItemsForConversation,
   deleteTerminalChatQueueItemsBeyondRetention,
   findChatQueueItemProcessingForRunId,
@@ -14,9 +13,7 @@ import {
   listChatQueueItemsWithStatusNative,
   listConversationChatQueueItems,
 } from '../db/repositories/agent-execution-repository.js';
-import {
-  deleteAllMessageDraftsForConversation,
-} from '../db/repositories/message-drafts-repository.js';
+import { deleteAllMessageDraftsForConversation } from '../db/repositories/message-drafts-repository.js';
 import {
   compareMessagesChronologically,
   deleteAllMessagesForConversation,
@@ -24,15 +21,22 @@ import {
 } from '../db/repositories/messages-repository.js';
 import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import { env } from '../config/env.js';
-import { extractFinalResponseText } from '../lib/agent-output.js';
+import { extractAgentOutputErrorText, extractFinalResponseText } from '../lib/agent-output.js';
 import { allocatePort, releasePort } from '../lib/port-allocator.js';
+import type { RunnerJobIntent, RunnerProvider } from 'shared';
+import {
+  dispatchRemoteAgentJob,
+  getRemoteAgentRunnerUnavailableMessage,
+  hasAvailableRemoteAgentRunner,
+  hasConnectedRemoteAgentRunner,
+  RemoteAgentJobError,
+} from './agent-runners.js';
 import {
   getAgent,
-  getCliInfo,
   listAgents,
   prepareAgentWorkspaceAccess,
-  resolveCliExecutable,
 } from './agents.js';
+import { workspaceIdsForAgentGroup } from './runner-devices.js';
 import {
   ensureConversationSubfolderWorkspace,
   resolveAgentExecutionRootFromRecord,
@@ -40,7 +44,7 @@ import {
   resolveSubfolderProcessCwd,
 } from './agent-workspaces.js';
 import { listRuntimeAgentEnvVarBindings } from './agent-env-vars.js';
-import { createAgentRun, completeAgentRun } from './agent-runs.js';
+import { createAgentRun, completeAgentRun, failAgentRunCompletionSideEffect, getAgentRun } from './agent-runs.js';
 import { getFallbackModelConfig } from './project-settings.js';
 
 const STORAGE_DIR = path.resolve(env.DATA_DIR, 'storage');
@@ -144,6 +148,7 @@ function isRateLimitError(stderr: string): boolean {
 const PERMANENT_QUEUE_ERROR_PATTERNS = [
   /CLI is not installed or not available on the server PATH/i,
   /Command ".+" is not installed or not available on the server PATH/i,
+  /spawn .+ ENOENT/i,
 ];
 
 function isPermanentQueueError(errorMessage: string): boolean {
@@ -171,14 +176,15 @@ function summarizeQueueErrorForChat(errorMessage: string): string {
 }
 
 /**
- * Global concurrency gate — tracks how many agent processes are running
- * across all conversations. When at capacity, new spawns are deferred
- * until a slot opens up.
+ * Global concurrency gate — tracks how many remote runner jobs are running
+ * across all conversations. When at capacity, new runs are deferred until a
+ * slot opens up.
  */
 let globalRunningCount = 0;
 const concurrencyWaiters: Array<() => void> = [];
 
 function getMaxConcurrentAgents(): number {
+  if (env.MAX_CONCURRENT_AGENTS === 0) return Number.MAX_SAFE_INTEGER;
   return env.MAX_CONCURRENT_AGENTS;
 }
 
@@ -207,7 +213,6 @@ function releaseConcurrencySlot() {
   while (concurrencyWaiters.length > 0 && globalRunningCount < getMaxConcurrentAgents()) {
     const waiter = concurrencyWaiters.shift();
     if (waiter) {
-      globalRunningCount++;
       waiter();
     }
   }
@@ -223,8 +228,7 @@ function rateLimitBackoffMs(attempt: number): number {
 }
 
 export function getGlobalRunningAgentCount(): number {
-  const livePersistedRuns = countRunningAgentRunsWithLivePid(isPidAlive);
-  return Math.max(globalRunningCount, livePersistedRuns);
+  return globalRunningCount;
 }
 
 export function getMaxConcurrentAgentLimit(): number {
@@ -286,18 +290,6 @@ function appendAttachmentPathsToPrompt(
   return `${prompt ? prompt + '\n\n' : ''}${sections.join('\n\n')}`;
 }
 
-function buildMissingCliError(command: string, model: string): Error {
-  const cliInfo = getCliInfo(model) ?? getCliInfo(command);
-  if (!cliInfo) {
-    return new Error(`Command "${command}" is not installed or not available on the server PATH.`);
-  }
-
-  return new Error(
-    `${cliInfo.name} CLI is not installed or not available on the server PATH ` +
-      `(expected command: ${cliInfo.command}). Install it from ${cliInfo.downloadUrl}.`,
-  );
-}
-
 function buildCliCommand(options: BuildCliOptions): CliCommand {
   const { model, modelId, thinkingLevel, prompt, imagePaths, filePaths } = options;
   const modelLower = model.trim().toLowerCase();
@@ -327,8 +319,8 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
     return { bin: 'claude', args };
   }
   if (modelLower.includes('codex')) {
-    // Run codex in regular exec mode for conversational responses.
-    const args = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
+    // Stream structured events so run logs can render rich blocks in monitor views.
+    const args = ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox'];
     if (imagePaths && imagePaths.length > 0) {
       args.push('--image', ...imagePaths);
     }
@@ -356,7 +348,14 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
   }
   if (modelLower.includes('cursor')) {
     // Stream structured events so run logs contain full model output, including thinking deltas.
-    const args = ['--print', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--trust'];
+    const args = [
+      '--print',
+      '--output-format',
+      'stream-json',
+      '--stream-partial-output',
+      '--force',
+      '--trust',
+    ];
     if (modelId) {
       args.push('--model', modelId);
     }
@@ -384,6 +383,79 @@ function buildCliCommand(options: BuildCliOptions): CliCommand {
     args.push('--model', modelId);
   }
   return { bin: modelLower, args };
+}
+
+function inferRunnerProvider(model: string): RunnerProvider | null {
+  const modelLower = model.trim().toLowerCase();
+  if (modelLower.includes('claude')) return 'claude';
+  if (modelLower.includes('codex')) return 'codex';
+  if (modelLower.includes('qwen')) return 'qwen';
+  if (modelLower.includes('cursor')) return 'cursor';
+  if (modelLower.includes('opencode')) return 'opencode';
+  return null;
+}
+
+export function buildRunnerJobIntent(params: {
+  runId: string;
+  agentId: string;
+  workspaceId: string;
+  agent: AgentProcessOptions['agent'];
+  prompt: string;
+  workDir: string;
+  childEnv: Record<string, string | undefined>;
+  imagePaths?: string[];
+  filePaths?: string[];
+}): RunnerJobIntent {
+  const provider = inferRunnerProvider(params.agent.model);
+  if (!provider) {
+    throw new Error(`Unsupported remote runner model/provider: ${params.agent.model}`);
+  }
+
+  return {
+    runId: params.runId,
+    agentId: params.agentId,
+    agentKind: 'dev_agent',
+    provider,
+    modelPreference: {
+      displayName: params.agent.model,
+      modelId: params.agent.modelId,
+      thinkingLevel: params.agent.thinkingLevel,
+    },
+    prompt: params.prompt,
+    workspace: {
+      type: 'local_path',
+      path: params.workDir,
+      workspaceId: params.workspaceId,
+    },
+    attachments: [
+      ...(params.imagePaths ?? []).map((attachmentPath) => ({
+        type: 'image' as const,
+        path: attachmentPath,
+      })),
+      ...(params.filePaths ?? []).map((attachmentPath) => ({
+        type: 'file' as const,
+        path: attachmentPath,
+      })),
+    ],
+    allowedOperations: {
+      tools: [provider],
+      approvalMode: 'dangerous',
+      env: true,
+      secrets: true,
+      network: true,
+      shell: true,
+    },
+    environment: {
+      variables: Object.entries(params.childEnv)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .map(([name, value]) => ({
+          name,
+          value,
+          source: 'runtime',
+          secret: true,
+        })),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -723,11 +795,14 @@ export function validateConversationOwnership(
 /**
  * Delete a conversation and all its messages.
  */
-export function deleteAgentConversation(conversationId: string) {
-  deleteAllMessagesForConversation(conversationId);
-  deleteAllMessageDraftsForConversation(conversationId);
-  clearConversationQueue(conversationId);
-  return store.delete('conversations', conversationId);
+export async function deleteAgentConversation(conversationId: string) {
+  return store.transaction(async () => {
+    deleteAllMessagesForConversation(conversationId);
+    deleteAllMessageDraftsForConversation(conversationId);
+    clearConversationQueue(conversationId);
+    await clearAgentRunConversationReferences(conversationId);
+    return store.delete('conversations', conversationId);
+  });
 }
 
 /**
@@ -762,7 +837,10 @@ function isTreeEnabledConversation(conversationId: string): boolean {
 }
 
 function listConversationMessages(conversationId: string): Record<string, unknown>[] {
-  return listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<string, unknown>[];
+  return listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<
+    string,
+    unknown
+  >[];
 }
 
 function buildChildrenMap(
@@ -918,7 +996,6 @@ export function getActiveMessagePath(conversationId: string): TreePathMessage[] 
   return path;
 }
 
-
 function getOutboundAnchorForInboundMessage(
   conversationId: string,
   message: Record<string, unknown>,
@@ -933,10 +1010,7 @@ function getOutboundAnchorForInboundMessage(
     }
     parentId = (parent.parentId as string | null) ?? null;
   }
-  return findPreviousOutboundAncestor(
-    conversationId,
-    (message.parentId as string | null) ?? null,
-  );
+  return findPreviousOutboundAncestor(conversationId, (message.parentId as string | null) ?? null);
 }
 
 /**
@@ -976,9 +1050,7 @@ export function serializeAllConversationMessageEntries(
       siblings = userVariantsByPreviousMessageId.get(prevId) ?? [msg];
     } else {
       const anchorUserId = getOutboundAnchorForInboundMessage(conversationId, msg, messagesById);
-      siblings = anchorUserId
-        ? getSelectableReplyChildren(childrenMap, anchorUserId)
-        : [msg];
+      siblings = anchorUserId ? getSelectableReplyChildren(childrenMap, anchorUserId) : [msg];
       if (siblings.length === 0) {
         siblings = [msg];
       }
@@ -1264,6 +1336,18 @@ function activateMessagePath(conversationId: string, leafMessageId: string): voi
   }
 }
 
+export function activateMessagePathForSearchResult(
+  conversationId: string,
+  messageId: string,
+): void {
+  const message = store.getById('messages', messageId);
+  if (!message || message.conversationId !== conversationId) {
+    throw AgentChatError.notFound('message_not_found', 'Message not found');
+  }
+
+  activateMessagePath(conversationId, messageId);
+}
+
 /**
  * Edit a user message and create a new branch.
  * Returns the newly created message.
@@ -1308,7 +1392,7 @@ export function editMessageAndBranch(
     conversationId,
     derivedPreviousUserMessageId,
   );
-  const parentId = ((original.parentId as string | null | undefined) ?? null);
+  const parentId = (original.parentId as string | null | undefined) ?? null;
   const originalAttachments =
     original.type === 'image' || original.type === 'file'
       ? cloneAttachmentRecords(parseAttachments(original.attachments))
@@ -1559,20 +1643,22 @@ function findPendingBranchDependencyForAppendPrompt(
   }
 
   if (!continuationParentId) {
-    return null;
+    return (
+      [...pendingItems]
+        .reverse()
+        .find((item) => getQueueItemMode(item) === 'append_prompt') ?? null
+    );
   }
 
   return (
-    [...pendingItems]
-      .reverse()
-      .find((item) => {
-        const mode = getQueueItemMode(item);
-        if (mode === 'respond_to_message') {
-          return item.targetMessageId === continuationParentId;
-        }
+    [...pendingItems].reverse().find((item) => {
+      const mode = getQueueItemMode(item);
+      if (mode === 'respond_to_message') {
+        return item.targetMessageId === continuationParentId;
+      }
 
-        return item.queuedMessageId === continuationParentId;
-      }) ?? null
+      return item.queuedMessageId === continuationParentId;
+    }) ?? null
   );
 }
 
@@ -1626,7 +1712,9 @@ function ensureQueuedPromptMessage(
 
   const userMessage = saveAgentConversationMessage({
     id:
-      typeof queueItem.queuedMessageId === 'string' ? (queueItem.queuedMessageId as string) : undefined,
+      typeof queueItem.queuedMessageId === 'string'
+        ? (queueItem.queuedMessageId as string)
+        : undefined,
     conversationId,
     direction: 'outbound',
     content: prompt,
@@ -1634,7 +1722,8 @@ function ensureQueuedPromptMessage(
     metadata: null,
     parentId,
     previousUserMessageId:
-      typeof queueItem.previousUserMessageId === 'string' || queueItem.previousUserMessageId === null
+      typeof queueItem.previousUserMessageId === 'string' ||
+      queueItem.previousUserMessageId === null
         ? ((queueItem.previousUserMessageId as string | null | undefined) ?? null)
         : undefined,
   });
@@ -1848,6 +1937,27 @@ interface AgentProcessResult {
   runStartedAt: number;
 }
 
+function getAgentProcessError(result: Pick<AgentProcessResult, 'code' | 'stdout' | 'stderr'>): string | null {
+  const structuredStdoutError = extractAgentOutputErrorText(result.stdout);
+  if (structuredStdoutError) return structuredStdoutError;
+
+  if ((result.code ?? 1) !== 0) {
+    return result.stderr.trim() || `Process exited with code ${result.code ?? 'unknown'}`;
+  }
+
+  return null;
+}
+
+function getTerminalRunErrorMessage(runId: string | null): string | null {
+  if (!runId) return null;
+  const terminalRun = getAgentRun(runId);
+  if (terminalRun?.status !== 'error') return null;
+  return (
+    (typeof terminalRun.errorMessage === 'string' && terminalRun.errorMessage.trim()) ||
+    'Agent run did not produce a clean completion.'
+  );
+}
+
 interface AgentProcessOptions {
   agentId: string;
   agent: {
@@ -1860,6 +1970,7 @@ interface AgentProcessOptions {
     avatarIcon?: string | null;
     avatarBgColor?: string | null;
     avatarLogoColor?: string | null;
+    groupId?: string | null;
   };
   runKey: string;
   prompt: string;
@@ -1952,8 +2063,7 @@ function findFinalAgentApiMessage(messages: Record<string, unknown>[]) {
 function listConversationInboundMessages(conversationId: string, sinceMs: number) {
   return listMessagesByConversationId(conversationId, {
     order: 'asc',
-    where: (r) =>
-      r.direction === 'inbound' && new Date(String(r.createdAt)).getTime() >= sinceMs,
+    where: (r) => r.direction === 'inbound' && new Date(String(r.createdAt)).getTime() >= sinceMs,
   }) as Record<string, unknown>[];
 }
 
@@ -2096,7 +2206,7 @@ const MAX_CARD_AUTO_COMMENT_LENGTH = 5000;
  * users see on the agent run (stdout extraction) as a card comment — parallel to
  * chat runs saving `saveAgentRunResponse`. Uses `agentRunId` for idempotency.
  */
-function persistCompletedCardAssignmentComment(params: {
+export function persistCompletedCardAssignmentComment(params: {
   cardId: string;
   agentId: string;
   runId: string;
@@ -2104,65 +2214,62 @@ function persistCompletedCardAssignmentComment(params: {
   stdout: string;
 }): void {
   const { cardId, agentId, runId, runStartedAtMs, stdout } = params;
-  try {
-    const dupByRun = store
-      .getAll('cardComments')
-      .filter(
-        (r: Record<string, unknown>) => r.cardId === cardId && r.agentRunId === runId,
-      );
-    if (dupByRun.length > 0) return;
+  const dupByRun = store
+    .getAll('cardComments')
+    .filter((r: Record<string, unknown>) => r.cardId === cardId && r.agentRunId === runId);
+  if (dupByRun.length > 0) return;
 
-    let content = extractFinalResponseText(stdout).trim();
-    if (!content) content = '(empty response)';
-    if (content.length > MAX_CARD_AUTO_COMMENT_LENGTH) {
-      content = `${content.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 1)}…`;
-    }
-
-    const since = Number.isFinite(runStartedAtMs) ? runStartedAtMs : 0;
-    const manualDup = store.getAll('cardComments').filter((r: Record<string, unknown>) => {
-      if (r.cardId !== cardId || r.authorId !== agentId) return false;
-      if (r.agentRunId) return false;
-      const t = new Date(r.createdAt as string).getTime();
-      if (!Number.isFinite(t) || t < since) return false;
-      return String(r.content || '').trim() === content;
-    });
-    if (manualDup.length > 0) return;
-
-    store.insert('cardComments', {
-      cardId,
-      authorId: agentId,
-      content,
-      agentRunId: runId,
-    });
-  } catch (err) {
-    console.error(
-      `[agent-chat] Failed to persist card assignment comment for run ${runId}:`,
-      (err as Error).message,
-    );
+  let content = extractFinalResponseText(stdout).trim();
+  if (!content) content = '(empty response)';
+  if (content.length > MAX_CARD_AUTO_COMMENT_LENGTH) {
+    content = `${content.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 1)}…`;
   }
+
+  void runStartedAtMs;
+
+  store.insert('cardComments', {
+    cardId,
+    authorId: agentId,
+    content,
+    agentRunId: runId,
+  });
 }
 
-// ---------------------------------------------------------------------------
-// RunHandle — replaces ChildProcess in the running processes map
-// ---------------------------------------------------------------------------
-
-interface RunHandle {
-  runId: string;
-  pid: number;
-  stdoutPath: string;
-  stderrPath: string;
-  stdoutOffset: number;
-  pollTimer: ReturnType<typeof setInterval>;
-  watcher: fs.FSWatcher | null;
-  onStdoutChunk: ((text: string) => void) | null;
-  onExit: ((result: AgentProcessResult) => void) | null;
-  allocatedPort: number | null;
+async function persistFailedCardAssignmentStartupRun(params: {
+  agentId: string;
+  agent: AgentProcessOptions['agent'];
+  cardId: string;
+  prompt: string;
+  errorMessage: string;
+  onRunCreated?: (runId: string) => void;
+}): Promise<string | null> {
+  const run = createAgentRun({
+    agentId: params.agentId,
+    agentName: params.agent.name,
+    avatarIcon: params.agent.avatarIcon ?? null,
+    avatarBgColor: params.agent.avatarBgColor ?? null,
+    avatarLogoColor: params.agent.avatarLogoColor ?? null,
+    model: params.agent.model ?? null,
+    modelId: params.agent.modelId ?? null,
+    triggerType: 'card_assignment',
+    cardId: params.cardId,
+    triggerPrompt: params.prompt,
+    executor: 'remote',
+    status: 'running',
+  });
+  const runId = String(run.id);
+  params.onRunCreated?.(runId);
+  await failAgentRunCompletionSideEffect(runId, params.errorMessage, {
+    stderr: params.errorMessage,
+  });
+  return runId;
 }
 
-// Track running processes per run key so parallel chats/tasks can run.
-const runningProcesses = new Map<string, RunHandle>();
+// Track active remote runner jobs per run key so parallel chats/tasks can run.
+const remoteRunKeys = new Set<string>();
 const queueProcessors = new Set<string>();
 const queueDrainTimers = new Map<string, QueueDrainTimer>();
+let queueDrainTransactionLock: Promise<void> = Promise.resolve();
 
 function processKey(
   agentId: string,
@@ -2183,10 +2290,7 @@ function hasLivePersistedChatRun(
       ? { agentId, conversationId }
       : { agentId, conversationId, targetMessageId },
   );
-  return runs.some((run) => {
-    const pid = typeof run.pid === 'number' ? (run.pid as number) : null;
-    return !!(pid && isPidAlive(pid));
-  });
+  return runs.some((run) => run.executor === 'remote');
 }
 
 function hasRunningProcessForTargetMessage(
@@ -2194,7 +2298,7 @@ function hasRunningProcessForTargetMessage(
   conversationId: string,
   targetMessageId: string,
 ): boolean {
-  if (runningProcesses.has(processKey(agentId, conversationId, targetMessageId))) {
+  if (remoteRunKeys.has(processKey(agentId, conversationId, targetMessageId))) {
     return true;
   }
   return hasLivePersistedChatRun(agentId, conversationId, targetMessageId);
@@ -2203,7 +2307,7 @@ function hasRunningProcessForTargetMessage(
 /** Check if ANY process is running for a given conversation (across all branches). */
 function hasRunningProcessForConversation(agentId: string, conversationId: string): boolean {
   const prefix = `${agentId}:${conversationId}`;
-  for (const key of runningProcesses.keys()) {
+  for (const key of remoteRunKeys) {
     if (key === prefix || key.startsWith(`${prefix}:`)) return true;
   }
   if (hasLivePersistedChatRun(agentId, conversationId)) return true;
@@ -2304,152 +2408,23 @@ function scheduleQueueDrain(agentId: string, conversationId: string, delayMs: nu
   queueDrainTimers.set(key, { timer, dueAt });
 }
 
-// ---------------------------------------------------------------------------
-// attachToProcess — shared between fresh spawn and re-attach
-// ---------------------------------------------------------------------------
+async function withQueueDrainTransaction<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = queueDrainTransactionLock;
+  let release!: () => void;
+  queueDrainTransactionLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
 
-function isPidAlive(pid: number): boolean {
+  await previous.catch(() => undefined);
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+    return await operation();
+  } finally {
+    release();
   }
 }
 
-interface AttachOptions {
-  runId: string;
-  runKey: string;
-  pid: number;
-  stdoutPath: string;
-  stderrPath: string;
-  runStartedAt: number;
-  agentId: string;
-  onStdoutChunk?: ((text: string) => void) | null;
-  onExit?: ((result: AgentProcessResult) => void) | null;
-}
-
-function attachToProcess(options: AttachOptions): RunHandle {
-  const { runId, runKey, pid, stdoutPath, stderrPath, runStartedAt, agentId } = options;
-
-  let stdoutOffset = 0;
-
-  // Try to read any existing output (for re-attach catch-up)
-  try {
-    const stat = fs.statSync(stdoutPath);
-    // For re-attach we start from where file currently is — caller handles catch-up
-    stdoutOffset = stat.size;
-  } catch {
-    // File may not exist yet
-  }
-
-  function readNewOutput() {
-    try {
-      const stat = fs.statSync(stdoutPath);
-      if (stat.size <= handle.stdoutOffset) return;
-
-      const fd = fs.openSync(stdoutPath, 'r');
-      const buf = Buffer.alloc(stat.size - handle.stdoutOffset);
-      fs.readSync(fd, buf, 0, buf.length, handle.stdoutOffset);
-      fs.closeSync(fd);
-
-      handle.stdoutOffset = stat.size;
-      const text = buf.toString('utf-8');
-      if (text && handle.onStdoutChunk) {
-        handle.onStdoutChunk(text);
-      }
-    } catch {
-      // File may have been deleted or is being written to
-    }
-  }
-
-  function finalize() {
-    clearInterval(handle.pollTimer);
-    if (handle.watcher) {
-      handle.watcher.close();
-      handle.watcher = null;
-    }
-    if (handle.allocatedPort !== null) {
-      releasePort(handle.allocatedPort);
-    }
-    runningProcesses.delete(runKey);
-    releaseConcurrencySlot();
-
-    // Read final output
-    let stdout = '';
-    let stderr = '';
-    try {
-      stdout = fs.readFileSync(stdoutPath, 'utf-8');
-    } catch {
-      /* */
-    }
-    try {
-      stderr = fs.readFileSync(stderrPath, 'utf-8');
-    } catch {
-      /* */
-    }
-
-    markAgentLastActivity(agentId);
-    const hasError = !stdout.trim();
-    const errorMsg = hasError ? stderr.trim() || 'Process exited' : null;
-    void completeAgentRun(runId, errorMsg, { stdout, stderr }).catch((err) => {
-      console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, err);
-    });
-
-    if (handle.onExit) {
-      handle.onExit({ code: hasError ? 1 : 0, stdout, stderr, runStartedAt });
-    }
-  }
-
-  // Set up file watcher for stdout
-  let watcher: fs.FSWatcher | null = null;
-  try {
-    // Ensure the file exists before watching
-    if (fs.existsSync(stdoutPath)) {
-      watcher = fs.watch(stdoutPath, () => {
-        readNewOutput();
-      });
-      watcher.on('error', () => {
-        // Ignore watcher errors
-      });
-    }
-  } catch {
-    // fs.watch not always available
-  }
-
-  // Poll PID every 1s to detect exit
-  const pollTimer = setInterval(() => {
-    // Also read output on each poll in case watcher missed events
-    readNewOutput();
-
-    if (!isPidAlive(pid)) {
-      // Give a small delay for final I/O flush
-      setTimeout(() => {
-        readNewOutput();
-        finalize();
-      }, 500);
-    }
-  }, 1000);
-
-  const handle: RunHandle = {
-    runId,
-    pid,
-    stdoutPath,
-    stderrPath,
-    stdoutOffset,
-    pollTimer,
-    watcher,
-    onStdoutChunk: options.onStdoutChunk ?? null,
-    onExit: options.onExit ?? null,
-    allocatedPort: null,
-  };
-
-  runningProcesses.set(runKey, handle);
-  return handle;
-}
-
 // ---------------------------------------------------------------------------
-// runAgentProcess — spawns detached, writes to files
+// runAgentProcess — dispatches runner jobs and writes logs to files
 // ---------------------------------------------------------------------------
 
 /**
@@ -2484,257 +2459,213 @@ export function resolveAgentChatProcessWorkingDirectory(
   );
 }
 
-async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
-  // Wait for a global concurrency slot before spawning
-  await waitForConcurrencySlot();
+function buildRemoteRunnerEnv(childEnv: Record<string, string | undefined>) {
+  const safeEnv: Record<string, string | undefined> = {};
+  const safeKeys = new Set([
+    'WORKSPACE_API_URL',
+    'WORKSPACE_API_KEY',
+    'PROJECT_PORT',
+    'PROJECTS_DIR',
+    'PWD',
+  ]);
 
-  const workDir = resolveAgentChatProcessWorkingDirectory(
-    options.agentId,
-    options.triggerRef?.conversationId,
-  );
-  const { bin, args, stdinData } = buildCliCommand({
-    model: options.agent.model,
-    modelId: options.agent.modelId,
-    thinkingLevel: options.agent.thinkingLevel,
-    prompt: options.prompt,
-    imagePaths: options.imagePaths,
-    filePaths: options.filePaths,
-  });
-  const childEnv = await buildChildEnv(options.agentId, options.agent);
-
-  // Allocate a random port so the agent's project never conflicts with others
-  const projectPort = await allocatePort();
-  childEnv.PROJECT_PORT = String(projectPort);
-  childEnv.PWD = workDir;
-
-  // Record the agent run first to get runId for log directory
-  const agentRun = createAgentRun({
-    agentId: options.agentId,
-    agentName: options.agent.name,
-    avatarIcon: options.agent.avatarIcon ?? null,
-    avatarBgColor: options.agent.avatarBgColor ?? null,
-    avatarLogoColor: options.agent.avatarLogoColor ?? null,
-    model: options.agent.model ?? null,
-    modelId: options.agent.modelId ?? null,
-    triggerType: options.triggerType,
-    conversationId: options.triggerRef?.conversationId,
-    cardId: options.triggerRef?.cardId,
-    cronJobId: options.triggerRef?.cronJobId,
-    triggerPrompt: options.prompt,
-    responseParentId: options.responseParentId ?? null,
-  });
-  const runId = agentRun.id as string;
-  options.onRunCreated?.(runId);
-
-  // Create run log directory
-  const runLogDir = path.join(RUNS_DIR, runId);
-  fs.mkdirSync(runLogDir, { recursive: true });
-
-  const stdoutPath = path.join(runLogDir, 'stdout.log');
-  const stderrPath = path.join(runLogDir, 'stderr.log');
-
-  // Open file descriptors for stdout/stderr
-  const stdoutFd = fs.openSync(stdoutPath, 'w');
-  const stderrFd = fs.openSync(stderrPath, 'w');
-
-  let child;
-  try {
-    const resolvedBin = resolveCliExecutable(bin);
-    if (!resolvedBin) {
-      throw buildMissingCliError(bin, options.agent.model);
-    }
-
-    child = spawn(resolvedBin, args, {
-      cwd: workDir,
-      env: childEnv,
-      detached: true,
-      stdio: [stdinData ? 'pipe' : 'ignore', stdoutFd, stderrFd],
-    });
-  } catch (err) {
-    fs.closeSync(stdoutFd);
-    fs.closeSync(stderrFd);
-    releasePort(projectPort);
-    releaseConcurrencySlot();
-    await completeAgentRun(runId, (err as Error).message);
-    options.onSpawnError(err as Error);
-    return runId;
-  }
-
-  // Write stdin data (e.g. stream-json for image messages) before unreffing.
-  if (stdinData && child.stdin) {
-    child.stdin.on('error', (err: NodeJS.ErrnoException) => {
-      // Child may exit before consuming stdin (e.g. invalid CLI args for image mode).
-      if (err.code !== 'EPIPE' && err.code !== 'ERR_STREAM_DESTROYED') {
-        console.error(`[agent-chat] Failed writing stdin for run ${runId}:`, err.message);
-      }
-    });
-    try {
-      child.stdin.end(stdinData);
-    } catch (err) {
-      const stdinErr = err as NodeJS.ErrnoException;
-      if (stdinErr.code !== 'EPIPE' && stdinErr.code !== 'ERR_STREAM_DESTROYED') {
-        console.error(`[agent-chat] Failed writing stdin for run ${runId}:`, stdinErr.message);
-      }
+  for (const key of safeKeys) {
+    if (childEnv[key] !== undefined) {
+      safeEnv[key] = childEnv[key];
     }
   }
 
-  // Unref so server can exit without killing the child
-  child.unref();
-
-  // Close FDs in parent — child owns them now
-  fs.closeSync(stdoutFd);
-  fs.closeSync(stderrFd);
-
-  const pid = child.pid!;
-  const runStartedAt = Date.now();
-
-  // Update DB with PID and paths
-  store.update('agent_runs', runId, {
-    pid,
-    stdoutPath,
-    stderrPath,
-  });
-
-  // Handle spawn errors (e.g. ENOENT)
-  child.on('error', (err) => {
-    // The process may not have started at all
-    const handle = runningProcesses.get(options.runKey);
-    if (handle) {
-      clearInterval(handle.pollTimer);
-      if (handle.watcher) handle.watcher.close();
-      if (handle.allocatedPort !== null) releasePort(handle.allocatedPort);
-      runningProcesses.delete(options.runKey);
+  for (const [key, value] of Object.entries(childEnv)) {
+    if (value !== undefined && value !== '' && process.env[key] !== value) {
+      safeEnv[key] = value;
     }
-    releaseConcurrencySlot();
-    void completeAgentRun(runId, err.message, { stderr: err.message }).catch((e) => {
-      console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, e);
-    });
-    options.onSpawnError(err);
-  });
+  }
 
-  // Attach monitoring — start reading from offset 0 since we just created the file
-  const handle = attachToProcess({
-    runId,
-    runKey: options.runKey,
-    pid,
-    stdoutPath,
-    stderrPath,
-    runStartedAt,
-    agentId: options.agentId,
-    onStdoutChunk: options.onStdoutChunk,
-    onExit: options.onExit,
-  });
-
-  // For fresh spawns, start reading from byte 0
-  handle.stdoutOffset = 0;
-  handle.allocatedPort = projectPort;
-  return runId;
+  return safeEnv;
 }
 
-// ---------------------------------------------------------------------------
-// reattachRunningProcess — called from reconcileRunsOnStartup
-// ---------------------------------------------------------------------------
+function resolveRemoteRunnerWorkspaceId(agent: { groupId?: string | null }): string | null {
+  return workspaceIdsForAgentGroup(agent.groupId)[0] ?? null;
+}
 
-export function reattachRunningProcess(run: Record<string, unknown>) {
-  const agentId = run.agentId as string;
-  const conversationId = run.conversationId as string | null;
-  const cronJobId = run.cronJobId as string | null;
-  const cardId = run.cardId as string | null;
-  const pid = run.pid as number;
-  const runId = run.id as string;
-  const stdoutPath = run.stdoutPath as string;
-  const stderrPath = run.stderrPath as string;
-  const triggerType = run.triggerType as TriggerType;
-  const responseParentId =
-    typeof run.responseParentId === 'string' ? (run.responseParentId as string) : null;
+function resolveAgentRemoteRunnerWorkspaceId(agentId: string): string | null {
+  const agent = getAgent(agentId);
+  return agent ? resolveRemoteRunnerWorkspaceId(agent) : null;
+}
 
-  // Reconstruct the run key
-  let runKey: string;
-  if (triggerType === 'chat' && conversationId) {
-    runKey = processKey(agentId, conversationId, responseParentId);
-  } else if (triggerType === 'cron_job' && cronJobId) {
-    runKey = `${agentId}:cron:${cronJobId}`;
-  } else if (triggerType === 'card_assignment' && cardId) {
-    runKey = `${agentId}:card:${cardId}`;
-  } else {
-    runKey = `${agentId}:${runId}`;
+function resolveAgentRemoteRunnerProvider(agentId: string): RunnerProvider | null {
+  const agent = getAgent(agentId);
+  return agent?.model ? inferRunnerProvider(agent.model) : null;
+}
+
+function getAgentRunnerWorkspaceIdOrThrow(agentId: string): string {
+  const workspaceId = resolveAgentRemoteRunnerWorkspaceId(agentId);
+  if (!workspaceId) {
+    throw AgentChatError.conflict(
+      'agent_runner_workspace_missing',
+      'This agent is not assigned to a workspace with a runner. Add the agent to a workspace, then try again.',
+    );
   }
+  return workspaceId;
+}
 
-  if (runningProcesses.has(runKey)) return;
-  globalRunningCount++;
+function getAgentRunnerProviderOrThrow(agentId: string): RunnerProvider {
+  const agent = getAgent(agentId);
+  const provider = agent?.model ? inferRunnerProvider(agent.model) : null;
+  if (!provider) {
+    throw AgentChatError.conflict(
+      'agent_runner_provider_missing',
+      'This agent does not have a supported remote runner provider configured. Choose a Codex, Claude, Qwen, Cursor, or OpenCode model, then try again.',
+      'Update the agent model/provider before starting a runner-backed job.',
+    );
+  }
+  return provider;
+}
 
-  const runStartedAt = new Date(run.startedAt as string).getTime();
+async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
+  // Wait for a global concurrency slot before dispatching
+  await waitForConcurrencySlot();
+  let allocatedPort: number | null = null;
 
-  const onExit = (result: AgentProcessResult) => {
-    // For chat triggers, save the final message to conversation
-    if (triggerType === 'chat' && conversationId) {
-      if (isRunMarkedKilledByUser(runId)) {
-        finalizeRecoveredQueueItemForRun(
-          agentId,
-          conversationId,
-          runId,
-          runStartedAt,
-          null,
-          'Killed by user',
-        );
-        return;
-      }
+  try {
+    const remoteWorkspaceId = resolveRemoteRunnerWorkspaceId(options.agent);
+    const provider = inferRunnerProvider(options.agent.model);
+    if (!provider) {
+      throw new Error(`Unsupported remote runner model/provider: ${options.agent.model}`);
+    }
+    if (!remoteWorkspaceId || !hasAvailableRemoteAgentRunner(remoteWorkspaceId, provider)) {
+      throw new Error(getRemoteAgentRunnerUnavailableMessage(remoteWorkspaceId, provider));
+    }
 
-      const updatesFromApi = listAgentApiUpdates(conversationId, runStartedAt);
-      const finalApiMessage = findFinalAgentApiMessage(updatesFromApi);
-      // extractFinalResponseText handles both plain text and stream-json output gracefully.
-      const stdoutText = extractFinalResponseText(result.stdout);
-      let finalMessage: Record<string, unknown> | null = null;
+    const workDir = resolveAgentChatProcessWorkingDirectory(
+      options.agentId,
+      options.triggerRef?.conversationId,
+    );
+    const childEnv = await buildChildEnv(options.agentId, options.agent);
 
-      if (finalApiMessage) {
-        finalMessage = attachRunIdToMessage(finalApiMessage, runId);
-      } else if (stdoutText) {
-        finalMessage = saveAgentRunResponse(conversationId, stdoutText, responseParentId, {
-          runId,
+    // Allocate a random port so the agent's project never conflicts with others
+    allocatedPort = await allocatePort();
+    const projectPort = allocatedPort;
+    childEnv.PROJECT_PORT = String(projectPort);
+    childEnv.PWD = workDir;
+
+    // Record the agent run first to get runId for log directory
+    const agentRun = createAgentRun({
+      agentId: options.agentId,
+      agentName: options.agent.name,
+      avatarIcon: options.agent.avatarIcon ?? null,
+      avatarBgColor: options.agent.avatarBgColor ?? null,
+      avatarLogoColor: options.agent.avatarLogoColor ?? null,
+      model: options.agent.model ?? null,
+      modelId: options.agent.modelId ?? null,
+      triggerType: options.triggerType,
+      conversationId: options.triggerRef?.conversationId,
+      cardId: options.triggerRef?.cardId,
+      cronJobId: options.triggerRef?.cronJobId,
+      triggerPrompt: options.prompt,
+      responseParentId: options.responseParentId ?? null,
+      executor: 'remote',
+      status: 'queued',
+    });
+    const runId = agentRun.id as string;
+    options.onRunCreated?.(runId);
+
+    // Create run log directory
+    const runLogDir = path.join(RUNS_DIR, runId);
+    fs.mkdirSync(runLogDir, { recursive: true });
+
+    const stdoutPath = path.join(runLogDir, 'stdout.log');
+    const stderrPath = path.join(runLogDir, 'stderr.log');
+    fs.closeSync(fs.openSync(stdoutPath, 'w'));
+    fs.closeSync(fs.openSync(stderrPath, 'w'));
+
+    store.update('agent_runs', runId, {
+      status: 'running',
+      stdoutPath,
+      stderrPath,
+      executor: 'remote',
+      pid: null,
+    });
+
+    remoteRunKeys.add(options.runKey);
+    const runStartedAt = Date.now();
+    const stdoutStream = fs.createWriteStream(stdoutPath, { flags: 'a' });
+    const stderrStream = fs.createWriteStream(stderrPath, { flags: 'a' });
+    const runnerIntent = buildRunnerJobIntent({
+      runId,
+      agentId: options.agentId,
+      workspaceId: remoteWorkspaceId,
+      agent: options.agent,
+      prompt: options.prompt,
+      workDir,
+      childEnv: buildRemoteRunnerEnv(childEnv),
+      imagePaths: options.imagePaths,
+      filePaths: options.filePaths,
+    });
+
+    void dispatchRemoteAgentJob(
+      {
+        workspaceId: remoteWorkspaceId,
+        intent: runnerIntent,
+      },
+      {
+        onStdout: (text) => {
+          stdoutStream.write(text);
+          options.onStdoutChunk?.(text);
+        },
+        onStderr: (text) => {
+          stderrStream.write(text);
+        },
+      },
+    )
+      .then(async (result) => {
+        stdoutStream.end();
+        stderrStream.end();
+        remoteRunKeys.delete(options.runKey);
+        releasePort(projectPort);
+        releaseConcurrencySlot();
+        markAgentLastActivity(options.agentId);
+
+        const hasError = (result.code ?? 1) !== 0;
+        const errorMsg = hasError
+          ? `Remote runner exited with code ${result.code ?? 'unknown'}`
+          : null;
+        await completeAgentRun(runId, errorMsg, {
+          stdout: result.stdout,
+          stderr: result.stderr,
+        }).catch((err) => {
+          console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, err);
         });
-      } else if (updatesFromApi.length > 0) {
-        finalMessage = attachRunIdToMessage(updatesFromApi[updatesFromApi.length - 1], runId);
-      }
-
-      const fallbackErrorMessage =
-        result.stderr.trim() || `Recovered run ${runId} exited without a response`;
-      finalizeRecoveredQueueItemForRun(
-        agentId,
-        conversationId,
-        runId,
-        runStartedAt,
-        finalMessage,
-        fallbackErrorMessage,
-      );
-      return;
-    }
-
-    if (triggerType === 'card_assignment' && cardId) {
-      if (isRunMarkedKilledByUser(runId)) return;
-      if ((result.code ?? 1) !== 0) return;
-      persistCompletedCardAssignmentComment({
-        cardId,
-        agentId,
-        runId,
-        runStartedAtMs: result.runStartedAt,
-        stdout: result.stdout,
+        options.onExit({
+          code: result.code,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          runStartedAt,
+        });
+      })
+      .catch((err: Error) => {
+        stdoutStream.end();
+        stderrStream.end();
+        remoteRunKeys.delete(options.runKey);
+        releasePort(projectPort);
+        releaseConcurrencySlot();
+        const resultLogs = err instanceof RemoteAgentJobError
+          ? { stdout: err.stdout, stderr: err.stderr || err.message }
+          : { stderr: err.message };
+        void completeAgentRun(runId, err.message, resultLogs).catch((e) => {
+          console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, e);
+        });
+        options.onSpawnError(err);
       });
+
+    return runId;
+  } catch (err) {
+    if (allocatedPort !== null) {
+      releasePort(allocatedPort);
     }
-  };
-
-  attachToProcess({
-    runId,
-    runKey,
-    pid,
-    stdoutPath,
-    stderrPath,
-    runStartedAt,
-    agentId,
-    onStdoutChunk: null,
-    onExit,
-  });
-
-  console.log(`[agent-chat] Re-attached to process PID=${pid} for run ${runId} (${runKey})`);
+    releaseConcurrencySlot();
+    throw err;
+  }
 }
 
 function readRunStdout(run: Record<string, unknown>): string {
@@ -2907,6 +2838,27 @@ function spawnChatProcess(
             return;
           }
 
+          const terminalRunError = getTerminalRunErrorMessage(spawnedRunId);
+          if (terminalRunError) {
+            if (!isFallback) {
+              const fallback = globalFallback;
+              if (fallback) {
+                console.log(
+                  `[agent-chat] Primary model failed for agent ${agentId}: ${terminalRunError}. Retrying with fallback model "${fallback.model}"...`,
+                );
+                callbacks.onFallbackStarted?.(fallback.model);
+                spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, callbacks, {
+                  isFallback: true,
+                  responseParentId,
+                  targetMessageId,
+                });
+                return;
+              }
+            }
+            callbacks.onError(terminalRunError);
+            return;
+          }
+
           if ((code ?? 1) !== 0 && !stdout.trim()) {
             // Primary model failed — attempt fallback if configured and not already a fallback
             if (!isFallback) {
@@ -2953,12 +2905,12 @@ function spawnChatProcess(
           callbacks.onDone(msg);
         },
         onSpawnError: (err) => {
-          // Primary model spawn failed — attempt fallback
+          // Primary model failed before runner execution completed — attempt fallback
           if (!isFallback) {
             const fallback = globalFallback;
             if (fallback) {
               console.log(
-                `[agent-chat] Primary model spawn failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
+                `[agent-chat] Primary model runner dispatch failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
               );
               callbacks.onFallbackStarted?.(fallback.model);
               spawnChatProcess(agentId, conversationId, fullPrompt, attachmentPaths, callbacks, {
@@ -2969,7 +2921,7 @@ function spawnChatProcess(
               return;
             }
           }
-          callbacks.onError(`Failed to start CLI: ${err.message}`);
+          callbacks.onError(err.message);
         },
       }).catch((err: unknown) => {
         callbacks.onError((err as Error).message);
@@ -3129,6 +3081,11 @@ export function canRespondToMessageStartImmediately(
   conversationId: string,
   targetMessageId: string,
 ): boolean {
+  const workspaceId = resolveAgentRemoteRunnerWorkspaceId(agentId);
+  const provider = resolveAgentRemoteRunnerProvider(agentId);
+  if (!workspaceId || !provider || !hasAvailableRemoteAgentRunner(workspaceId, provider)) {
+    return false;
+  }
   if (hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId)) {
     return false;
   }
@@ -3502,12 +3459,26 @@ function canStartQueuedItemNow(
     return false;
   }
 
+  const workspaceId = resolveAgentRemoteRunnerWorkspaceId(agentId);
+  const provider = resolveAgentRemoteRunnerProvider(agentId);
+  if (!workspaceId || !provider || !hasAvailableRemoteAgentRunner(workspaceId, provider)) {
+    return false;
+  }
+
   const mode = getQueueItemMode(queueItem);
+  if (mode === 'append_prompt') {
+    const hasProcessingAppendPrompt = queueItems.some(
+      (item) =>
+        item.id !== queueItem.id &&
+        item.status === 'processing' &&
+        getQueueItemMode(item) === 'append_prompt',
+    );
+    if (hasProcessingAppendPrompt) return false;
+  }
+
   if (mode === 'respond_to_message') {
     const targetMessageId =
-      typeof queueItem.targetMessageId === 'string'
-        ? (queueItem.targetMessageId as string)
-        : null;
+      typeof queueItem.targetMessageId === 'string' ? (queueItem.targetMessageId as string) : null;
     if (!targetMessageId) return true;
     return !hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId);
   }
@@ -3533,114 +3504,115 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
         targetMessageId: string | null;
       };
 
-      const txResult = await store.transaction(async () => {
-        await store.lockAgentChatQueueConversation(agentId, conversationId);
-        const queueItems = listConversationQueueItems(agentId, conversationId) as Record<
-          string,
-          unknown
-        >[];
-        const now = Date.now();
-        const readyItems = queueItems.filter((item) =>
-          canStartQueuedItemNow(agentId, conversationId, queueItems, item, now),
-        );
+      const txResult = await withQueueDrainTransaction(() =>
+        store.transaction(async () => {
+          await store.lockAgentChatQueueConversation(agentId, conversationId);
+          const queueItems = listConversationQueueItems(agentId, conversationId) as Record<
+            string,
+            unknown
+          >[];
+          if (!resolveAgentRemoteRunnerWorkspaceId(agentId)) {
+            const nowIso = new Date().toISOString();
+            for (const item of queueItems) {
+              if (item.status !== 'queued' || typeof item.id !== 'string') continue;
+              store.update(AGENT_CHAT_QUEUE_COLLECTION, item.id, {
+                status: 'failed',
+                completedAt: nowIso,
+                nextAttemptAt: null,
+                runId: null,
+                errorMessage:
+                  'This agent is not assigned to a workspace with a runner. Add the agent to a workspace, then try again.',
+              });
+            }
+            return { kind: 'idle' as const, hasQueuedItems: false };
+          }
+          const now = Date.now();
+          const readyItems = queueItems.filter((item) =>
+            canStartQueuedItemNow(agentId, conversationId, queueItems, item, now),
+          );
 
-        if (readyItems.length === 0) {
-          const hasQueuedItems = queueItems.some((item) => item.status === 'queued');
-          return { kind: 'idle' as const, hasQueuedItems };
-        }
-
-        const claims: ChatClaim[] = [];
-        for (const readyItem of readyItems) {
-          if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
-            return { kind: 'global_limit' as const, claims };
+          if (readyItems.length === 0) {
+            const hasQueuedItems = queueItems.some((item) => item.status === 'queued');
+            return { kind: 'idle' as const, hasQueuedItems };
           }
 
-          const readyItemId = readyItem.id as string;
-          const attempts = Number(readyItem.attempts ?? 0);
-          const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
-          const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
-          const targetMessageId =
-            typeof readyItem.targetMessageId === 'string'
-              ? (readyItem.targetMessageId as string)
-              : null;
+          const claims: ChatClaim[] = [];
+          const claimableItems = readyItems.slice(0, 1);
+          for (const readyItem of claimableItems) {
+            if (getGlobalRunningAgentCount() >= getMaxConcurrentAgents()) {
+              return { kind: 'global_limit' as const, claims };
+            }
 
-          if (mode === 'append_prompt' && !prompt) {
+            const readyItemId = readyItem.id as string;
+            const attempts = Number(readyItem.attempts ?? 0);
+            const mode = (readyItem.mode as QueueExecutionMode | undefined) ?? 'append_prompt';
+            const prompt = typeof readyItem.prompt === 'string' ? readyItem.prompt.trim() : '';
+            const targetMessageId =
+              typeof readyItem.targetMessageId === 'string'
+                ? (readyItem.targetMessageId as string)
+                : null;
+
+            if (mode === 'append_prompt' && !prompt) {
+              store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+                status: 'failed',
+                completedAt: new Date().toISOString(),
+                nextAttemptAt: null,
+                runId: null,
+                errorMessage: 'Queued prompt is empty',
+              });
+              continue;
+            }
+            if (mode === 'respond_to_message' && !targetMessageId) {
+              store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
+                status: 'failed',
+                completedAt: new Date().toISOString(),
+                nextAttemptAt: null,
+                runId: null,
+                errorMessage: 'Queued branch target is missing',
+              });
+              continue;
+            }
+
             store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-              status: 'failed',
-              completedAt: new Date().toISOString(),
-              nextAttemptAt: null,
-              runId: null,
-              errorMessage: 'Queued prompt is empty',
-            });
-            continue;
-          }
-          if (mode === 'respond_to_message' && !targetMessageId) {
-            store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-              status: 'failed',
-              completedAt: new Date().toISOString(),
-              nextAttemptAt: null,
-              runId: null,
-              errorMessage: 'Queued branch target is missing',
-            });
-            continue;
-          }
-
-          store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
-            status: 'processing',
-            attempts: attempts + 1,
-            startedAt: new Date().toISOString(),
-            runId: null,
-            errorMessage: null,
-            completedAt: null,
-            usedFallback: false,
-            fallbackModel: null,
-          });
-
-          const latest =
-            store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId) ??
-            ({
-              ...readyItem,
               status: 'processing',
               attempts: attempts + 1,
-            } as Record<string, unknown>);
-          claims.push({ readyItemId, readyItem: latest, mode, prompt, targetMessageId });
-        }
-
-        return { kind: 'claimed' as const, claims };
-      });
-
-        if (txResult.kind === 'idle') {
-          if (!txResult.hasQueuedItems) {
-            clearQueueDrainTimerForKey(key);
-            return;
-          }
-          const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
-          scheduleQueueDrain(
-            agentId,
-            conversationId,
-            nextDelayMs === null ? 1000 : Math.max(nextDelayMs, 1000),
-          );
-          return;
-        }
-
-        if (txResult.kind === 'global_limit') {
-          for (const c of txResult.claims) {
-            void processQueueItem(
-              c.readyItemId,
-              c.readyItem,
-              agentId,
-              conversationId,
-              c.mode,
-              c.prompt,
-              c.targetMessageId,
-            ).finally(() => {
-              scheduleQueueDrain(agentId, conversationId, 0);
+              startedAt: new Date().toISOString(),
+              runId: null,
+              errorMessage: null,
+              completedAt: null,
+              usedFallback: false,
+              fallbackModel: null,
             });
+
+            const latest =
+              store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId) ??
+              ({
+                ...readyItem,
+                status: 'processing',
+                attempts: attempts + 1,
+              } as Record<string, unknown>);
+            claims.push({ readyItemId, readyItem: latest, mode, prompt, targetMessageId });
           }
-          scheduleQueueDrain(agentId, conversationId, 2000);
+
+          return { kind: 'claimed' as const, claims };
+        }),
+      );
+
+      if (txResult.kind === 'idle') {
+        if (!txResult.hasQueuedItems) {
+          clearQueueDrainTimerForKey(key);
           return;
         }
+        const nextDelayMs = getNextQueueReadyDelay(agentId, conversationId);
+        scheduleQueueDrain(
+          agentId,
+          conversationId,
+          nextDelayMs === null ? 1000 : Math.max(nextDelayMs, 1000),
+        );
+        return;
+      }
 
+      if (txResult.kind === 'global_limit') {
         for (const c of txResult.claims) {
           void processQueueItem(
             c.readyItemId,
@@ -3654,7 +3626,24 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
             scheduleQueueDrain(agentId, conversationId, 0);
           });
         }
-        continue;
+        scheduleQueueDrain(agentId, conversationId, 2000);
+        return;
+      }
+
+      for (const c of txResult.claims) {
+        void processQueueItem(
+          c.readyItemId,
+          c.readyItem,
+          agentId,
+          conversationId,
+          c.mode,
+          c.prompt,
+          c.targetMessageId,
+        ).finally(() => {
+          scheduleQueueDrain(agentId, conversationId, 0);
+        });
+      }
+      continue;
     }
   } finally {
     queueProcessors.delete(key);
@@ -3728,6 +3717,23 @@ export async function initializeAgentChatQueue(options: InitializeAgentChatQueue
     keys.add(queueKey(item.agentId, item.conversationId));
   }
 
+  let index = 0;
+  for (const key of keys) {
+    const [agentId, conversationId] = key.split(':');
+    if (!agentId || !conversationId) continue;
+    scheduleQueueDrain(agentId, conversationId, index * 250);
+    index++;
+  }
+}
+
+export function scheduleQueuedAgentChatDrains() {
+  const keys = new Set<string>();
+  for (const item of store.getAll(AGENT_CHAT_QUEUE_COLLECTION)) {
+    if (item.status !== 'queued') continue;
+    if (typeof item.agentId !== 'string' || typeof item.conversationId !== 'string') continue;
+    keys.add(queueKey(item.agentId, item.conversationId));
+  }
+
   for (const key of keys) {
     const [agentId, conversationId] = key.split(':');
     if (!agentId || !conversationId) continue;
@@ -3753,6 +3759,17 @@ export function enqueueAgentPrompt(
 ): EnqueueAgentPromptResult {
   const trimmedPrompt = prompt.trim();
   const mode = options.mode ?? 'append_prompt';
+  const runnerWorkspaceId = getAgentRunnerWorkspaceIdOrThrow(agentId);
+  const runnerProvider = getAgentRunnerProviderOrThrow(agentId);
+  if (
+    !hasConnectedRemoteAgentRunner(runnerWorkspaceId) ||
+    !hasAvailableRemoteAgentRunner(runnerWorkspaceId, runnerProvider)
+  ) {
+    throw AgentChatError.conflict(
+      'agent_runner_unavailable',
+      getRemoteAgentRunnerUnavailableMessage(runnerWorkspaceId, runnerProvider),
+    );
+  }
   if (!trimmedPrompt && mode !== 'respond_to_message') {
     throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
   }
@@ -3972,7 +3989,7 @@ export function reorderQueueItems(
 
 export function executeCronTask(agentId: string, job: { id: string; prompt: string }) {
   const key = `${agentId}:cron:${job.id}`;
-  if (runningProcesses.has(key)) {
+  if (remoteRunKeys.has(key)) {
     // Previous run still in progress — skip this invocation
     return;
   }
@@ -4004,6 +4021,22 @@ export function executeCronTask(agentId: string, job: { id: string; prompt: stri
           triggerType: 'cron_job',
           triggerRef: { cronJobId: job.id },
           onExit: ({ code, stdout, stderr }) => {
+            const terminalRunError = getTerminalRunErrorMessage(null);
+            if (terminalRunError && !isFallback) {
+              const fallbackAgent = applyFallbackModel(agent, globalFallback);
+              if (fallbackAgent) {
+                console.log(
+                  `[agent-chat] Cron job ${job.id} primary model failed: ${terminalRunError}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                );
+                spawnCronRun(fallbackAgent, true);
+                return;
+              }
+            }
+            if (terminalRunError) {
+              console.error(`Agent cron task error for job ${job.id}:`, terminalRunError);
+              return;
+            }
+
             if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
               const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
@@ -4025,7 +4058,7 @@ export function executeCronTask(agentId: string, job: { id: string; prompt: stri
               const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 console.log(
-                  `[agent-chat] Cron job ${job.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                  `[agent-chat] Cron job ${job.id} primary model runner dispatch failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
                 );
                 spawnCronRun(fallbackAgent, true);
                 return;
@@ -4063,7 +4096,7 @@ export function executeCardTask(
   customPrompt?: string,
 ) {
   const key = `${agentId}:card:${card.id}`;
-  if (runningProcesses.has(key)) {
+  if (remoteRunKeys.has(key)) {
     callbacks.onError('Agent is already processing this card');
     return;
   }
@@ -4099,6 +4132,7 @@ export function executeCardTask(
       let spawnedRunId: string | null = null;
 
       const spawnCardRun = (effectiveAgent: typeof agent, isFallback: boolean) => {
+        spawnedRunId = null;
         void runAgentProcess({
           agentId,
           agent: effectiveAgent,
@@ -4112,6 +4146,22 @@ export function executeCardTask(
             callbacks.onRunCreated?.(runId);
           },
           onExit: ({ code, stdout, stderr, runStartedAt }) => {
+            const terminalRunError = getTerminalRunErrorMessage(spawnedRunId);
+            if (terminalRunError) {
+              if (!isFallback) {
+                const fallbackAgent = applyFallbackModel(agent, globalFallback);
+                if (fallbackAgent) {
+                  console.log(
+                    `[agent-chat] Card task ${card.id} primary model failed: ${terminalRunError}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                  );
+                  spawnCardRun(fallbackAgent, true);
+                  return;
+                }
+              }
+              callbacks.onError(terminalRunError);
+              return;
+            }
+
             if ((code ?? 1) !== 0 && !stdout.trim() && !isFallback) {
               const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
@@ -4125,6 +4175,16 @@ export function executeCardTask(
             }
             if ((code ?? 1) !== 0) {
               const errMsg = stderr.trim() || `Process exited with code ${code}`;
+              callbacks.onError(errMsg);
+              return;
+            }
+
+            const terminalRun = spawnedRunId ? getAgentRun(spawnedRunId) : null;
+            if (terminalRun?.status === 'error') {
+              const errMsg =
+                typeof terminalRun.errorMessage === 'string' && terminalRun.errorMessage
+                  ? terminalRun.errorMessage
+                  : 'Agent run did not produce a clean completion.';
               callbacks.onError(errMsg);
               return;
             }
@@ -4146,16 +4206,31 @@ export function executeCardTask(
               const fallbackAgent = applyFallbackModel(agent, globalFallback);
               if (fallbackAgent) {
                 console.log(
-                  `[agent-chat] Card task ${card.id} primary model spawn failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
+                  `[agent-chat] Card task ${card.id} primary model runner dispatch failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
                 );
                 spawnCardRun(fallbackAgent, true);
                 return;
               }
             }
-            callbacks.onError(`Failed to start CLI: ${err.message}`);
+            callbacks.onError(err.message);
           },
         }).catch((err: unknown) => {
-          callbacks.onError((err as Error).message);
+          const message = (err as Error).message;
+          if (!spawnedRunId) {
+            void persistFailedCardAssignmentStartupRun({
+              agentId,
+              agent: effectiveAgent,
+              cardId: card.id,
+              prompt,
+              errorMessage: message,
+              onRunCreated: (runId) => {
+                spawnedRunId = runId;
+                callbacks.onRunCreated?.(runId);
+              },
+            }).finally(() => callbacks.onError(message));
+            return;
+          }
+          callbacks.onError(message);
         });
       };
 

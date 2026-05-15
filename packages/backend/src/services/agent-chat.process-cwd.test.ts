@@ -14,7 +14,7 @@ vi.mock('../db/index.js', () => ({
   },
 }));
 
-import { resolveAgentChatProcessWorkingDirectory } from './agent-chat.js';
+import { buildRunnerJobIntent, resolveAgentChatProcessWorkingDirectory } from './agent-chat.js';
 
 const AGENT_ID = '11111111-2222-3333-4444-555555555555';
 const CONV_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -171,5 +171,65 @@ describe('resolveAgentChatProcessWorkingDirectory', () => {
 
     const cwd = resolveAgentChatProcessWorkingDirectory(AGENT_ID, undefined);
     expect(cwd).toBe(path.resolve(agentRoot));
+  });
+});
+
+describe('buildRunnerJobIntent', () => {
+  it('wraps backend run data in the protocol intent expected by remote dispatch', () => {
+    const intent = buildRunnerJobIntent({
+      runId: 'run-1',
+      agentId: AGENT_ID,
+      workspaceId: 'workspace-1',
+      agent: {
+        name: 'Test',
+        model: 'codex',
+        modelId: 'gpt-5.5',
+        thinkingLevel: 'low',
+        apiKeyId: 'key-1',
+        workspaceApiKey: 'workspace-key',
+      },
+      prompt: 'hello',
+      workDir: '/tmp/openwork-test',
+      childEnv: {
+        PROJECT_PORT: '4321',
+        EMPTY: undefined,
+      },
+      imagePaths: ['/tmp/image.png'],
+      filePaths: ['/tmp/context.txt'],
+    });
+
+    expect(intent).toMatchObject({
+      runId: 'run-1',
+      agentId: AGENT_ID,
+      agentKind: 'dev_agent',
+      provider: 'codex',
+      modelPreference: {
+        displayName: 'codex',
+        modelId: 'gpt-5.5',
+        thinkingLevel: 'low',
+      },
+      prompt: 'hello',
+      workspace: {
+        type: 'local_path',
+        path: '/tmp/openwork-test',
+        workspaceId: 'workspace-1',
+      },
+      allowedOperations: {
+        tools: ['codex'],
+        approvalMode: 'dangerous',
+      },
+    });
+    expect(intent.attachments).toEqual([
+      { type: 'image', path: '/tmp/image.png' },
+      { type: 'file', path: '/tmp/context.txt' },
+    ]);
+    expect(intent.environment?.variables).toEqual([
+      {
+        name: 'PROJECT_PORT',
+        value: '4321',
+        source: 'runtime',
+        secret: true,
+      },
+    ]);
   });
 });

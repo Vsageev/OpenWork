@@ -36,6 +36,7 @@ import {
   getActiveMessagePath,
   editMessageAndBranch,
   switchBranch,
+  activateMessagePathForSearchResult,
   getPreviousUserMessageIdForConversationMessage,
   serializeAllConversationMessageEntries,
   AgentChatError,
@@ -370,7 +371,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireAgentExists(request.params.id);
       requireConversationExists(request.params.conversationId, request.params.id);
 
-      deleteAgentConversation(request.params.conversationId);
+      await deleteAgentConversation(request.params.conversationId);
       return reply.status(204).send();
     },
   );
@@ -889,6 +890,34 @@ export async function agentChatRoutes(app: FastifyInstance) {
             limit: getMaxConcurrentAgentLimit(),
           },
         });
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
+    },
+  );
+
+  // Activate the branch path containing a message, used when jumping from search results.
+  typedApp.post(
+    '/api/agents/:id/chat/conversations/:cid/activate-message',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Activate the branch path containing a chat message',
+        params: z.object({ id: z.string(), cid: z.string() }),
+        body: z.object({
+          messageId: z.string(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.cid, request.params.id);
+
+      try {
+        activateMessagePathForSearchResult(request.params.cid, request.body.messageId);
+        const entries = serializeActivePathEntries(request.params.cid);
+        return reply.send({ entries });
       } catch (err) {
         rethrowAgentChatError(err);
       }

@@ -144,6 +144,16 @@ export function deleteChatQueueItemsForConversation(conversationId: string): voi
   }
 }
 
+export async function clearAgentRunConversationReferences(conversationId: string): Promise<void> {
+  const updates = store
+    .getAll(AGENT_RUNS_COLLECTION)
+    .filter((r) => r.conversationId === conversationId)
+    .map((r) => store.update(AGENT_RUNS_COLLECTION, String(r.id), { conversationId: null }))
+    .filter(Boolean);
+
+  await Promise.all(updates);
+}
+
 export function listConversationChatQueueItems(
   agentId: string,
   conversationId: string,

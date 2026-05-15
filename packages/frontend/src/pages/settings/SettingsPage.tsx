@@ -1,5 +1,5 @@
 import { useSearchParams } from 'react-router-dom';
-import { Key, HardDrive, Palette, Activity, Tag, UserCircle, Bell, Gauge, ShieldAlert, MessageSquare } from 'lucide-react';
+import { Key, HardDrive, Palette, Activity, Tag, UserCircle, Bell, Gauge, ShieldAlert, MessageSquare, Monitor } from 'lucide-react';
 import { PageHeader } from '../../layout';
 import { ProfileTab } from './ProfileTab';
 import { ApiKeysTab } from './ApiKeysTab';
@@ -11,12 +11,13 @@ import { NotificationsTab } from './NotificationsTab';
 import { RateLimitsTab } from './RateLimitsTab';
 import { FallbackModelTab } from './FallbackModelTab';
 import { ChatTab } from './ChatTab';
+import { RunnerDevicesTab } from './RunnerDevicesTab';
 import styles from './SettingsPage.module.css';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 
-type SettingsTab = 'profile' | 'appearance' | 'chat' | 'notifications' | 'tags' | 'api-keys' | 'rate-limits' | 'fallback-model' | 'backups' | 'activity';
+type SettingsTab = 'profile' | 'appearance' | 'chat' | 'notifications' | 'tags' | 'api-keys' | 'runners' | 'rate-limits' | 'fallback-model' | 'backups' | 'activity';
 
-const VALID_TABS = new Set<SettingsTab>(['profile', 'appearance', 'chat', 'notifications', 'tags', 'api-keys', 'rate-limits', 'fallback-model', 'backups', 'activity']);
+const VALID_TABS = new Set<SettingsTab>(['profile', 'appearance', 'chat', 'notifications', 'tags', 'api-keys', 'runners', 'rate-limits', 'fallback-model', 'backups', 'activity']);
 
 const TABS: { key: SettingsTab; label: string; icon: typeof Key }[] = [
   { key: 'profile', label: 'Profile', icon: UserCircle },
@@ -25,6 +26,7 @@ const TABS: { key: SettingsTab; label: string; icon: typeof Key }[] = [
   { key: 'notifications', label: 'Notifications', icon: Bell },
   { key: 'tags', label: 'Tags', icon: Tag },
   { key: 'api-keys', label: 'API Keys', icon: Key },
+  { key: 'runners', label: 'Runners', icon: Monitor },
   { key: 'rate-limits', label: 'Rate Limits', icon: Gauge },
   { key: 'fallback-model', label: 'Fallback Model', icon: ShieldAlert },
   { key: 'backups', label: 'Backups', icon: HardDrive },
@@ -67,6 +69,7 @@ export function SettingsPage() {
       {activeTab === 'notifications' && <NotificationsTab />}
       {activeTab === 'tags' && <TagsTab />}
       {activeTab === 'api-keys' && <ApiKeysTab />}
+      {activeTab === 'runners' && <RunnerDevicesTab />}
       {activeTab === 'rate-limits' && <RateLimitsTab />}
       {activeTab === 'fallback-model' && <FallbackModelTab />}
       {activeTab === 'backups' && <BackupsTab />}

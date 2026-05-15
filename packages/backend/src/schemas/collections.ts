@@ -33,6 +33,13 @@ export const auditLogSchema = z
       'two_factor_enabled',
       'two_factor_disabled',
       'two_factor_failed',
+      'runner_pairing_code_created',
+      'runner_pairing_failed',
+      'runner_paired',
+      'runner_reconnected',
+      'runner_auth_failed',
+      'runner_renamed',
+      'runner_revoked',
     ]),
     entityType: z.string(),
     entityId: z.string().nullable(),
@@ -319,6 +326,38 @@ export const agentRunSchema = z
   })
   .passthrough();
 
+export const agentRunnerSchema = z
+  .object({
+    id: z.string(),
+    userId: z.string(),
+    workspaceId: z.string(),
+    displayName: z.string(),
+    credentialHash: z.string(),
+    credentialPrefix: z.string(),
+    status: z.string(),
+    lastSeenAt: z.string().nullable().optional(),
+    version: z.string().nullable().optional(),
+    capabilities: z.unknown(),
+    revokedAt: z.string().nullable().optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
+export const agentRunnerPairingCodeSchema = z
+  .object({
+    id: z.string(),
+    userId: z.string(),
+    workspaceId: z.string(),
+    codeHash: z.string(),
+    displayName: z.string(),
+    expiresAt: z.string(),
+    usedAt: z.string().nullable().optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
 /**
  * Map of collection names to their Zod schemas.
  * Collections not in this map are skipped during validation (forward compat).
@@ -345,4 +384,6 @@ export const collectionSchemas: Record<string, z.ZodType> = {
   card_comments: cardCommentSchema,
   message_drafts: messageDraftSchema,
   agent_runs: agentRunSchema,
+  agent_runners: agentRunnerSchema,
+  agent_runner_pairing_codes: agentRunnerPairingCodeSchema,
 };
