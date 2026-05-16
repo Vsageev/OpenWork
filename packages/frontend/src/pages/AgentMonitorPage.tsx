@@ -48,6 +48,22 @@ interface AgentRunDetail extends AgentRun {
   stderr: string | null;
   responseText: string | null;
   triggerPrompt: string | null;
+  runnerLifecycle?: {
+    lastEvent?: string;
+    lastEventAt?: string;
+    events?: Array<{
+      at?: string;
+      event?: string;
+      message?: string;
+      runnerId?: string;
+      jobId?: string;
+      pid?: number | null;
+      code?: number | null;
+      signal?: string | null;
+      stdoutBytes?: number;
+      stderrBytes?: number;
+    }>;
+  } | null;
 }
 
 interface AgentBatchRun {
@@ -653,6 +669,26 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
   };
 
   const modelLabel = formatModelLabel(detail.model, detail.modelId);
+  const lifecycleEvents = Array.isArray(detail.runnerLifecycle?.events)
+    ? detail.runnerLifecycle.events.slice(-12)
+    : [];
+  const lifecycleText = lifecycleEvents.length > 0
+    ? lifecycleEvents.map((event) => {
+        const parts = [
+          event.at ?? '',
+          event.event ?? 'unknown',
+          event.message ? `message=${event.message}` : '',
+          event.runnerId ? `runner=${event.runnerId}` : '',
+          event.jobId ? `job=${event.jobId}` : '',
+          event.pid !== undefined && event.pid !== null ? `pid=${event.pid}` : '',
+          event.code !== undefined && event.code !== null ? `code=${event.code}` : '',
+          event.signal ? `signal=${event.signal}` : '',
+          event.stdoutBytes !== undefined ? `stdoutBytes=${event.stdoutBytes}` : '',
+          event.stderrBytes !== undefined ? `stderrBytes=${event.stderrBytes}` : '',
+        ].filter(Boolean);
+        return parts.join(' | ');
+      }).join('\n')
+    : null;
 
   return (
     <div className={styles.logPanel}>
@@ -660,6 +696,16 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
         <div className={styles.modelInfo}>
           <Cpu size={13} />
           <span>{modelLabel}</span>
+        </div>
+      )}
+      {lifecycleText && (
+        <div className={styles.logSection}>
+          <div className={styles.logSectionHeader}>
+            <Info size={13} />
+            <span>Runner lifecycle</span>
+            <LogCopyButton text={lifecycleText} />
+          </div>
+          <pre className={`${styles.logPre} ${styles.logPrePrompt}`}>{lifecycleText}</pre>
         </div>
       )}
       {promptText && (
@@ -856,6 +902,11 @@ export function AgentMonitorPage() {
   const initializedFiltersRef = useRef(false);
   const avatarFetchInFlightRef = useRef<Set<string>>(new Set());
   const historyLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const runEntryRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const currentTargetRunIdRef = useRef<string | null>(null);
+  const handledTargetRunIdRef = useRef<string | null>(null);
+  const fetchingTargetRunIdRef = useRef<string | null>(null);
+  const pendingScrollRunIdRef = useRef<string | null>(null);
 
   // Filter state
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -1087,21 +1138,41 @@ export function AgentMonitorPage() {
   }, [statusFilter, triggerFilter, agentFilter, fetchHistory]);
 
   useEffect(() => {
-    if (!targetRunId) return;
+    if (currentTargetRunIdRef.current !== targetRunId) {
+      currentTargetRunIdRef.current = targetRunId;
+      handledTargetRunIdRef.current = null;
+      fetchingTargetRunIdRef.current = null;
+      pendingScrollRunIdRef.current = targetRunId;
+    }
+
+    if (loading || !targetRunId || handledTargetRunIdRef.current === targetRunId) {
+      return;
+    }
 
     const existsInActive = activeRuns.some((run) => run.id === targetRunId);
     const existsInHistory = historyRuns.some((run) => run.id === targetRunId);
-    if (existsInActive) setExpandedActiveRunId(targetRunId);
-    if (existsInHistory) setExpandedHistoryRunId(targetRunId);
+    if (existsInActive) {
+      setExpandedActiveRunId(targetRunId);
+      handledTargetRunIdRef.current = targetRunId;
+      return;
+    }
+    if (existsInHistory) {
+      setExpandedHistoryRunId(targetRunId);
+      handledTargetRunIdRef.current = targetRunId;
+      return;
+    }
 
-    const exists = existsInActive || existsInHistory;
-    if (exists) return;
+    if (fetchingTargetRunIdRef.current === targetRunId) {
+      return;
+    }
 
+    fetchingTargetRunIdRef.current = targetRunId;
     let cancelled = false;
     api<AgentRunDetail>(`/agent-runs/${targetRunId}`)
       .then((run) => {
-        if (cancelled) return;
+        if (cancelled || currentTargetRunIdRef.current !== targetRunId) return;
         seedAgentAvatars([run]);
+        handledTargetRunIdRef.current = targetRunId;
         if (run.status === 'running') {
           setExpandedActiveRunId(run.id);
           setActiveRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
@@ -1111,12 +1182,32 @@ export function AgentMonitorPage() {
         setHistoryRuns((prev) => (prev.some((entry) => entry.id === run.id) ? prev : [run, ...prev]));
         setHistoryTotal((prev) => prev + 1);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (fetchingTargetRunIdRef.current === targetRunId) {
+          fetchingTargetRunIdRef.current = null;
+        }
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [targetRunId, activeRuns, historyRuns, seedAgentAvatars]);
+  }, [targetRunId, loading, activeRuns, historyRuns, seedAgentAvatars]);
+
+  useEffect(() => {
+    const runId = pendingScrollRunIdRef.current;
+    if (loading) return;
+    if (!runId) return;
+    if (expandedActiveRunId !== runId && expandedHistoryRunId !== runId) return;
+
+    const node = runEntryRefs.current[runId];
+    if (!node) return;
+
+    pendingScrollRunIdRef.current = null;
+    window.requestAnimationFrame(() => {
+      node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, [loading, expandedActiveRunId, expandedHistoryRunId, activeRuns, historyRuns]);
 
   // Poll active runs every 4 seconds
   useEffect(() => {
@@ -1340,7 +1431,11 @@ export function AgentMonitorPage() {
         ) : (
           <div className={styles.runList}>
             {activeRuns.map((run) => (
-              <div key={run.id} className={styles.runEntry}>
+              <div
+                key={run.id}
+                ref={(node) => { runEntryRefs.current[run.id] = node; }}
+                className={styles.runEntry}
+              >
                 <div
                   className={`${styles.runRow} ${styles.activeRunRow}`}
                   onClick={(e) => toggleExpand(e, run.id, 'active')}
@@ -1415,8 +1510,8 @@ export function AgentMonitorPage() {
               const remaining = batch.queued + batch.processing;
               const skipped = batch.skipped ?? 0;
               const issueCount = batch.failed + skipped;
-              const progressPct = batch.total > 0 ? Math.round(((batch.completed + batch.failed + batch.cancelled + skipped) / batch.total) * 100) : 0;
               const agentInfo = agentAvatars[batch.agentId];
+              const batchTotal = batch.total;
               return (
                 <div key={batch.id} className={styles.batchCard}>
                   <div className={styles.batchCardHeader}>
@@ -1468,9 +1563,39 @@ export function AgentMonitorPage() {
 
                   <div className={styles.batchProgress}>
                     <div className={styles.batchProgressBar}>
-                      <div className={styles.batchProgressFill} style={{ width: `${progressPct}%` }} />
-                      {batch.failed > 0 && (
-                        <div className={styles.batchProgressFailed} style={{ width: `${Math.round((batch.failed / batch.total) * 100)}%` }} />
+                      {batchTotal > 0 && (
+                        <>
+                          {batch.completed > 0 && (
+                            <div
+                              className={styles.batchSegCompleted}
+                              style={{ width: `${(batch.completed / batchTotal) * 100}%` }}
+                            />
+                          )}
+                          {batch.failed > 0 && (
+                            <div
+                              className={styles.batchSegFailed}
+                              style={{ width: `${(batch.failed / batchTotal) * 100}%` }}
+                            />
+                          )}
+                          {batch.cancelled > 0 && (
+                            <div
+                              className={styles.batchSegCancelled}
+                              style={{ width: `${(batch.cancelled / batchTotal) * 100}%` }}
+                            />
+                          )}
+                          {skipped > 0 && (
+                            <div
+                              className={styles.batchSegSkipped}
+                              style={{ width: `${(skipped / batchTotal) * 100}%` }}
+                            />
+                          )}
+                          {batch.processing > 0 && (
+                            <div
+                              className={styles.batchSegProcessing}
+                              style={{ width: `${(batch.processing / batchTotal) * 100}%` }}
+                            />
+                          )}
+                        </>
                       )}
                     </div>
                     <div className={styles.batchStats}>
@@ -1693,7 +1818,11 @@ export function AgentMonitorPage() {
               <span></span>
             </div>
             {historyRuns.map((run) => (
-              <div key={run.id} className={styles.runEntry}>
+              <div
+                key={run.id}
+                ref={(node) => { runEntryRefs.current[run.id] = node; }}
+                className={styles.runEntry}
+              >
                 <div
                   className={styles.runRow}
                   onClick={(e) => toggleExpand(e, run.id, 'history')}

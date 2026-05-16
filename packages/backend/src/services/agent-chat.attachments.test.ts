@@ -13,8 +13,7 @@ vi.mock('../db/connection.js', () => ({
       mockFind(col, predicate),
     getAll: (col: string) => mockGetAll(col),
     getById: (col: string, id: string) => mockGetById(col, id),
-    update: (col: string, id: string, patch: Record<string, unknown>) =>
-      mockUpdate(col, id, patch),
+    update: (col: string, id: string, patch: Record<string, unknown>) => mockUpdate(col, id, patch),
   },
 }));
 
@@ -22,6 +21,7 @@ import {
   activateMessagePathForSearchResult,
   getActiveMessagePath,
   getConversationAttachmentDiskPaths,
+  updateQueueItem,
 } from './agent-chat.js';
 
 const CONV_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -40,8 +40,9 @@ describe('getConversationAttachmentDiskPaths', () => {
         (recordsByCollection[col] ?? []).filter((record) => predicate(record)),
     );
     mockGetAll.mockImplementation((col: string) => [...(recordsByCollection[col] ?? [])]);
-    mockGetById.mockImplementation((col: string, id: string) =>
-      (recordsByCollection[col] ?? []).find((record) => record.id === id) ?? null,
+    mockGetById.mockImplementation(
+      (col: string, id: string) =>
+        (recordsByCollection[col] ?? []).find((record) => record.id === id) ?? null,
     );
     mockUpdate.mockImplementation((col: string, id: string, patch: Record<string, unknown>) => {
       const record = (recordsByCollection[col] ?? []).find((entry) => entry.id === id);
@@ -51,9 +52,87 @@ describe('getConversationAttachmentDiskPaths', () => {
     });
 
     vi.spyOn(fs, 'existsSync').mockImplementation((targetPath) => {
-      const normalized =
-        typeof targetPath === 'string' ? targetPath : targetPath.toString();
+      const normalized = typeof targetPath === 'string' ? targetPath : targetPath.toString();
       return !normalized.includes('missing');
+    });
+  });
+
+  it('stores attachments on a queued prompt before its future message exists', () => {
+    recordsByCollection.agentChatQueue = [
+      {
+        id: 'queue-1',
+        agentId: 'agent-1',
+        conversationId: CONV_ID,
+        mode: 'append_prompt',
+        prompt: 'Attach this later',
+        status: 'queued',
+        queuedMessageId: 'queued-message-1',
+      },
+    ];
+
+    const updated = updateQueueItem('queue-1', 'agent-1', CONV_ID, {
+      prompt: '',
+      attachments: [
+        {
+          storagePath: '/chat-uploads/spec.txt',
+          fileName: 'spec.txt',
+          type: 'file',
+          mimeType: 'text/plain',
+          fileSize: 12,
+        },
+      ],
+      keepStoragePaths: [],
+    });
+
+    expect(updated).not.toBeNull();
+    expect(updated!.prompt).toBe('');
+    expect(updated!.attachments).toEqual([
+      {
+        storagePath: '/chat-uploads/spec.txt',
+        fileName: 'spec.txt',
+        type: 'file',
+        mimeType: 'text/plain',
+        fileSize: 12,
+      },
+    ]);
+  });
+
+  it('edits the target message for queued branch-response items', () => {
+    recordsByCollection.messages = [
+      {
+        id: 'target-message-1',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        type: 'text',
+        content: 'Original branch prompt',
+        attachments: null,
+      },
+    ];
+    recordsByCollection.agentChatQueue = [
+      {
+        id: 'queue-branch-1',
+        agentId: 'agent-1',
+        conversationId: CONV_ID,
+        mode: 'respond_to_message',
+        prompt: '',
+        status: 'queued',
+        targetMessageId: 'target-message-1',
+      },
+    ];
+
+    const updated = updateQueueItem('queue-branch-1', 'agent-1', CONV_ID, {
+      prompt: 'Updated branch prompt',
+    });
+
+    expect(updated).toMatchObject({
+      id: 'queue-branch-1',
+      mode: 'respond_to_message',
+      prompt: '',
+    });
+    expect(recordsByCollection.messages[0]).toMatchObject({
+      id: 'target-message-1',
+      content: 'Updated branch prompt',
+      type: 'text',
     });
   });
 
@@ -110,6 +189,29 @@ describe('getConversationAttachmentDiskPaths', () => {
     expect(result.filePaths.map((entry) => path.basename(entry))).toEqual([
       'pasted-text-1.txt',
       'pasted-text-2.txt',
+    ]);
+    expect(result.attachments).toMatchObject([
+      {
+        type: 'file',
+        filename: 'pasted-text-1.txt',
+        mimeType: 'text/plain',
+        textExtraction: { status: 'available' },
+        manifest: { storagePath: '/chat-uploads/pasted-text-1.txt' },
+      },
+      {
+        type: 'image',
+        filename: 'image-1.png',
+        mimeType: 'image/png',
+        textExtraction: { status: 'not_applicable' },
+        manifest: { storagePath: '/chat-uploads/image-1.png' },
+      },
+      {
+        type: 'file',
+        filename: 'pasted-text-2.txt',
+        mimeType: 'text/plain',
+        textExtraction: { status: 'available' },
+        manifest: { storagePath: '/chat-uploads/pasted-text-2.txt' },
+      },
     ]);
   });
 

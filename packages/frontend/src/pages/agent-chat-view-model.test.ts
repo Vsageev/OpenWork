@@ -506,4 +506,54 @@ describe('buildAgentConversationViewModel', () => {
     expect(view.queuedMessages).toHaveLength(0);
     expect(view.queuedQueueItems).toHaveLength(0);
   });
+
+  it('does not show the original root prompt as queued after switching to an active edited root branch', () => {
+    const view = buildAgentConversationViewModel({
+      messages: [
+        baseMessage({
+          id: 'edited-root',
+          content: 'edited version',
+          previousUserMessageId: null,
+          siblingIndex: 1,
+          siblingCount: 2,
+          siblingIds: ['original-root', 'edited-root'],
+          createdAt: '2026-01-01T00:00:10.000Z',
+        }),
+      ],
+      queueItems: [
+        queueItem({
+          id: 'queue-original-root',
+          agentId: 'agent-1',
+          conversationId: 'conversation-1',
+          prompt: 'original version',
+          status: 'processing',
+          queuedMessageId: 'original-root',
+          previousUserMessageId: null,
+          runId: 'run-original-root',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ],
+      activeConversationRuns: [
+        {
+          id: 'run-edited-root',
+          agentId: 'agent-1',
+          conversationId: 'conversation-1',
+          responseParentId: 'edited-root',
+          status: 'running',
+          startedAt: '2026-01-01T00:00:11.000Z',
+        },
+      ],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages.map((message) => message.id)).toEqual(['edited-root']);
+    expect(view.queuedQueueItems.map((item) => item.id)).not.toContain('queue-original-root');
+    expect(view.queuedMessages.map(({ message }) => message.id)).not.toContain('original-root');
+    expect(view.activeConversationRun?.id).toBe('run-edited-root');
+    expect(view.activeProcessingTargetMessageId).toBe('edited-root');
+    expect(view.showStreamingBubble).toBe(true);
+  });
 });

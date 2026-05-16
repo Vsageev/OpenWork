@@ -318,6 +318,11 @@ interface QueuePromptResponse {
   queuedCount?: number;
 }
 
+interface ChatUploadAndRespondResponse extends QueuePromptResponse {
+  message: ChatMessage;
+  queueItem: QueueItem;
+}
+
 interface QueueItem {
   id: string;
   agentId: string;
@@ -332,6 +337,7 @@ interface QueueItem {
   queuedMessageId?: string | null;
   previousUserMessageId?: string | null;
   responseMessageId?: string | null;
+  attachments?: ChatAttachment[] | null;
   errorMessage?: string | null;
   nextAttemptAt?: string | null;
   completedAt?: string | null;
@@ -398,6 +404,7 @@ interface EditingQueueComposerState {
   queueItemId: string;
   initialValue: string;
   value: string;
+  existingAttachments: ManagedExistingAttachment[];
   isSubmitting: boolean;
 }
 
@@ -412,7 +419,7 @@ type ReplyComposerEditingProp =
   | (EditingQueueComposerState & {
       onChange: (value: string) => void;
       onCancel: () => void;
-      onSubmit: () => Promise<void>;
+      onSubmit: (files: File[], keepStoragePaths: string[]) => Promise<void>;
     });
 
 interface ReplyComposerProps {
@@ -541,9 +548,9 @@ export const ReplyComposer = memo(function ReplyComposer({
   const [uploading, setUploading] = useState(false);
   const [draftStagedAttachments, setDraftStagedAttachments] = useState<DraftAttachment[]>([]);
   const [editStagedAttachments, setEditStagedAttachments] = useState<DraftAttachment[]>([]);
-  const [retainedEditAttachments, setRetainedEditAttachments] = useState<ManagedExistingAttachment[]>(
-    [],
-  );
+  const [retainedEditAttachments, setRetainedEditAttachments] = useState<
+    ManagedExistingAttachment[]
+  >([]);
   const [draggingOver, setDraggingOver] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [lightboxAlt, setLightboxAlt] = useState('');
@@ -553,6 +560,7 @@ export const ReplyComposer = memo(function ReplyComposer({
   const isEditing = editingMessage !== null;
   const isEditingChatMessage = editingMessage?.kind === 'message';
   const isEditingQueueItem = editingMessage?.kind === 'queue';
+  const isEditingWithAttachments = isEditingChatMessage || isEditingQueueItem;
   const editingSubmitting = isEditing && editingMessage.isSubmitting;
   const composerDisabled = Boolean(disabledReason) && !isEditing;
   const composerValue = isEditing ? editingMessage.value : input;
@@ -564,16 +572,17 @@ export const ReplyComposer = memo(function ReplyComposer({
     (attachment): attachment is DraftAttachment & { kind: 'image'; previewUrl: string } =>
       attachment.kind === 'image' && Boolean(attachment.previewUrl),
   );
-  const totalAttachmentCount = isEditingChatMessage
+  const totalAttachmentCount = isEditingWithAttachments
     ? editStagedAttachments.length + retainedEditAttachments.length
     : isEditing
       ? 0
       : draftStagedAttachments.length;
   const trimmedComposerValue = isEditing ? editingMessage.value.trim() : input.trim();
-  const existingAttachmentsChanged = isEditingChatMessage
+  const existingAttachmentsChanged = isEditingWithAttachments
     ? editingMessage.existingAttachments.length !== retainedEditAttachments.length ||
       editingMessage.existingAttachments.some(
-        (attachment, index) => retainedEditAttachments[index]?.storagePath !== attachment.storagePath,
+        (attachment, index) =>
+          retainedEditAttachments[index]?.storagePath !== attachment.storagePath,
       )
     : false;
   const canSubmitEdit = isEditingChatMessage
@@ -582,8 +591,10 @@ export const ReplyComposer = memo(function ReplyComposer({
         existingAttachmentsChanged) &&
       (trimmedComposerValue.length > 0 || totalAttachmentCount > 0)
     : isEditingQueueItem
-      ? trimmedComposerValue !== editingMessage.initialValue.trim() &&
-        trimmedComposerValue.length > 0
+      ? (trimmedComposerValue !== editingMessage.initialValue.trim() ||
+          editStagedAttachments.length > 0 ||
+          existingAttachmentsChanged) &&
+        (trimmedComposerValue.length > 0 || totalAttachmentCount > 0)
       : false;
 
   const clearAttachmentSet = useCallback(
@@ -624,7 +635,7 @@ export const ReplyComposer = memo(function ReplyComposer({
   );
 
   useEffect(() => {
-    if (editingMessage?.kind === 'message') {
+    if (editingMessage?.kind === 'message' || editingMessage?.kind === 'queue') {
       setRetainedEditAttachments(editingMessage.existingAttachments);
     } else {
       setRetainedEditAttachments([]);
@@ -634,7 +645,9 @@ export const ReplyComposer = memo(function ReplyComposer({
     clearEditStagedAttachments,
     editingMessage?.kind === 'message' ? editingMessage.id : null,
     editingMessage?.kind === 'queue' ? editingMessage.queueItemId : null,
-    editingMessage?.kind === 'message' ? editingMessage.existingAttachments : null,
+    editingMessage?.kind === 'message' || editingMessage?.kind === 'queue'
+      ? editingMessage.existingAttachments
+      : null,
   ]);
 
   useEffect(() => {
@@ -661,10 +674,9 @@ export const ReplyComposer = memo(function ReplyComposer({
     (files: File[]) => {
       const images = files.filter(isImageFile);
       if (images.length === 0) return;
-      if (isEditingChatMessage) {
+      if (isEditingWithAttachments) {
         setEditStagedAttachments((prev) => {
-          const remaining =
-            MAX_STAGED_ATTACHMENTS - prev.length - retainedEditAttachments.length;
+          const remaining = MAX_STAGED_ATTACHMENTS - prev.length - retainedEditAttachments.length;
           if (remaining <= 0) return prev;
           const toAdd = images.slice(0, remaining).map((file) => ({
             file,
@@ -675,7 +687,6 @@ export const ReplyComposer = memo(function ReplyComposer({
         });
         return;
       }
-      if (isEditingQueueItem) return;
       setDraftStagedAttachments((prev) => {
         const remaining = MAX_STAGED_ATTACHMENTS - prev.length;
         if (remaining <= 0) return prev;
@@ -687,14 +698,14 @@ export const ReplyComposer = memo(function ReplyComposer({
         return [...prev, ...toAdd];
       });
     },
-    [isEditingChatMessage, isEditingQueueItem, retainedEditAttachments.length],
+    [isEditingWithAttachments, retainedEditAttachments.length],
   );
 
   const stageFiles = useCallback(
     (files: File[]) => {
-      if (files.length === 0 || isEditingQueueItem) return;
-      const apply = isEditingChatMessage ? setEditStagedAttachments : setDraftStagedAttachments;
-      const retainedCount = isEditingChatMessage ? retainedEditAttachments.length : 0;
+      if (files.length === 0) return;
+      const apply = isEditingWithAttachments ? setEditStagedAttachments : setDraftStagedAttachments;
+      const retainedCount = isEditingWithAttachments ? retainedEditAttachments.length : 0;
       apply((prev) => {
         const remaining = MAX_STAGED_ATTACHMENTS - prev.length - retainedCount;
         if (remaining <= 0) return prev;
@@ -706,7 +717,7 @@ export const ReplyComposer = memo(function ReplyComposer({
         return [...prev, ...toAdd];
       });
     },
-    [isEditingChatMessage, isEditingQueueItem, retainedEditAttachments.length],
+    [isEditingWithAttachments, retainedEditAttachments.length],
   );
 
   const removeDraftAttachment = useCallback((index: number) => {
@@ -720,7 +731,7 @@ export const ReplyComposer = memo(function ReplyComposer({
 
   const removeStagedImage = useCallback(
     (index: number) => {
-      if (!isEditingChatMessage) {
+      if (!isEditingWithAttachments) {
         removeDraftAttachment(index);
         return;
       }
@@ -731,7 +742,7 @@ export const ReplyComposer = memo(function ReplyComposer({
         return next;
       });
     },
-    [isEditingChatMessage, removeDraftAttachment],
+    [isEditingWithAttachments, removeDraftAttachment],
   );
 
   const removeExistingAttachment = useCallback((storagePath: string) => {
@@ -768,9 +779,15 @@ export const ReplyComposer = memo(function ReplyComposer({
 
     if (isEditingQueueItem) {
       const nextValue = editingMessage.value.trim();
-      if (!nextValue) return;
+      const hasAttachments = editStagedAttachments.length > 0;
+      const keptStoragePaths = retainedEditAttachments.map((attachment) => attachment.storagePath);
+      if (!nextValue && !hasAttachments && keptStoragePaths.length === 0) return;
       try {
-        await editingMessage.onSubmit();
+        await editingMessage.onSubmit(
+          editStagedAttachments.map((attachment) => attachment.file),
+          keptStoragePaths,
+        );
+        clearEditStagedAttachments();
       } catch {
         // Parent state already surfaces the failure; keep the draft intact for retry.
       } finally {
@@ -826,6 +843,7 @@ export const ReplyComposer = memo(function ReplyComposer({
     isEditingQueueItem,
     onSendAttachments,
     onSendText,
+    retainedEditAttachments,
     streaming,
     uploading,
   ]);
@@ -849,7 +867,7 @@ export const ReplyComposer = memo(function ReplyComposer({
         return;
       }
 
-      if (!autoAttachOversizedPasteAsTextFile || isEditingQueueItem) return;
+      if (!autoAttachOversizedPasteAsTextFile) return;
 
       const pastedText = e.clipboardData.getData('text/plain');
       if (pastedText.length < OVERSIZED_PASTED_TEXT_MIN_CHARS) return;
@@ -868,13 +886,7 @@ export const ReplyComposer = memo(function ReplyComposer({
       ]);
       toast.success(`Oversized pasted text was attached as ${fileName}`);
     },
-    [
-      autoAttachOversizedPasteAsTextFile,
-      isEditingQueueItem,
-      stageFiles,
-      stageImages,
-      totalAttachmentCount,
-    ],
+    [autoAttachOversizedPasteAsTextFile, stageFiles, stageImages, totalAttachmentCount],
   );
 
   const handleDragOver = useCallback((e: ReactDragEvent) => {
@@ -898,11 +910,9 @@ export const ReplyComposer = memo(function ReplyComposer({
       setDraggingOver(false);
       const files = Array.from(e.dataTransfer.files ?? []);
       if (files.length === 0) return;
-      if (isEditingChatMessage || !isEditing) {
-        stageFiles(files);
-      }
+      stageFiles(files);
     },
-    [isEditing, isEditingChatMessage, stageFiles],
+    [stageFiles],
   );
 
   const handleImageSelect = useCallback(
@@ -965,7 +975,7 @@ export const ReplyComposer = memo(function ReplyComposer({
       )}
       {(retainedEditAttachments.length > 0 ||
         (!isEditing && draftStagedAttachments.length > 0) ||
-        (isEditingChatMessage && editStagedAttachments.length > 0)) && (
+        (isEditingWithAttachments && editStagedAttachments.length > 0)) && (
         <div className={styles.stagedImagesRow}>
           {retainedEditAttachments.map((attachment) =>
             attachment.type === 'image' ? (
@@ -975,7 +985,10 @@ export const ReplyComposer = memo(function ReplyComposer({
                   alt={attachment.fileName}
                   className={styles.stagedImageThumb}
                   placeholderClassName={styles.stagedImageThumbPlaceholder}
-                  onClick={(src) => { setLightboxSrc(src); setLightboxAlt(attachment.fileName); }}
+                  onClick={(src) => {
+                    setLightboxSrc(src);
+                    setLightboxAlt(attachment.fileName);
+                  }}
                 />
                 <button
                   className={styles.stagedImageRemove}
@@ -991,9 +1004,7 @@ export const ReplyComposer = memo(function ReplyComposer({
                 <FileText size={14} className={styles.stagedFileIcon} />
                 <div className={styles.stagedFileMeta}>
                   <span className={styles.stagedFileName}>{attachment.fileName}</span>
-                  <span className={styles.stagedFileSize}>
-                    {formatBytes(attachment.fileSize)}
-                  </span>
+                  <span className={styles.stagedFileSize}>{formatBytes(attachment.fileSize)}</span>
                 </div>
                 <button
                   className={styles.stagedFileRemove}
@@ -1006,7 +1017,7 @@ export const ReplyComposer = memo(function ReplyComposer({
               </div>
             ),
           )}
-          {isEditingChatMessage
+          {isEditingWithAttachments
             ? editStagedAttachments.map((attachment, i) =>
                 attachment.kind === 'image' && attachment.previewUrl ? (
                   <div key={attachment.previewUrl} className={styles.stagedImagePreview}>
@@ -1015,7 +1026,10 @@ export const ReplyComposer = memo(function ReplyComposer({
                       alt={attachment.file.name}
                       className={styles.stagedImageThumb}
                       style={{ cursor: 'zoom-in' }}
-                      onClick={() => { setLightboxSrc(attachment.previewUrl); setLightboxAlt(attachment.file.name); }}
+                      onClick={() => {
+                        setLightboxSrc(attachment.previewUrl);
+                        setLightboxAlt(attachment.file.name);
+                      }}
                     />
                     <button
                       className={styles.stagedImageRemove}
@@ -1054,7 +1068,10 @@ export const ReplyComposer = memo(function ReplyComposer({
                       alt={attachment.file.name}
                       className={styles.stagedImageThumb}
                       style={{ cursor: 'zoom-in' }}
-                      onClick={() => { setLightboxSrc(attachment.previewUrl); setLightboxAlt(attachment.file.name); }}
+                      onClick={() => {
+                        setLightboxSrc(attachment.previewUrl);
+                        setLightboxAlt(attachment.file.name);
+                      }}
                     />
                     <button
                       className={styles.stagedImageRemove}
@@ -1097,15 +1114,13 @@ export const ReplyComposer = memo(function ReplyComposer({
             className={styles.hiddenFileInput}
             onChange={handleImageSelect}
           />
-          {!isEditingQueueItem && (
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className={styles.hiddenFileInput}
-              onChange={handleFileSelect}
-            />
-          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className={styles.hiddenFileInput}
+            onChange={handleFileSelect}
+          />
           <div className={styles.attachmentButtons}>
             <button
               className={styles.attachBtn}
@@ -1114,7 +1129,6 @@ export const ReplyComposer = memo(function ReplyComposer({
                 composerDisabled ||
                 uploading ||
                 editingSubmitting ||
-                isEditingQueueItem ||
                 (!isEditing && streaming) ||
                 totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
               }
@@ -1124,34 +1138,32 @@ export const ReplyComposer = memo(function ReplyComposer({
                   ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
                   : composerDisabled && disabledReason
                     ? disabledReason
-                  : 'Attach images'
+                    : 'Attach images'
               }
             >
               <Image size={16} />
             </button>
-            {!isEditingQueueItem && (
-              <button
-                className={styles.attachBtn}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={
-                  composerDisabled ||
-                  uploading ||
-                  editingSubmitting ||
-                  (!isEditing && streaming) ||
-                  totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
-                }
-                aria-label="Attach files"
-                title={
-                  totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
-                    ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
-                    : composerDisabled && disabledReason
-                      ? disabledReason
+            <button
+              className={styles.attachBtn}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={
+                composerDisabled ||
+                uploading ||
+                editingSubmitting ||
+                (!isEditing && streaming) ||
+                totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+              }
+              aria-label="Attach files"
+              title={
+                totalAttachmentCount >= MAX_STAGED_ATTACHMENTS
+                  ? `Max ${MAX_STAGED_ATTACHMENTS} attachments`
+                  : composerDisabled && disabledReason
+                    ? disabledReason
                     : 'Attach files'
-                }
-              >
-                <Paperclip size={16} />
-              </button>
-            )}
+              }
+            >
+              <Paperclip size={16} />
+            </button>
           </div>
         </>
         <textarea
@@ -1202,13 +1214,15 @@ export const ReplyComposer = memo(function ReplyComposer({
                 ? 'Save queued message'
                 : composerDisabled && disabledReason
                   ? disabledReason
-                : 'Send message'
+                  : 'Send message'
           }
         >
           <Send size={18} />
         </button>
       </div>
-      {lightboxSrc && <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => setLightboxSrc(null)} />}
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => setLightboxSrc(null)} />
+      )}
     </div>
   );
 });
@@ -1250,7 +1264,15 @@ function StorageImageThumb({
   }, [storagePath]);
 
   if (!src) return <div className={placeholderClassName}>Loading…</div>;
-  return <img className={className} src={src} alt={alt} onClick={onClick ? () => onClick(src) : undefined} style={onClick ? { cursor: 'zoom-in' } : undefined} />;
+  return (
+    <img
+      className={className}
+      src={src}
+      alt={alt}
+      onClick={onClick ? () => onClick(src) : undefined}
+      style={onClick ? { cursor: 'zoom-in' } : undefined}
+    />
+  );
 }
 
 /* ── ChatImage component ── */
@@ -1613,6 +1635,7 @@ interface AgentSidebarItemProps {
   activeConversationId: string | null;
   groupsEnabled: boolean;
   pendingConversationKeys: Set<string>;
+  runHandoffKeys: Set<string>;
   onToggleCollapse: (agentId: string) => void;
   onOpenContextMenu: (agentId: string, x: number, y: number) => void;
   onOpenSettings: (agent: Agent) => void;
@@ -1632,6 +1655,7 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   activeConversationId,
   groupsEnabled,
   pendingConversationKeys,
+  runHandoffKeys,
   onToggleCollapse,
   onOpenContextMenu,
   onOpenSettings,
@@ -1643,11 +1667,12 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   onDeleteConversation,
 }: AgentSidebarItemProps) {
   const hasUnreadAny = conversations.some((conversation) => conversation.isUnread);
-  const hasStreamingAny = conversations.some(
-    (conversation) =>
-      Boolean(conversation.isBusy) ||
-      pendingConversationKeys.has(agentConversationKey(agent.id, conversation.id)),
-  );
+  const hasStreamingAny = conversations.some((conversation) => {
+    const key = agentConversationKey(agent.id, conversation.id);
+    return (
+      Boolean(conversation.isBusy) || pendingConversationKeys.has(key) || runHandoffKeys.has(key)
+    );
+  });
   const queuedTotal = conversations.reduce(
     (sum, conversation) => sum + toQueueCount(conversation.queuedCount),
     0,
@@ -1748,9 +1773,11 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
       {!collapsed && conversations.length > 0 && (
         <div className={styles.convList}>
           {conversations.map((conversation) => {
+            const convKey = agentConversationKey(agent.id, conversation.id);
             const isStreaming =
               Boolean(conversation.isBusy) ||
-              pendingConversationKeys.has(agentConversationKey(agent.id, conversation.id));
+              pendingConversationKeys.has(convKey) ||
+              runHandoffKeys.has(convKey);
             const isUnread = conversation.isUnread;
             const queuedCount = toQueueCount(conversation.queuedCount);
             const hasFailed = Boolean(conversation.hasFailed);
@@ -1764,7 +1791,9 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
                 data-testid="agent-conversation-item"
                 data-agent-id={agent.id}
                 data-conversation-id={conversation.id}
-                data-active={isActive && activeConversationId === conversation.id ? 'true' : 'false'}
+                data-active={
+                  isActive && activeConversationId === conversation.id ? 'true' : 'false'
+                }
                 className={`${styles.convItem} ${
                   isActive && activeConversationId === conversation.id ? styles.convItemActive : ''
                 }`}
@@ -1861,11 +1890,19 @@ function areAgentSidebarItemPropsEqual(
   if (prev.isActive !== next.isActive) return false;
   if (prev.activeConversationId !== next.activeConversationId) return false;
   if (prev.groupsEnabled !== next.groupsEnabled) return false;
-  if (prev.pendingConversationKeys === next.pendingConversationKeys) return true;
+  if (
+    prev.pendingConversationKeys === next.pendingConversationKeys &&
+    prev.runHandoffKeys === next.runHandoffKeys
+  ) {
+    return true;
+  }
 
   for (const conversation of prev.conversations) {
     const key = agentConversationKey(prev.agent.id, conversation.id);
     if (prev.pendingConversationKeys.has(key) !== next.pendingConversationKeys.has(key)) {
+      return false;
+    }
+    if (prev.runHandoffKeys.has(key) !== next.runHandoffKeys.has(key)) {
       return false;
     }
   }
@@ -2011,9 +2048,7 @@ function mergeMessagesWithOptimistic(
     if (persistedIds.has(optimisticMessage.id)) continue;
     merged.push(optimisticMessage);
   }
-  merged.sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-  );
+  merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   return merged;
 }
 
@@ -2781,7 +2816,7 @@ export function AgentsPage() {
     [visibleMessages],
   );
   const optimisticActiveTargetId = activeConversationKey
-    ? optimisticResponseParentIds[activeConversationKey] ?? null
+    ? (optimisticResponseParentIds[activeConversationKey] ?? null)
     : null;
   const activeConversationPending = activeConversationKey
     ? pendingConversationKeys.has(activeConversationKey) &&
@@ -3096,9 +3131,7 @@ export function AgentsPage() {
     (
       agentId: string,
       conversationId: string,
-      nextMessages:
-        | ChatMessage[]
-        | ((currentMessages: ChatMessage[]) => ChatMessage[]),
+      nextMessages: ChatMessage[] | ((currentMessages: ChatMessage[]) => ChatMessage[]),
     ) => {
       const key = agentConversationKey(agentId, conversationId);
       setOptimisticMessagesByConversation((prev) => {
@@ -3189,8 +3222,7 @@ export function AgentsPage() {
           );
           setOptimisticConversationMessages(agentId, conversationId, remainingOptimisticMessages);
         }
-        const handoffStartedAt =
-          runHandoffStartedAtRef.current.get(conversationKey) ?? null;
+        const handoffStartedAt = runHandoffStartedAtRef.current.get(conversationKey) ?? null;
         if (
           handoffStartedAt !== null &&
           mergedEntries.some(
@@ -3422,11 +3454,7 @@ export function AgentsPage() {
         method: 'DELETE',
         body: JSON.stringify({ conversationId: activeConvId }),
       });
-      removeOptimisticMessage(
-        activeAgentId,
-        activeConvId,
-        removedItem?.queuedMessageId ?? null,
-      );
+      removeOptimisticMessage(activeAgentId, activeConvId, removedItem?.queuedMessageId ?? null);
       await syncActiveConversation(activeAgentId, activeConvId);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Failed to dismiss queued message';
@@ -4145,8 +4173,9 @@ export function AgentsPage() {
       const messageId = `upload-${Date.now()}-${generateId()}`;
       const previousUserMessageId = getLastPersistedUserMessageId(
         messagesRef2.current,
-        optimisticMessagesByConversationRef.current[agentConversationKey(sentAgentId, sentConvId)] ??
-          [],
+        optimisticMessagesByConversationRef.current[
+          agentConversationKey(sentAgentId, sentConvId)
+        ] ?? [],
       );
       setChatError(null);
       requestAutoScrollToBottom();
@@ -4164,38 +4193,30 @@ export function AgentsPage() {
           const prepared = isImageFile(file) ? await prepareImageForUpload(file) : file;
           fd.append('files', prepared, prepared.name);
         }
-        const imgMsg = await apiUpload<ChatMessage>(`/agents/${sentAgentId}/chat/upload`, fd);
+        const queueResponse = await apiUpload<ChatUploadAndRespondResponse>(
+          `/agents/${sentAgentId}/chat/upload-and-respond`,
+          fd,
+          {
+            headers: {
+              'Idempotency-Key': `agent-chat-upload:${messageId}`,
+            },
+          },
+        );
+        const imgMsg = queueResponse.message;
         if (isActiveConversation(sentAgentId, sentConvId)) {
           setActiveConversationMessages(sentAgentId, sentConvId, (prev) => [...prev, imgMsg]);
         }
         setOptimisticResponseParent(sentAgentId, sentConvId, imgMsg.id);
 
-        const optimisticQueueItem: QueueItem = {
-          id: `temp-respond-${Date.now()}`,
-          agentId: sentAgentId,
-          conversationId: sentConvId,
-          mode: 'respond_to_message',
-          prompt: caption,
-          status: 'queued',
-          attempts: 0,
-          createdAt: new Date().toISOString(),
-          targetMessageId: imgMsg.id,
-        };
-        setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) => [
-          ...prev,
-          optimisticQueueItem,
-        ]);
+        setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) =>
+          prev.some((item) => item.id === queueResponse.queueItem.id)
+            ? prev
+            : [...prev, queueResponse.queueItem],
+        );
 
         beginRunHandoff(sentAgentId, sentConvId);
         setConversationPending(sentAgentId, sentConvId, true);
         try {
-          const queueResponse = await api<QueuePromptResponse>(
-            `/agents/${sentAgentId}/chat/respond`,
-            {
-              method: 'POST',
-              body: JSON.stringify({ conversationId: sentConvId, targetMessageId: imgMsg.id }),
-            },
-          );
           const immediateQueuedCount = toQueueCount(queueResponse.queuedCount);
           setConvsByAgent((prev) => {
             const convs = prev[sentAgentId];
@@ -4216,10 +4237,6 @@ export function AgentsPage() {
             fetchConversations(sentAgentId),
           ]);
         } catch (err) {
-          clearRunHandoff(sentAgentId, sentConvId);
-          setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) =>
-            prev.filter((item) => item.id !== optimisticQueueItem.id),
-          );
           setChatError(err instanceof Error ? err.message : 'Failed to queue agent response');
           void fetchRunnerDevices();
           throw err;
@@ -4241,7 +4258,6 @@ export function AgentsPage() {
       activeAgentId,
       activeConvId,
       beginRunHandoff,
-      clearRunHandoff,
       ensureAgentCliAvailable,
       fetchConversations,
       fetchQueueItems,
@@ -4407,6 +4423,8 @@ export function AgentsPage() {
   function startEditingMessage(msg: ChatMessage) {
     if (editingMessage?.isSubmitting) return;
     if (!isEditableChatMessage(msg) || !activeAgentId || !activeConvId) return;
+    requestAutoScrollToBottom();
+    window.requestAnimationFrame(scrollToBottom);
     setEditingMessage({
       kind: 'message',
       agentId: activeAgentId,
@@ -4414,6 +4432,21 @@ export function AgentsPage() {
       id: msg.id,
       initialValue: msg.content,
       value: msg.content,
+      existingAttachments: getChatMessageEditableAttachments(msg),
+      isSubmitting: false,
+    });
+  }
+
+  function startEditingQueuedMessage(msg: ChatMessage, queueItem: QueueItem) {
+    if (editingMessage?.isSubmitting) return;
+    if (!isEditableChatMessage(msg) || !activeAgentId || !activeConvId) return;
+    requestAutoScrollToBottom();
+    window.requestAnimationFrame(scrollToBottom);
+    setEditingMessage({
+      kind: 'queue',
+      queueItemId: queueItem.id,
+      initialValue: queueItem.prompt,
+      value: queueItem.prompt,
       existingAttachments: getChatMessageEditableAttachments(msg),
       isSubmitting: false,
     });
@@ -4434,7 +4467,8 @@ export function AgentsPage() {
     const content = trimmedContent;
     const newMessageId = `edit-${Date.now()}-${generateId()}`;
     const previousUserMessageId =
-      messagesRef2.current.find((message) => message.id === messageId)?.previousUserMessageId ?? null;
+      messagesRef2.current.find((message) => message.id === messageId)?.previousUserMessageId ??
+      null;
     const requestId = `edit-${Date.now()}-${generateId()}`;
     const headers = {
       'Idempotency-Key': `agent-chat-edit:${sentAgentId}:${sentConvId}:${messageId}:${requestId}`,
@@ -4536,13 +4570,14 @@ export function AgentsPage() {
     }
   }
 
-  async function submitEditedQueueItem() {
+  async function submitEditedQueueItem(files: File[], keepStoragePaths: string[]) {
     if (!editingMessage || editingMessage.kind !== 'queue' || editingMessage.isSubmitting) return;
     const agentId = activeAgentId;
     const conversationId = activeConvId;
     const itemId = editingMessage.queueItemId;
     const nextPrompt = editingMessage.value.trim();
-    if (!agentId || !conversationId || !nextPrompt) return;
+    if (!agentId || !conversationId) return;
+    if (!nextPrompt && files.length === 0 && keepStoragePaths.length === 0) return;
 
     setEditingMessage((prev) =>
       prev?.kind === 'queue' && prev.queueItemId === itemId
@@ -4551,13 +4586,32 @@ export function AgentsPage() {
     );
     setSavingQueueItemId(itemId);
     try {
-      const updatedItem = await api<QueueItem>(`/agents/${agentId}/chat/queue/${itemId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          conversationId,
-          prompt: nextPrompt,
-        }),
-      });
+      let updatedItem: QueueItem;
+      if (files.length > 0) {
+        const fd = new FormData();
+        fd.append('conversationId', conversationId);
+        fd.append('prompt', nextPrompt);
+        for (const storagePath of keepStoragePaths) {
+          fd.append('keepStoragePaths', storagePath);
+        }
+        for (const file of files) {
+          const prepared = isImageFile(file) ? await prepareImageForUpload(file) : file;
+          fd.append('files', prepared, prepared.name);
+        }
+        updatedItem = await apiUpload<QueueItem>(
+          `/agents/${agentId}/chat/queue/${itemId}/upload`,
+          fd,
+        );
+      } else {
+        updatedItem = await api<QueueItem>(`/agents/${agentId}/chat/queue/${itemId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            conversationId,
+            prompt: nextPrompt,
+            keepStoragePaths,
+          }),
+        });
+      }
       setActiveConversationQueueItems(agentId, conversationId, (prev) =>
         prev.map((item) => (item.id === itemId ? { ...item, ...updatedItem } : item)),
       );
@@ -5790,9 +5844,12 @@ export function AgentsPage() {
                                 conversations={convsByAgent[agent.id] || []}
                                 collapsed={isAgentCollapsed(agent.id)}
                                 isActive={activeAgentId === agent.id}
-                                activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                                activeConversationId={
+                                  activeAgentId === agent.id ? activeConvId : null
+                                }
                                 groupsEnabled={groups.length > 0}
                                 pendingConversationKeys={pendingConversationKeys}
+                                runHandoffKeys={runHandoffKeys}
                                 onToggleCollapse={toggleAgentCollapse}
                                 onOpenContextMenu={handleOpenAgentContextMenu}
                                 onOpenSettings={handleOpenAgentSettings}
@@ -5846,9 +5903,12 @@ export function AgentsPage() {
                                 conversations={convsByAgent[agent.id] || []}
                                 collapsed={isAgentCollapsed(agent.id)}
                                 isActive={activeAgentId === agent.id}
-                                activeConversationId={activeAgentId === agent.id ? activeConvId : null}
+                                activeConversationId={
+                                  activeAgentId === agent.id ? activeConvId : null
+                                }
                                 groupsEnabled={groups.length > 0}
                                 pendingConversationKeys={pendingConversationKeys}
+                                runHandoffKeys={runHandoffKeys}
                                 onToggleCollapse={toggleAgentCollapse}
                                 onOpenContextMenu={handleOpenAgentContextMenu}
                                 onOpenSettings={handleOpenAgentSettings}
@@ -6060,6 +6120,10 @@ export function AgentsPage() {
                           msg.direction === 'inbound'
                             ? formatModelLabel(messageMeta?.model, messageMeta?.modelId)
                             : null;
+                        const pendingBranchExecutions =
+                          effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? [];
+                        const editableBranchQueueItem =
+                          pendingBranchExecutions.find((item) => item.status === 'queued') ?? null;
 
                         return (
                           <Fragment key={msg.id}>
@@ -6158,8 +6222,23 @@ export function AgentsPage() {
                                   {isEditableChatMessage(msg) && (
                                     <button
                                       className={styles.editMsgBtn}
-                                      onClick={() => startEditingMessage(msg)}
-                                      aria-label="Edit message"
+                                      onClick={() => {
+                                        if (editableBranchQueueItem) {
+                                          startEditingQueuedMessage(msg, editableBranchQueueItem);
+                                          return;
+                                        }
+                                        startEditingMessage(msg);
+                                      }}
+                                      aria-label={
+                                        editableBranchQueueItem
+                                          ? 'Edit queued message'
+                                          : 'Edit message'
+                                      }
+                                      title={
+                                        editableBranchQueueItem
+                                          ? 'Edit queued message'
+                                          : 'Edit message'
+                                      }
                                       disabled={editingMessage?.isSubmitting}
                                     >
                                       <Pencil size={12} />
@@ -6466,7 +6545,9 @@ export function AgentsPage() {
                                       </div>
                                     )}
                                   </div>
-                                  <div className={`${styles.messageMeta} ${styles.messageMetaUser}`}>
+                                  <div
+                                    className={`${styles.messageMeta} ${styles.messageMetaUser}`}
+                                  >
                                     <span
                                       className={`${styles.messageExecutionState} ${
                                         isProcessingQueuedItem
@@ -6495,12 +6576,12 @@ export function AgentsPage() {
                                         minute: '2-digit',
                                       })}
                                     </span>
-                                    {queueItem && (
+                                    {(queueItem || isProcessingQueuedItem) && (
                                       <>
                                         <Tooltip
                                           label={
                                             isProcessingQueuedItem
-                                              ? 'Processing'
+                                              ? 'Edit message'
                                               : isQueuedItemBusy
                                                 ? 'Please wait'
                                                 : 'Edit queued message'
@@ -6517,64 +6598,70 @@ export function AgentsPage() {
                                               type="button"
                                               className={styles.editMsgBtn}
                                               onClick={() => {
-                                                setEditingMessage({
-                                                  kind: 'queue',
-                                                  queueItemId: queueItem.id,
-                                                  initialValue: queueItem.prompt,
-                                                  value: queueItem.prompt,
-                                                  isSubmitting: false,
-                                                });
+                                                if (isProcessingQueuedItem) {
+                                                  startEditingMessage(message);
+                                                  return;
+                                                }
+                                                if (queueItem) {
+                                                  startEditingQueuedMessage(message, queueItem);
+                                                }
                                               }}
                                               disabled={
-                                                isProcessingQueuedItem ||
-                                                isQueuedItemBusy ||
-                                                editingMessage?.isSubmitting
+                                                isQueuedItemBusy || editingMessage?.isSubmitting
                                               }
                                               style={
-                                                isProcessingQueuedItem ||
-                                                isQueuedItemBusy ||
-                                                editingMessage?.isSubmitting
+                                                isQueuedItemBusy || editingMessage?.isSubmitting
                                                   ? { pointerEvents: 'none' }
                                                   : undefined
                                               }
-                                              aria-label="Edit queued message"
+                                              aria-label={
+                                                isProcessingQueuedItem
+                                                  ? 'Edit message'
+                                                  : 'Edit queued message'
+                                              }
                                             >
                                               <Pencil size={12} />
                                             </button>
                                           </span>
                                         </Tooltip>
-                                        <Tooltip
-                                          label={
-                                            isProcessingQueuedItem
-                                              ? 'Processing'
-                                              : isQueuedItemBusy
-                                                ? 'Please wait'
-                                                : 'Remove from queue'
-                                          }
-                                        >
-                                          <span
-                                            className={
-                                              isQueuedItemBusy
-                                                ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                                : styles.queuedIconBtnWrap
+                                        {queueItem && (
+                                          <Tooltip
+                                            label={
+                                              isProcessingQueuedItem
+                                                ? 'Processing'
+                                                : isQueuedItemBusy
+                                                  ? 'Please wait'
+                                                  : 'Remove from queue'
                                             }
                                           >
-                                            <button
-                                              type="button"
-                                              className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
-                                              onClick={() => void handleDeleteQueueItem(queueItem.id)}
-                                              disabled={isProcessingQueuedItem || isQueuedItemBusy}
-                                              style={
-                                                isProcessingQueuedItem || isQueuedItemBusy
-                                                  ? { pointerEvents: 'none' }
-                                                  : undefined
+                                            <span
+                                              className={
+                                                isQueuedItemBusy
+                                                  ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                                  : styles.queuedIconBtnWrap
                                               }
-                                              aria-label="Remove queued message"
                                             >
-                                              <Trash2 size={12} />
-                                            </button>
-                                          </span>
-                                        </Tooltip>
+                                              <button
+                                                type="button"
+                                                className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
+                                                onClick={() =>
+                                                  void handleDeleteQueueItem(queueItem.id)
+                                                }
+                                                disabled={
+                                                  isProcessingQueuedItem || isQueuedItemBusy
+                                                }
+                                                style={
+                                                  isProcessingQueuedItem || isQueuedItemBusy
+                                                    ? { pointerEvents: 'none' }
+                                                    : undefined
+                                                }
+                                                aria-label="Remove queued message"
+                                              >
+                                                <Trash2 size={12} />
+                                              </button>
+                                            </span>
+                                          </Tooltip>
+                                        )}
                                       </>
                                     )}
                                   </div>

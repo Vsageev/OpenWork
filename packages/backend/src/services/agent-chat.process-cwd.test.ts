@@ -220,8 +220,22 @@ describe('buildRunnerJobIntent', () => {
       },
     });
     expect(intent.attachments).toEqual([
-      { type: 'image', path: '/tmp/image.png' },
-      { type: 'file', path: '/tmp/context.txt' },
+      {
+        type: 'image',
+        path: '/tmp/image.png',
+        filename: 'image.png',
+        mimeType: 'image/png',
+        sizeBytes: 0,
+        textExtraction: { status: 'not_applicable' },
+      },
+      {
+        type: 'file',
+        path: '/tmp/context.txt',
+        filename: 'context.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 0,
+        textExtraction: { status: 'available', textPath: '/tmp/context.txt' },
+      },
     ]);
     expect(intent.environment?.variables).toEqual([
       {

@@ -27,6 +27,7 @@ export async function agentRunRoutes(app: FastifyInstance) {
           status: z.enum(['running', 'completed', 'error']).optional(),
           agentId: z.string().optional(),
           conversationId: z.string().optional(),
+          cardId: z.string().optional(),
           triggerType: z.enum(['chat', 'cron_job', 'card_assignment']).optional(),
           limit: z.coerce.number().int().min(1).max(200).default(50),
           offset: z.coerce.number().int().min(0).default(0),
@@ -34,8 +35,16 @@ export async function agentRunRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { status, agentId, conversationId, triggerType, limit, offset } = request.query;
-      const result = await listAgentRuns({ status, agentId, conversationId, triggerType, limit, offset });
+      const { status, agentId, conversationId, cardId, triggerType, limit, offset } = request.query;
+      const result = await listAgentRuns({
+        status,
+        agentId,
+        conversationId,
+        cardId,
+        triggerType,
+        limit,
+        offset,
+      });
       return reply.send({ ...result, limit, offset });
     },
   );

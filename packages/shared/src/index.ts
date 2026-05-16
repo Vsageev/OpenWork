@@ -74,7 +74,19 @@ export {
   formatAgentRunErrorMessage,
   parseAgentOutputBlocks,
 } from './agent-output.js';
-export type { OutputBlock, OutputBlockType, SystemInitBlock, ThinkingBlock, AssistantTextBlock, ToolCallBlock, ToolResultBlock, ResultBlock, RateLimitBlock, MessageMetaBlock, PlainTextBlock } from './agent-output.js';
+export type {
+  OutputBlock,
+  OutputBlockType,
+  SystemInitBlock,
+  ThinkingBlock,
+  AssistantTextBlock,
+  ToolCallBlock,
+  ToolResultBlock,
+  ResultBlock,
+  RateLimitBlock,
+  MessageMetaBlock,
+  PlainTextBlock,
+} from './agent-output.js';
 export {
   RUNNER_PROTOCOL_VERSION,
   parseRunnerJobIntent,
@@ -84,6 +96,10 @@ export {
 export type {
   RunnerAgentKind,
   RunnerApprovalMode,
+  RunnerAttachment,
+  RunnerAttachmentTextExtraction,
+  RunnerAttachmentTextExtractionStatus,
+  RunnerAttachmentType,
   RunnerCapabilities,
   RunnerJobIntent,
   RunnerOutputStream,

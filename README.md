@@ -37,7 +37,7 @@ Requires a running Postgres instance and `DATABASE_URL` in `packages/backend/.en
 pnpm db:bootstrap
 ```
 
-Applies migrations and seeds default workspace records for a fresh environment: admin and starter users, project settings, the general collection, the `auto-dev-cards` board, and the default workspace. See [Bootstrap Data](#bootstrap-data) for details.
+Applies migrations and seeds default workspace records for a fresh environment: admin and starter users, project settings, the general collection, and the default workspace. See [Bootstrap Data](#bootstrap-data) for details.
 
 ### 4. Generate HTTPS certs (optional)
 

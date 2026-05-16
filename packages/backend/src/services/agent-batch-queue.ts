@@ -1118,16 +1118,18 @@ export function listAgentBatchRunItems(
   });
 
   const itemsById = new Map(listItemsForRun(runId).map((item) => [item.id as string, item]));
-  const entries = all.slice(offset, offset + limit).map((item) => {
-    const dependencyState = describeDependencyState(item, itemsById);
-    return {
-      ...item,
-      blockedReason:
-        item.status === 'queued' && dependencyState.kind !== 'ready'
-          ? dependencyState.blockedReason
-          : null,
-    };
-  });
+  const entries: Array<Record<string, unknown> & { blockedReason: string | null }> = all
+    .slice(offset, offset + limit)
+    .map((item) => {
+      const dependencyState = describeDependencyState(item, itemsById);
+      return {
+        ...item,
+        blockedReason:
+          item.status === 'queued' && dependencyState.kind !== 'ready'
+            ? dependencyState.blockedReason
+            : null,
+      };
+    });
   return { entries, total: all.length };
 }
 

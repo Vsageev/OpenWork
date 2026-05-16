@@ -72,11 +72,6 @@ const envSchema = z.object({
   // Global agent concurrency — max simultaneous remote agent jobs across all runners.
   // Set to 0 for no app-level limit.
   MAX_CONCURRENT_AGENTS: z.coerce.number().int().nonnegative().default(0),
-  AGENT_RUNNER_SHARED_TOKEN: z.string().min(1).optional(),
-  AGENT_RUNNER_ENABLE_SHARED_TOKEN: z
-    .string()
-    .default('false')
-    .transform((v) => v === 'true'),
   AGENT_RUNNER_WORKSPACE_ID: z.string().min(1).optional(),
   AGENT_RUNNER_ID: z.string().min(1).optional(),
   REMOTE_AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(0),

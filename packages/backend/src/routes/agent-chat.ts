@@ -39,6 +39,7 @@ import {
   activateMessagePathForSearchResult,
   getPreviousUserMessageIdForConversationMessage,
   serializeAllConversationMessageEntries,
+  enqueueAgentResponseToMessage,
   AgentChatError,
   resolveAgentChatProcessWorkingDirectory,
 } from '../services/agent-chat.js';
@@ -55,6 +56,16 @@ type ChatUploadAttachment = {
   fileSize: number;
   storagePath: string;
 };
+
+const MAX_CHAT_UPLOAD_ATTACHMENTS = 10;
+
+function chatAttachmentLimitExceededError() {
+  return ApiError.badRequest(
+    'chat_attachment_limit_exceeded',
+    `A chat message can include up to ${MAX_CHAT_UPLOAD_ATTACHMENTS} attachments`,
+    `Remove extra files and try again with ${MAX_CHAT_UPLOAD_ATTACHMENTS} or fewer attachments.`,
+  );
+}
 
 async function persistUploadedChatFiles(
   fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }>,
@@ -555,7 +566,8 @@ export async function agentChatRoutes(app: FastifyInstance) {
         params: z.object({ id: z.string(), itemId: z.string() }),
         body: z.object({
           conversationId: z.string(),
-          prompt: z.string().min(1).max(50000).optional(),
+          prompt: z.string().max(50000).optional(),
+          keepStoragePaths: z.array(z.string()).optional(),
         }),
       },
     },
@@ -568,8 +580,74 @@ export async function agentChatRoutes(app: FastifyInstance) {
           request.params.itemId,
           request.params.id,
           request.body.conversationId,
-          { prompt: request.body.prompt },
+          {
+            prompt: request.body.prompt,
+            keepStoragePaths: request.body.keepStoragePaths,
+          },
         );
+        return reply.send(updated);
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
+    },
+  );
+
+  typedApp.post(
+    '/api/agents/:id/chat/queue/:itemId/upload',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Edit a pending queue item and attach files',
+        params: z.object({ id: z.string(), itemId: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+
+      const parts = request.parts();
+      let conversationId: string | undefined;
+      let prompt: string | undefined;
+      const keepStoragePaths: string[] = [];
+      const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
+      let uploadedFileCount = 0;
+
+      for await (const part of parts) {
+        if (part.type === 'field') {
+          if (part.fieldname === 'conversationId') conversationId = part.value as string;
+          else if (part.fieldname === 'prompt') prompt = (part.value as string) || '';
+          else if (part.fieldname === 'keepStoragePaths' && typeof part.value === 'string') {
+            keepStoragePaths.push(part.value);
+          }
+        } else if (part.type === 'file') {
+          uploadedFileCount += 1;
+          if (uploadedFileCount > MAX_CHAT_UPLOAD_ATTACHMENTS) {
+            throw chatAttachmentLimitExceededError();
+          }
+          const chunks: Buffer[] = [];
+          for await (const chunk of part.file) {
+            chunks.push(chunk);
+          }
+          fileParts.push({
+            mimetype: part.mimetype || 'application/octet-stream',
+            filename: part.filename || 'file',
+            buffer: Buffer.concat(chunks),
+          });
+        }
+      }
+
+      if (!conversationId) {
+        throw ApiError.badRequest('conversation_id_required', 'conversationId is required');
+      }
+      requireConversationExists(conversationId, request.params.id);
+
+      try {
+        const attachments = await persistUploadedChatFiles(fileParts);
+        const updated = updateQueueItem(request.params.itemId, request.params.id, conversationId, {
+          prompt,
+          attachments,
+          keepStoragePaths,
+        });
         return reply.send(updated);
       } catch (err) {
         rethrowAgentChatError(err);
@@ -686,30 +764,14 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireConversationExists(request.body.conversationId, request.params.id);
 
       try {
-        const targetMessageId =
-          request.body.targetMessageId ??
-          (() => {
-            const activePath = getActiveMessagePath(request.body.conversationId);
-            const leaf = activePath.length > 0 ? activePath[activePath.length - 1] : null;
-            return typeof leaf?.id === 'string' ? (leaf.id as string) : null;
-          })();
-        if (!targetMessageId) {
-          throw ApiError.badRequest(
-            'response_target_missing',
-            'Conversation has no message to respond to',
-          );
-        }
-
-        const willQueueBehind = !canRespondToMessageStartImmediately(
+        const queued = enqueueAgentResponseToMessage(
           request.params.id,
           request.body.conversationId,
-          targetMessageId,
+          {
+            targetMessageId: request.body.targetMessageId ?? null,
+          },
         );
-        const queued = enqueueAgentPrompt(request.params.id, request.body.conversationId, '', {
-          mode: 'respond_to_message',
-          targetMessageId,
-        });
-        const statusCode = willQueueBehind ? 202 : 201;
+        const statusCode = queued.willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
           status: 'queued',
           queueItem: queued.queueItem,
@@ -811,7 +873,6 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const userId = (request.user as { sub: string }).sub;
       requirePromptRateLimit(userId, request.params.id);
 
-      const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
       let originalMessageId: string | undefined;
       let newMessageId: string | undefined;
@@ -819,6 +880,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       let content = '';
       const keepStoragePaths: string[] = [];
       const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
+      let uploadedFileCount = 0;
 
       for await (const part of parts) {
         if (part.type === 'field') {
@@ -828,12 +890,14 @@ export async function agentChatRoutes(app: FastifyInstance) {
             previousUserMessageId = ((part.value as string) || '').trim() || null;
           } else if (part.fieldname === 'content') {
             content = (part.value as string) || '';
-          }
-          else if (part.fieldname === 'keepStoragePaths' && typeof part.value === 'string') {
+          } else if (part.fieldname === 'keepStoragePaths' && typeof part.value === 'string') {
             keepStoragePaths.push(part.value);
           }
         } else if (part.type === 'file') {
-          if (fileParts.length >= MAX_ATTACHMENTS) continue;
+          uploadedFileCount += 1;
+          if (uploadedFileCount > MAX_CHAT_UPLOAD_ATTACHMENTS) {
+            throw chatAttachmentLimitExceededError();
+          }
           const chunks: Buffer[] = [];
           for await (const chunk of part.file) {
             chunks.push(chunk);
@@ -952,6 +1016,107 @@ export async function agentChatRoutes(app: FastifyInstance) {
     },
   );
 
+  // Upload files to agent chat and queue an agent response in one request (up to 10)
+  typedApp.post(
+    '/api/agents/:id/chat/upload-and-respond',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:update')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Upload up to 10 files to agent chat and queue an agent response',
+        params: z.object({ id: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+
+      const userId = (request.user as { sub: string }).sub;
+      requirePromptRateLimit(userId, request.params.id);
+
+      const parts = request.parts();
+      let conversationId: string | undefined;
+      let messageId: string | undefined;
+      let previousUserMessageId: string | null = null;
+      let caption: string | null = null;
+      const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
+      let uploadedFileCount = 0;
+
+      for await (const part of parts) {
+        if (part.type === 'field') {
+          if (part.fieldname === 'conversationId') conversationId = part.value as string;
+          else if (part.fieldname === 'messageId') messageId = part.value as string;
+          else if (part.fieldname === 'previousUserMessageId') {
+            previousUserMessageId = ((part.value as string) || '').trim() || null;
+          } else if (part.fieldname === 'caption') {
+            caption = (part.value as string) || null;
+          }
+        } else if (part.type === 'file') {
+          uploadedFileCount += 1;
+          if (uploadedFileCount > MAX_CHAT_UPLOAD_ATTACHMENTS) {
+            throw chatAttachmentLimitExceededError();
+          }
+          const chunks: Buffer[] = [];
+          for await (const chunk of part.file) {
+            chunks.push(chunk);
+          }
+          fileParts.push({
+            mimetype: part.mimetype || 'application/octet-stream',
+            filename: part.filename || 'image.jpg',
+            buffer: Buffer.concat(chunks),
+          });
+        }
+      }
+
+      if (fileParts.length === 0) {
+        throw ApiError.badRequest('chat_upload_missing_files', 'No files uploaded');
+      }
+      if (!conversationId) {
+        throw ApiError.badRequest('conversation_id_required', 'conversationId is required');
+      }
+      if (!messageId) {
+        throw ApiError.badRequest('message_id_required', 'messageId is required');
+      }
+
+      requireConversationExists(conversationId, request.params.id);
+
+      try {
+        const attachments = await persistUploadedChatFiles(fileParts);
+
+        const messageType = attachments.every((attachment) => attachment.type === 'image')
+          ? 'image'
+          : 'file';
+
+        const message = saveAgentConversationMessage({
+          id: messageId,
+          conversationId,
+          direction: 'outbound',
+          content: caption || '',
+          type: messageType,
+          attachments,
+          previousUserMessageId,
+        });
+
+        const queued = enqueueAgentResponseToMessage(request.params.id, conversationId, {
+          targetMessageId: message.id as string,
+        });
+        const statusCode = queued.willQueueBehind ? 202 : 201;
+        return reply.status(statusCode).send({
+          status: 'queued',
+          message,
+          entries: serializeActivePathEntries(conversationId),
+          queueItem: queued.queueItem,
+          queuedCount: queued.queuedCount,
+          concurrency: {
+            running: getGlobalRunningAgentCount(),
+            limit: getMaxConcurrentAgentLimit(),
+          },
+        });
+      } catch (err) {
+        rethrowAgentChatError(err);
+      }
+    },
+  );
+
   // Upload files to agent chat (up to 10)
   typedApp.post(
     '/api/agents/:id/chat/upload',
@@ -966,13 +1131,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
     async (request, reply) => {
       requireAgentExists(request.params.id);
 
-      const MAX_ATTACHMENTS = 10;
       const parts = request.parts();
       let conversationId: string | undefined;
       let messageId: string | undefined;
       let previousUserMessageId: string | null = null;
       let caption: string | null = null;
       const fileParts: Array<{ mimetype: string; filename: string; buffer: Buffer }> = [];
+      let uploadedFileCount = 0;
 
       for await (const part of parts) {
         if (part.type === 'field') {
@@ -984,7 +1149,10 @@ export async function agentChatRoutes(app: FastifyInstance) {
             caption = (part.value as string) || null;
           }
         } else if (part.type === 'file') {
-          if (fileParts.length >= MAX_ATTACHMENTS) continue;
+          uploadedFileCount += 1;
+          if (uploadedFileCount > MAX_CHAT_UPLOAD_ATTACHMENTS) {
+            throw chatAttachmentLimitExceededError();
+          }
           const chunks: Buffer[] = [];
           for await (const chunk of part.file) {
             chunks.push(chunk);

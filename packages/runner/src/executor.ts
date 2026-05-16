@@ -9,6 +9,7 @@ import {
 } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import type {
+  RunnerAttachment,
   RunnerCapabilities,
   RunnerJobIntent,
   RunnerProvider,
@@ -33,17 +34,9 @@ export interface JobExecutionPlan {
   outputLastMessagePath?: string;
 }
 
-export type SpawnedExecutionProcess = ChildProcessByStdio<
-  Writable | null,
-  Readable,
-  Readable
->;
+export type SpawnedExecutionProcess = ChildProcessByStdio<Writable | null, Readable, Readable>;
 
-export type DetachedExecutionProcess = ChildProcessByStdio<
-  Writable | null,
-  null,
-  null
->;
+export type DetachedExecutionProcess = ChildProcessByStdio<Writable | null, null, null>;
 
 export const PROVIDER_BINARIES: Record<RunnerProvider, string> = {
   claude: 'claude',
@@ -73,10 +66,7 @@ function isExecutableFile(filePath: string): boolean {
   try {
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) return false;
-    fs.accessSync(
-      filePath,
-      process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK,
-    );
+    fs.accessSync(filePath, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
     return true;
   } catch {
     return false;
@@ -151,12 +141,9 @@ function getCommandSearchDirs(): string[] {
 }
 
 function buildRunnerPath(commandBin: string): string {
-  return Array.from(
-    new Set([
-      path.dirname(commandBin),
-      ...getCommandSearchDirs(),
-    ]),
-  ).join(path.delimiter);
+  return Array.from(new Set([path.dirname(commandBin), ...getCommandSearchDirs()])).join(
+    path.delimiter,
+  );
 }
 
 export function resolveCommandExecutable(command: string): string | null {
@@ -185,20 +172,69 @@ export function resolveProviderExecutable(provider: RunnerProvider): string | nu
   return resolveCommandExecutable(PROVIDER_BINARIES[provider]);
 }
 
-function appendAttachmentPathsToPrompt(
-  prompt: string,
-  imagePaths: string[],
-  filePaths: string[],
-): string {
-  const sections: string[] = [];
-  if (imagePaths.length > 0) {
-    sections.push(`Image files:\n${imagePaths.map((p) => `- ${p}`).join('\n')}`);
+function stringifyMetadata(value: Record<string, unknown>): string {
+  return JSON.stringify(value);
+}
+
+function formatAttachmentForPrompt(attachment: RunnerAttachment, index: number): string {
+  const lines = [
+    `- ${index + 1}.`,
+    `  filename: ${attachment.filename}`,
+    `  type: ${attachment.type}`,
+    `  path: ${attachment.path}`,
+    `  mimeType: ${attachment.mimeType}`,
+    `  sizeBytes: ${attachment.sizeBytes}`,
+  ];
+
+  if (attachment.textExtraction) {
+    const extractionParts = [`status=${attachment.textExtraction.status}`];
+    if (attachment.textExtraction.textPath) {
+      extractionParts.push(`textPath=${attachment.textExtraction.textPath}`);
+    }
+    if (typeof attachment.textExtraction.charCount === 'number') {
+      extractionParts.push(`charCount=${attachment.textExtraction.charCount}`);
+    }
+    if (typeof attachment.textExtraction.truncated === 'boolean') {
+      extractionParts.push(`truncated=${attachment.textExtraction.truncated}`);
+    }
+    if (attachment.textExtraction.error) {
+      extractionParts.push(`error=${attachment.textExtraction.error}`);
+    }
+    lines.push(`  textExtraction: ${extractionParts.join(', ')}`);
   }
-  if (filePaths.length > 0) {
-    sections.push(`Files:\n${filePaths.map((p) => `- ${p}`).join('\n')}`);
+
+  if (attachment.manifest) {
+    lines.push(`  manifest: ${stringifyMetadata(attachment.manifest)}`);
   }
-  if (sections.length === 0) return prompt;
-  return `${prompt ? `${prompt}\n\n` : ''}${sections.join('\n\n')}`;
+
+  return lines.join('\n');
+}
+
+function appendAttachmentMetadataToPrompt(prompt: string, attachments: RunnerAttachment[]): string {
+  if (attachments.length === 0) return prompt;
+  const manifest = attachments.map(formatAttachmentForPrompt).join('\n');
+  const section = `Attachments:\n${manifest}`;
+  return `${prompt ? `${prompt}\n\n` : ''}${section}`;
+}
+
+function getNativeAttachmentArgs(
+  provider: RunnerProvider,
+  attachments: RunnerAttachment[],
+): string[] {
+  if (attachments.length === 0) return [];
+
+  if (provider === 'codex') {
+    const imagePaths = attachments
+      .filter((attachment) => attachment.type === 'image')
+      .map((attachment) => attachment.path);
+    return imagePaths.length > 0 ? ['--image', ...imagePaths] : [];
+  }
+
+  if (provider === 'opencode') {
+    return attachments.flatMap((attachment) => ['--file', attachment.path]);
+  }
+
+  return [];
 }
 
 export function inferProvider(model: string): RunnerProvider | null {
@@ -216,13 +252,9 @@ export function buildCliCommand(
   resolvedBin?: string,
   options: { outputLastMessagePath?: string } = {},
 ): CliCommand {
-  const imagePaths = (job.attachments ?? [])
-    .filter((attachment) => attachment.type === 'image')
-    .map((attachment) => attachment.path);
-  const filePaths = (job.attachments ?? [])
-    .filter((attachment) => attachment.type === 'file')
-    .map((attachment) => attachment.path);
-  const fullPrompt = appendAttachmentPathsToPrompt(job.prompt, imagePaths, filePaths);
+  const attachments = job.attachments ?? [];
+  const nativeAttachmentArgs = getNativeAttachmentArgs(job.provider, attachments);
+  const fullPrompt = appendAttachmentMetadataToPrompt(job.prompt, attachments);
   const modelId = job.modelPreference.modelId;
   const thinkingLevel = job.modelPreference.thinkingLevel;
   const bin = resolvedBin ?? resolveProviderExecutable(job.provider);
@@ -257,7 +289,7 @@ export function buildCliCommand(
     if (options.outputLastMessagePath) {
       args.push('--output-last-message', options.outputLastMessagePath);
     }
-    if (imagePaths.length > 0) args.push('--image', ...imagePaths);
+    args.push(...nativeAttachmentArgs);
     if (modelId) args.push('--model', modelId);
     if (thinkingLevel) args.push('-c', `model_reasoning_effort="${thinkingLevel}"`);
     args.push('--', fullPrompt);
@@ -289,7 +321,7 @@ export function buildCliCommand(
   const args = ['run', '--format', 'json'];
   if (modelId) args.push('--model', modelId);
   if (thinkingLevel) args.push('--variant', thinkingLevel);
-  for (const filePath of [...imagePaths, ...filePaths]) args.push('--file', filePath);
+  args.push(...nativeAttachmentArgs);
   args.push(fullPrompt);
   return { bin, args };
 }
@@ -317,7 +349,10 @@ export function validateJobPolicy(
     };
   }
   if (!job.allowedOperations.tools.includes(job.provider)) {
-    return { code: 'policy_denied', message: `Provider ${job.provider} is not allowed for this job` };
+    return {
+      code: 'policy_denied',
+      message: `Provider ${job.provider} is not allowed for this job`,
+    };
   }
   if (!capabilities.policy.allowedTools.includes(job.provider)) {
     return { code: 'policy_denied', message: `Runner policy does not allow ${job.provider}` };
@@ -340,7 +375,10 @@ export function validateJobPolicy(
   if (job.allowedOperations.shell && !capabilities.policy.shell) {
     return { code: 'policy_denied', message: 'Runner policy does not allow shell access' };
   }
-  if (capabilities.workspaceRoot && !pathInsideRoot(job.workspace.path, capabilities.workspaceRoot)) {
+  if (
+    capabilities.workspaceRoot &&
+    !pathInsideRoot(job.workspace.path, capabilities.workspaceRoot)
+  ) {
     return {
       code: 'policy_denied',
       message: `Workspace path is outside runner root ${capabilities.workspaceRoot}`,
@@ -392,7 +430,9 @@ export function createExecutionPlan(
   };
 }
 
-export function isPolicyFailure(value: JobExecutionPlan | JobPolicyFailure): value is JobPolicyFailure {
+export function isPolicyFailure(
+  value: JobExecutionPlan | JobPolicyFailure,
+): value is JobPolicyFailure {
   return 'code' in value;
 }
 

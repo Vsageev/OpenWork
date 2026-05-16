@@ -87,6 +87,7 @@ function runCommand(name, command, args, env = {}) {
     });
 
     child.on('exit', (code, signal) => {
+      if (stopping) return;
       if (code === 0) {
         resolve();
         return;
@@ -95,7 +96,10 @@ function runCommand(name, command, args, env = {}) {
       reject(new Error(`${name} failed with ${reason}`));
     });
 
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (stopping) return;
+      reject(error);
+    });
   });
 }
 
@@ -222,6 +226,7 @@ async function buildSharedPackage() {
 function stopAll(exitCode = 0) {
   if (stopping) return;
   stopping = true;
+  process.exitCode = exitCode;
   for (const child of children) {
     if (!child.killed) {
       child.kill('SIGTERM');
@@ -233,21 +238,35 @@ function stopAll(exitCode = 0) {
 process.on('SIGINT', () => stopAll(0));
 process.on('SIGTERM', () => stopAll(0));
 
-console.log('[dev] Backend agent execution: remote runner required');
-console.log('[dev] Building shared package...');
-await buildSharedPackage();
+async function main() {
+  console.log('[dev] Backend agent execution: remote runner required');
+  console.log('[dev] Building shared package...');
+  await buildSharedPackage();
 
-if (rootEnv.OPENWORK_DEV_SKIP_MIGRATE === 'true') {
-  console.log('[dev] Skipping database migrations because OPENWORK_DEV_SKIP_MIGRATE=true.');
-} else {
-  await ensureLocalPostgres();
-  console.log('[dev] Applying backend database migrations...');
-  await migrateDatabase();
+  if (rootEnv.OPENWORK_DEV_SKIP_MIGRATE === 'true') {
+    console.log('[dev] Skipping database migrations because OPENWORK_DEV_SKIP_MIGRATE=true.');
+  } else {
+    await ensureLocalPostgres();
+    console.log('[dev] Applying backend database migrations...');
+    await migrateDatabase();
+  }
+
+  console.log('[dev] Starting backend, frontend, landing, and widget...');
+  console.log('[dev] Start a paired runner separately from Settings -> Runners when agent execution is needed.');
+
+  for (const definition of processes) {
+    startProcess(definition);
+  }
 }
 
-console.log('[dev] Starting backend, frontend, landing, and widget...');
-console.log('[dev] Start a paired runner separately from Settings -> Runners when agent execution is needed.');
+try {
+  await main();
+} catch (error) {
+  if (stopping) {
+    await new Promise(() => {});
+  }
 
-for (const definition of processes) {
-  startProcess(definition);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[dev] ${message}`);
+  stopAll(1);
 }

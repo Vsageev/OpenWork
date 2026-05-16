@@ -34,9 +34,14 @@ class FakeBoardQaGateApi implements BoardQaGateApi {
 
     if (url.pathname === '/api/agent-runs') {
       const triggerType = url.searchParams.get('triggerType');
-      const runs = triggerType
-        ? this.records.runs.filter((run) => run.triggerType === triggerType)
-        : this.records.runs;
+      const cardId = url.searchParams.get('cardId');
+      let runs = this.records.runs;
+      if (triggerType) {
+        runs = runs.filter((run) => run.triggerType === triggerType);
+      }
+      if (cardId) {
+        runs = runs.filter((run) => run.cardId === cardId);
+      }
       return this.page(runs, url) as T;
     }
 
@@ -119,20 +124,7 @@ function buildAutomaticComment(overrides: ApiRecord = {}) {
     cardId: 'card-qa',
     authorId: 'agent-qa',
     agentRunId: 'run-qa',
-    content: [
-      'Agent run terminal status: completed',
-      'Run ID: run-qa',
-      'Card ID: card-qa',
-      'Agent ID: agent-qa',
-      'Trigger type: card_assignment',
-      '',
-      'Final summary:',
-      'QA final answer',
-      '',
-      'Verification commands/API checks used:',
-      '- GET /api/agent-runs/run-qa',
-      '- GET /api/cards/card-qa/comments',
-    ].join('\n'),
+    content: 'QA final answer',
     ...overrides,
   };
 }
@@ -210,20 +202,11 @@ describe('board QA run comment gate', () => {
     expect(wrongCardId.errors[0]?.code).toBe('terminal_run_without_automatic_comment');
   });
 
-  it('fails an otherwise linked comment without replayable API evidence', async () => {
+  it('fails a linked comment whose body does not reflect the run output', async () => {
     const result = await runGate({
       comments: [
         buildAutomaticComment({
-          content: [
-            'Agent run terminal status: completed',
-            'Run ID: run-qa',
-            'Card ID: card-qa',
-            'Agent ID: agent-qa',
-            'Trigger type: card_assignment',
-            '',
-            'Final summary:',
-            'QA final answer',
-          ].join('\n'),
+          content: 'Unrelated text that is not the run response.',
         }),
       ],
     });

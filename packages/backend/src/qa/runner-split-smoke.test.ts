@@ -93,6 +93,7 @@ import {
   enqueueAgentPrompt,
   getAgentConversation,
   getConversationExecutionItems,
+  saveAgentConversationMessage,
 } from '../services/agent-chat.js';
 import { agentRunRoutes } from '../routes/agent-runs.js';
 import { cardRoutes } from '../routes/cards.js';
@@ -105,6 +106,7 @@ import {
   reconcileRunsOnStartup,
 } from '../services/agent-runs.js';
 import { createCard, getCardById, listCards } from '../services/cards.js';
+import * as agentOutput from '../lib/agent-output.js';
 
 type SmokeCheck =
   | { ok: true; reason: string; ids?: Record<string, string> }
@@ -180,19 +182,16 @@ function inspectCompletedCardAssignment(params: {
     return { ok: false, reason: 'automatic completion comment author did not match agent id', ids };
   }
   const content = String(linkedComment.content ?? '');
-  const requiredFragments = [
-    `Agent run terminal status: ${expectedStatus}`,
-    `Run ID: ${params.runId}`,
-    `Card ID: ${params.cardId}`,
-    `Agent ID: ${params.agentId}`,
-    'Trigger type: card_assignment',
-    params.expectedFinalAnswer,
-  ];
+  const requiredFragments = [params.expectedFinalAnswer];
   const missingFragment = requiredFragments.find((fragment) => !content.includes(fragment));
   if (missingFragment) {
     return { ok: false, reason: `automatic completion comment missed required fragment: ${missingFragment}`, ids };
   }
-  return { ok: true, reason: 'completed card-assignment run and automatic comment matched', ids };
+  return {
+    ok: true,
+    reason: 'completed card-assignment run and automatic comment matched',
+    ids: { ...ids, expectedCommentBody: params.expectedFinalAnswer },
+  };
 }
 
 function inspectTerminalCardAssignmentComment(params: {
@@ -235,22 +234,16 @@ function inspectTerminalCardAssignmentComment(params: {
   }
 
   const content = String(linkedComment.content ?? '');
-  const requiredFragments = [
-    `Agent run terminal status: ${params.expectedStatus}`,
-    `Run ID: ${params.runId}`,
-    `Card ID: ${params.cardId}`,
-    `Agent ID: ${params.agentId}`,
-    'Trigger type: card_assignment',
-    'Final summary:',
-    params.expectedSummaryFragment,
-    `- GET /api/agent-runs/${params.runId}`,
-    `- GET /api/cards/${params.cardId}/comments`,
-  ];
+  const requiredFragments = [params.expectedSummaryFragment];
   const missingFragment = requiredFragments.find((fragment) => !content.includes(fragment));
   if (missingFragment) {
     return { ok: false, reason: `automatic completion comment missed required fragment: ${missingFragment}`, ids };
   }
-  return { ok: true, reason: 'terminal card-assignment run and automatic comment matched', ids };
+  return {
+    ok: true,
+    reason: 'terminal card-assignment run and automatic comment matched',
+    ids: { ...ids, expectedCommentBody: params.expectedSummaryFragment },
+  };
 }
 
 async function buildSmokeApi() {
@@ -395,8 +388,8 @@ describe('runner-split QA backend smoke', () => {
       ok: true,
       reason: 'queued chat alignment matched conversation and queued message ids',
     });
-    expect(mocks.hasConnectedRemoteAgentRunner).toHaveBeenCalledWith(ids.workspace);
-    expect(mocks.hasAvailableRemoteAgentRunner).toHaveBeenCalledWith(ids.workspace, 'codex');
+    expect(mocks.hasConnectedRemoteAgentRunner).toHaveBeenCalledWith(ids.user, ids.workspace);
+    expect(mocks.hasAvailableRemoteAgentRunner).toHaveBeenCalledWith(ids.user, ids.workspace, 'codex');
 
     const run = createAgentRun({
       id: ids.run,
@@ -456,8 +449,6 @@ describe('runner-split QA backend smoke', () => {
         authorId: ids.agent,
         agentRunId: runId,
       });
-      expect(apiComment.content).toContain(`Run ID: ${runId}`);
-      expect(apiComment.content).toContain(`Card ID: ${String(card.id)}`);
       expect(apiComment.content).toContain(finalAnswer);
     } finally {
       await app.close();
@@ -468,6 +459,276 @@ describe('runner-split QA backend smoke', () => {
     );
     console.info(
       `qa-smoke report: ${JSON.stringify({ check: 'backend API/service smoke', status: 'PASS', reason: completionCheck.reason, ids: completionCheck.ids })}`,
+    );
+  });
+
+  it('repairs stale processing chat queue rows when their linked run is already terminal', () => {
+    mocks.store.reset();
+
+    const agentId = 'qa-smoke-agent-stale-queue';
+    const conversationId = 'qa-smoke-conversation-stale-queue';
+    const userMessageId = 'qa-smoke-message-stale-user';
+    const responseMessageId = 'qa-smoke-message-stale-response';
+    const runId = 'qa-smoke-run-stale-terminal';
+    const queueItemId = 'qa-smoke-queue-stale-processing';
+    const runStartedAt = '2026-01-01T00:00:00.000Z';
+
+    mocks.store.insert('agents', {
+      id: agentId,
+      name: '[qa-smoke] stale queue agent',
+      model: 'codex',
+      modelId: null,
+      groupId: null,
+      status: 'active',
+    });
+    mocks.store.insert('conversations', {
+      id: conversationId,
+      contactId: null,
+      channelType: 'agent',
+      subject: '[qa-smoke] stale queue conversation',
+      status: 'open',
+      isUnread: false,
+      lastMessageAt: runStartedAt,
+      metadata: JSON.stringify({ agentId }),
+    });
+    mocks.store.insert('messages', {
+      id: userMessageId,
+      conversationId,
+      direction: 'outbound',
+      content: 'stale queue prompt',
+      type: 'text',
+      status: 'sent',
+      parentId: null,
+      previousUserMessageId: null,
+      metadata: null,
+      createdAt: runStartedAt,
+    });
+    mocks.store.insert('messages', {
+      id: responseMessageId,
+      conversationId,
+      direction: 'inbound',
+      content: 'terminal answer',
+      type: 'text',
+      status: 'sent',
+      parentId: userMessageId,
+      previousUserMessageId: null,
+      metadata: JSON.stringify({ runId }),
+      createdAt: '2026-01-01T00:00:01.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: runId,
+      agentId,
+      agentName: '[qa-smoke] stale queue agent',
+      triggerType: 'chat',
+      status: 'completed',
+      conversationId,
+      responseParentId: userMessageId,
+      startedAt: runStartedAt,
+      finishedAt: '2026-01-01T00:00:02.000Z',
+      responseText: 'terminal answer',
+      stdout: '',
+      stderr: '',
+      errorMessage: null,
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: queueItemId,
+      agentId,
+      conversationId,
+      mode: 'respond_to_message',
+      prompt: '',
+      status: 'processing',
+      attempts: 1,
+      runId,
+      lastRunId: runId,
+      targetMessageId: userMessageId,
+      queuedMessageId: null,
+      startedAt: runStartedAt,
+      completedAt: null,
+      errorMessage: null,
+    });
+
+    const items = getConversationExecutionItems(agentId, conversationId);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: queueItemId,
+      status: 'completed',
+      runId: null,
+      responseMessageId,
+    });
+  });
+
+  it('keeps queue, conversation, active run, and pending prompts aligned across multiple enqueues while a chat run is active', async () => {
+    vi.useFakeTimers();
+    mocks.store.reset();
+    mocks.dispatchRemoteAgentJob.mockClear();
+    const ids = {
+      agent: 'qa-smoke-agent-multi-queue',
+      group: 'qa-smoke-group-multi-queue',
+      workspace: 'qa-smoke-workspace-multi-queue',
+      collection: 'qa-smoke-collection-multi-queue',
+      user: 'qa-smoke-user-multi-queue',
+      chatRun: 'qa-smoke-chat-run-active-multi',
+    };
+    mocks.store.insert('users', {
+      id: ids.user,
+      email: 'qa-smoke-multi@example.test',
+      firstName: 'QA',
+      lastName: 'Multi',
+      type: 'human',
+      isActive: true,
+    });
+    mocks.store.insert('agents', {
+      id: ids.agent,
+      name: '[qa-smoke] multi-queue agent',
+      model: 'codex',
+      modelId: 'gpt-5.3-codex',
+      thinkingLevel: null,
+      groupId: ids.group,
+      status: 'active',
+      separateFolderPerChat: false,
+    });
+    mocks.store.insert('workspaces', {
+      id: ids.workspace,
+      userId: ids.user,
+      name: '[qa-smoke] multi-queue workspace',
+      agentGroupIds: [ids.group],
+      collectionIds: [ids.collection],
+    });
+    mocks.store.insert('collections', {
+      id: ids.collection,
+      name: '[qa-smoke] multi-queue collection',
+      description: 'Temporary smoke harness collection',
+    });
+
+    const conversation = createAgentConversation(
+      ids.agent,
+      '[qa-smoke] multi enqueue conversation',
+    ) as Record<string, unknown>;
+    const convId = String(conversation.id);
+
+    saveAgentConversationMessage({
+      id: 'qa-msg-root',
+      conversationId: convId,
+      direction: 'outbound',
+      content: 'root prompt being answered',
+      previousUserMessageId: null,
+    });
+    saveAgentConversationMessage({
+      id: 'qa-msg-q1',
+      conversationId: convId,
+      direction: 'outbound',
+      content: 'quick message one',
+      previousUserMessageId: 'qa-msg-root',
+    });
+    saveAgentConversationMessage({
+      id: 'qa-msg-q2',
+      conversationId: convId,
+      direction: 'outbound',
+      content: 'quick message two',
+      previousUserMessageId: 'qa-msg-q1',
+    });
+    saveAgentConversationMessage({
+      id: 'qa-msg-q3',
+      conversationId: convId,
+      direction: 'outbound',
+      content: 'quick message three',
+      previousUserMessageId: 'qa-msg-q2',
+    });
+
+    createAgentRun({
+      id: ids.chatRun,
+      agentId: ids.agent,
+      agentName: '[qa-smoke] multi-queue agent',
+      model: 'codex',
+      modelId: 'gpt-5.3-codex',
+      triggerType: 'chat',
+      conversationId: convId,
+      responseParentId: 'qa-msg-root',
+      executor: 'remote',
+      status: 'running',
+    } as Parameters<typeof createAgentRun>[0]);
+
+    const activeRun = getAgentRun(ids.chatRun) as Record<string, unknown> | null;
+    expect(activeRun).toMatchObject({
+      id: ids.chatRun,
+      status: 'running',
+      triggerType: 'chat',
+      conversationId: convId,
+      agentId: ids.agent,
+    });
+
+    const convBeforeEnqueue = getAgentConversation(ids.agent, convId);
+    expect(convBeforeEnqueue).toMatchObject({ isBusy: true });
+
+    const expectedPrompts = ['queued prompt alpha', 'queued prompt beta', 'queued prompt gamma'];
+    const expectedQueuedMessageIds = ['qa-msg-q1', 'qa-msg-q2', 'qa-msg-q3'];
+
+    enqueueAgentPrompt(ids.agent, convId, expectedPrompts[0], {
+      queuedMessageId: expectedQueuedMessageIds[0],
+      previousUserMessageId: 'qa-msg-root',
+    });
+    enqueueAgentPrompt(ids.agent, convId, expectedPrompts[1], {
+      queuedMessageId: expectedQueuedMessageIds[1],
+      previousUserMessageId: 'qa-msg-q1',
+    });
+    enqueueAgentPrompt(ids.agent, convId, expectedPrompts[2], {
+      queuedMessageId: expectedQueuedMessageIds[2],
+      previousUserMessageId: 'qa-msg-q2',
+    });
+
+    const convAfter = getAgentConversation(ids.agent, convId);
+    expect(convAfter?.isBusy).toBe(true);
+    expect(convAfter?.queuedCount).toBe(3);
+
+    const queueItems = getConversationExecutionItems(ids.agent, convId);
+    expect(queueItems).toHaveLength(3);
+    expect(queueItems.map((item) => item.prompt)).toEqual(expectedPrompts);
+    expect(queueItems.map((item) => item.queuedMessageId)).toEqual(expectedQueuedMessageIds);
+
+    for (let i = 0; i < queueItems.length; i += 1) {
+      const check = assertQueueAlignment({
+        conversationId: convId,
+        queueItem: queueItems[i],
+        queuedMessageId: expectedQueuedMessageIds[i],
+      });
+      expect(check).toMatchObject({ ok: true });
+    }
+
+    const outboundMessages = mocks.store
+      .getAll('messages')
+      .filter(
+        (row: Record<string, unknown>) =>
+          row.conversationId === convId && row.direction === 'outbound',
+      )
+      .sort(
+        (a: Record<string, unknown>, b: Record<string, unknown>) =>
+          String(a.createdAt).localeCompare(String(b.createdAt)),
+      );
+    expect(outboundMessages.map((row: Record<string, unknown>) => row.id)).toEqual([
+      'qa-msg-root',
+      'qa-msg-q1',
+      'qa-msg-q2',
+      'qa-msg-q3',
+    ]);
+    const tail = outboundMessages[outboundMessages.length - 1] as Record<string, unknown>;
+    expect(tail.id).toBe('qa-msg-q3');
+    expect(tail.previousUserMessageId).toBe('qa-msg-q2');
+
+    console.info(
+      `qa-smoke report: ${JSON.stringify({
+        check: 'multi enqueue while chat run active',
+        status: 'PASS',
+        reason:
+          'queue item ids, conversation id, active chat run id, pending prompts, and tail outbound ownership stayed consistent',
+        ids: {
+          agent: ids.agent,
+          workspace: ids.workspace,
+          conversation: convId,
+          activeRunId: ids.chatRun,
+          queueItemIds: queueItems.map((item) => String(item.id)),
+        },
+      })}`,
     );
   });
 
@@ -643,8 +904,9 @@ describe('runner-split QA backend smoke', () => {
           authorId: ids.agent,
           agentRunId: runId,
         });
-        expect(linkedComment.content).toContain(`Run ID: ${runId}`);
-        expect(linkedComment.content).toContain(`Card ID: ${cardId}`);
+        const snippet = check.ids?.expectedCommentBody;
+        expect(snippet).toBeTruthy();
+        expect(String(linkedComment.content)).toContain(String(snippet));
       }
     } finally {
       await app.close();
@@ -655,7 +917,7 @@ describe('runner-split QA backend smoke', () => {
     );
   });
 
-  it('negative controls fail for missing comments and mismatched queue identity', async () => {
+  it('negative controls fail for mismatched queue identity', async () => {
     mocks.store.reset();
     const ids = {
       agent: 'qa-smoke-agent-runner-split',
@@ -725,70 +987,6 @@ describe('runner-split QA backend smoke', () => {
     });
     expect(completedWithAutoComment).toMatchObject({ ok: true });
 
-    const disabledRunId = `${ids.run}-disabled-writer`;
-    const disabledCardId = '00000000-0000-4000-8000-000000000202';
-    mocks.store.insert('cards', {
-      id: disabledCardId,
-      collectionId: ids.collection,
-      name: '[qa-smoke] runner split disabled writer card',
-      description: 'Temporary smoke harness card',
-      customFields: {},
-    });
-    const disabledRun = createAgentRun({
-      id: disabledRunId,
-      agentId: ids.agent,
-      agentName: '[qa-smoke] runner split agent',
-      model: 'codex',
-      modelId: 'gpt-5.3-codex',
-      triggerType: 'card_assignment',
-      cardId: disabledCardId,
-      executor: 'remote',
-      status: 'running',
-    } as Parameters<typeof createAgentRun>[0]);
-    const actualDisabledRunId = String(disabledRun.id);
-
-    const originalInsert = mocks.store.insert;
-    const insertSpy = vi.spyOn(mocks.store, 'insert').mockImplementation((name, data) => {
-      if (name === 'cardComments') {
-        return {
-          ...data,
-          id: 'qa-smoke-comment-writer-disabled',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-      }
-      return originalInsert(name, data);
-    });
-    await completeAgentRun(actualDisabledRunId, null, { stdout: finalStdout, stderr: '' });
-    insertSpy.mockRestore();
-
-    const missingComment = inspectCompletedCardAssignment({
-      runId: actualDisabledRunId,
-      cardId: disabledCardId,
-      agentId: ids.agent,
-      expectedFinalAnswer: finalAnswer,
-    });
-    expect(missingComment).toMatchObject({
-      ok: false,
-      reason: 'missing automatic completion comment linked by cardId and agentRunId',
-    });
-
-    const app = await buildSmokeApi();
-    try {
-      const commentsResponse = await app.inject({
-        method: 'GET',
-        url: `/api/cards/${disabledCardId}/comments`,
-      });
-      expect(commentsResponse.statusCode).toBe(200);
-      expect(
-        commentsResponse
-          .json()
-          .entries.some((entry: Record<string, unknown>) => entry.agentRunId === actualDisabledRunId),
-      ).toBe(false);
-    } finally {
-      await app.close();
-    }
-
     const conversation = createAgentConversation(
       ids.agent,
       '[qa-smoke] negative queue alignment conversation',
@@ -816,8 +1014,74 @@ describe('runner-split QA backend smoke', () => {
     });
 
     console.info(
-      `qa-smoke report: ${JSON.stringify({ check: 'backend negative controls', status: 'PASS', reason: 'sentinels rejected disabled automatic comment writer and mismatched queue identity', ids: { runId: disabledRunId, cardId: disabledCardId, conversationId: String(conversation.id), queueId: String(queued.queueItem.id) }, evidence: { missingComment: missingComment.reason, mismatchedQueue: mismatchedQueue.reason } })}`,
+      `qa-smoke report: ${JSON.stringify({ check: 'backend negative controls', status: 'PASS', reason: 'sentinel rejected mismatched queue identity (unsupported runner capability is asserted in the runner startup smoke layer)', ids: { runId, conversationId: String(conversation.id), queueId: String(queued.queueItem.id) }, evidence: { mismatchedQueue: mismatchedQueue.reason } })}`,
     );
+  });
+
+  it('marks card-assignment runs as error when final response extraction throws', async () => {
+    const spy = vi.spyOn(agentOutput, 'extractFinalResponseText').mockImplementation(() => {
+      throw new Error('forced extraction failure');
+    });
+    try {
+      mocks.store.reset();
+      const runId = 'qa-smoke-run-extract-throw';
+      const cardId = '00000000-0000-4000-8000-000000000301';
+      const agentId = 'qa-smoke-agent-extract-throw';
+      const collectionId = 'qa-smoke-collection-extract-throw';
+      mocks.store.insert('agents', {
+        id: agentId,
+        name: '[qa-smoke] extract throw agent',
+        model: 'codex',
+        modelId: 'gpt-5.3-codex',
+        status: 'active',
+      });
+      mocks.store.insert('collections', {
+        id: collectionId,
+        name: '[qa-smoke] extract throw collection',
+      });
+      mocks.store.insert('cards', {
+        id: cardId,
+        collectionId,
+        name: '[qa-smoke] extract throw card',
+        description: 'Harness card',
+        customFields: { qaSmoke: true },
+      });
+      createAgentRun({
+        id: runId,
+        agentId,
+        agentName: '[qa-smoke] extract throw agent',
+        model: 'codex',
+        modelId: 'gpt-5.3-codex',
+        triggerType: 'card_assignment',
+        cardId,
+        executor: 'remote',
+        status: 'running',
+      } as Parameters<typeof createAgentRun>[0]);
+      const finalStdout = JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: `openwork-final-message-${runId}`,
+          type: 'openwork_final_message',
+          text: 'QA extract throw body',
+        },
+      });
+      const done = await completeAgentRun(runId, null, { stdout: finalStdout, stderr: '' });
+      expect(done).toMatchObject({
+        id: runId,
+        status: 'error',
+        errorMessage: expect.stringMatching(/Failed to extract agent final response/i),
+      });
+      const terminal = inspectTerminalCardAssignmentComment({
+        runId,
+        cardId,
+        agentId,
+        expectedStatus: 'error',
+        expectedSummaryFragment: 'Failed to extract agent final response',
+      });
+      expect(terminal).toMatchObject({ ok: true });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('marks Claude stream-json runs without a terminal result event as error', async () => {

@@ -1,3 +1,5 @@
+import { formatAgentRunErrorMessage } from '../lib/agent-output.js';
+
 type HttpMethod = 'GET';
 
 export interface BoardQaGateApi {
@@ -92,6 +94,8 @@ const DEFAULT_TEST_COLUMNS = ['testing', 'test', 'qa', 'verify', 'verification',
 const DEFAULT_TEST_CARD_PATTERN = /\b(qa|test|testing|smoke|verification|runner-split)\b/i;
 const DEFAULT_EXCEPTION_PATTERN = /\bqa-run-comment-exception\b/i;
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'error', 'failed', 'cancelled']);
+/** Keep in sync with `MAX_CARD_AUTO_COMMENT_LENGTH` in `services/agent-runs.ts`. */
+const MAX_CARD_AUTORUN_COMMENT_LENGTH = 5000;
 
 function normalizeName(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -143,6 +147,30 @@ function hasAllowedException(
   });
 }
 
+function commentReflectsTerminalRun(commentContent: string, run: AgentRunDetail): boolean {
+  const text = commentContent.trim();
+  if (!text) return false;
+
+  const responseText = typeof run.responseText === 'string' ? run.responseText.trim() : '';
+  const rawError = typeof run.errorMessage === 'string' ? run.errorMessage.trim() : '';
+  const errorDisplay = formatAgentRunErrorMessage(rawError)?.trim() ?? '';
+
+  if (responseText) {
+    if (text.includes(responseText)) return true;
+    if (
+      responseText.length > MAX_CARD_AUTORUN_COMMENT_LENGTH &&
+      text.endsWith('...') &&
+      responseText.startsWith(text.slice(0, -3))
+    ) {
+      return true;
+    }
+  }
+  if (errorDisplay && text.includes(errorDisplay)) return true;
+
+  if (!responseText && !errorDisplay) return text.length > 0;
+  return false;
+}
+
 function hasRunLinkedAutomaticComment(
   comments: CardComment[],
   cardId: string,
@@ -151,20 +179,7 @@ function hasRunLinkedAutomaticComment(
   return comments.some((comment) => {
     if (comment.cardId !== cardId || comment.agentRunId !== run.id) return false;
     if (run.agentId && comment.authorId !== run.agentId) return false;
-
-    const content = comment.content.toLowerCase();
-    if (!content.includes(run.id.toLowerCase())) return false;
-    if (!content.includes(cardId.toLowerCase())) return false;
-    if (!content.includes('verification commands/api checks used:')) return false;
-    if (!content.includes(`/api/agent-runs/${run.id.toLowerCase()}`)) return false;
-    if (!content.includes(`/api/cards/${cardId.toLowerCase()}/comments`)) return false;
-
-    const responseText = typeof run.responseText === 'string' ? run.responseText.trim() : '';
-    const errorMessage = typeof run.errorMessage === 'string' ? run.errorMessage.trim() : '';
-    if (responseText && comment.content.includes(responseText)) return true;
-    if (errorMessage && comment.content.includes(errorMessage)) return true;
-
-    return content.includes('final summary:') || content.includes('completion summary:');
+    return commentReflectsTerminalRun(comment.content, run);
   });
 }
 
@@ -210,7 +225,7 @@ async function listTerminalCardRuns(
 ): Promise<AgentRunDetail[]> {
   const summaries = await listAll<AgentRunSummary>(
     api,
-    '/api/agent-runs',
+    `/api/agent-runs?cardId=${encodeURIComponent(cardId)}`,
     pageSize,
   );
   const linked = summaries.filter((run) => run.cardId === cardId);
@@ -267,7 +282,7 @@ export async function checkBoardQaRunComments(
           cardId: entry.card.id,
           cardName: entry.card.name,
           columnName,
-          message: 'Completed test card has no terminal card-assignment agent runs.',
+          message: 'Completed test card has no terminal agent runs linked to this card.',
         });
         continue;
       }

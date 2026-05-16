@@ -1281,6 +1281,11 @@ button.messageMonitorBtn,
   color: var(--color-text);
 }
 
+.editMsgBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── Branch navigation ── */
 .branchNav {
   display: flex;

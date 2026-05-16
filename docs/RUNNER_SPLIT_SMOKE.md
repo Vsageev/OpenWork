@@ -17,8 +17,9 @@ resource IDs and does not mutate local application state.
 
 - Backend service/API contract: creates a test agent, workspace, agent
   conversation, card, and queued chat prompt through service helpers.
-- Sidebar/chat state contract: verifies queued prompts are recovered by the
-  frontend chat view model.
+- Sidebar/chat state contract: verifies component state, route state, queue
+  state, CSS-module layout fixtures, and negative controls for the frontend
+  agent sidebar/chat contract.
 - Runner protocol: validates current job offer and runner lifecycle payloads.
 - Non-Codex startup planning: verifies executable discovery and command plans
   for Claude, Qwen, Cursor, and OpenCode without spawning their real CLIs.

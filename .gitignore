@@ -15,3 +15,8 @@ packages/backend/migration-artifacts/
 .claude-api-key
 .claude/tmp-*
 .playwright-browsers/
+.openwork/
+packages/backend/tmp-*.mjs
+.Trash/
+.Trashes/
+.trash/

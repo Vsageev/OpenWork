@@ -48,7 +48,11 @@ import { agentRunnerRoutes } from './routes/agent-runners.js';
 import { settingsRoutes, initRateLimiterFromSettings } from './routes/settings.js';
 import { initAllCronJobs, shutdownAgentCronJobs } from './services/agent-cron.js';
 import { initAllBoardCronJobs } from './services/board-cron.js';
-import { reconcileRunsOnStartup, cleanupOldRunLogs } from './services/agent-runs.js';
+import {
+  reconcileRunsOnStartup,
+  reconcileUnrecoveredRemoteRuns,
+  cleanupOldRunLogs,
+} from './services/agent-runs.js';
 import {
   initializeAgentChatQueue,
   recoverCompletedChatRunsOnStartup,
@@ -198,6 +202,33 @@ export async function buildApp() {
   recoverCompletedChatRunsOnStartup();
   await initializeAgentChatQueue({ preserveActiveProcessing: true });
   await initializeAgentBatchQueue({ preserveActiveProcessing: true });
+
+  const reconcileRemoteRecovery = () => {
+    void reconcileUnrecoveredRemoteRuns()
+      .then(async (finalized) => {
+        if (finalized === 0) return;
+        recoverCompletedChatRunsOnStartup();
+        await initializeAgentChatQueue({ preserveActiveProcessing: false });
+        await initializeAgentBatchQueue({ preserveActiveProcessing: false });
+        scheduleQueuedAgentChatDrains();
+      })
+      .catch((err) => {
+        console.error('[agent-runs] Failed to reconcile unrecovered remote runs:', err);
+      });
+  };
+
+  const remoteRecoveryTimer = setTimeout(reconcileRemoteRecovery, env.REMOTE_AGENT_RUNNER_RECONNECT_GRACE_MS);
+  remoteRecoveryTimer.unref?.();
+  const remoteRecoveryInterval = setInterval(
+    reconcileRemoteRecovery,
+    Math.max(env.REMOTE_AGENT_RUNNER_RECONNECT_GRACE_MS, 30_000),
+  );
+  remoteRecoveryInterval.unref?.();
+
+  app.addHook('onClose', () => {
+    clearTimeout(remoteRecoveryTimer);
+    clearInterval(remoteRecoveryInterval);
+  });
 
   return app;
 }

@@ -21,6 +21,7 @@ import {
   type RunnerCapabilities,
   type RunnerRecord,
 } from './runner-devices.js';
+import type { AgentRunLifecycleEvent } from './agent-runs.js';
 
 export interface RemoteAgentJob {
   userId?: string | null;
@@ -126,10 +127,54 @@ function reattachInFlightJobsToRunner(runner: ConnectedRunner) {
   }
 }
 
+function recordRunLifecycle(
+  runId: string | null | undefined,
+  event: Omit<AgentRunLifecycleEvent, 'at'> & { at?: string },
+) {
+  if (!runId) return;
+  void import('./agent-runs.js')
+    .then(({ appendAgentRunLifecycleEvent }) => {
+      appendAgentRunLifecycleEvent(runId, event);
+    })
+    .catch((err) => {
+      console.error(`[runners] Failed to record lifecycle event for run ${runId}:`, err);
+    });
+}
+
+function findRunIdForJobId(jobId: string): string | null {
+  for (const [runId, mappedJobId] of jobIdByRunId) {
+    if (mappedJobId === jobId) return runId;
+  }
+  return null;
+}
+
+async function failRecoveredJob(jobId: string, message: string) {
+  const runId = findRunIdForJobId(jobId);
+  jobRunnerById.delete(jobId);
+  if (!runId) return;
+  jobIdByRunId.delete(runId);
+
+  try {
+    const { completeAgentRun } = await import('./agent-runs.js');
+    recordRunLifecycle(runId, {
+      event: 'backend_recovered_job_failed',
+      jobId,
+      message,
+    });
+    await completeAgentRun(runId, message);
+  } catch (err) {
+    console.error(`[runners] Failed to finalize recovered runner job ${runId}:`, err);
+  }
+}
+
 function failJobsForDisconnectedRunner(runnerId: string, message: string) {
   for (const jobId of [...jobRunnerById.keys()]) {
     if (jobRunnerById.get(jobId) === runnerId) {
-      failPendingJob(jobId, new Error(message));
+      if (jobsById.has(jobId)) {
+        failPendingJob(jobId, new Error(message));
+      } else {
+        void failRecoveredJob(jobId, message);
+      }
     }
   }
 }
@@ -163,30 +208,6 @@ async function authenticateUpgrade(request: IncomingMessage): Promise<RunnerReco
   const credential =
     headerCredential || url.searchParams.get('credential') || url.searchParams.get('token');
   if (!credential) return null;
-
-  if (
-    env.AGENT_RUNNER_ENABLE_SHARED_TOKEN &&
-    env.AGENT_RUNNER_SHARED_TOKEN &&
-    credential === env.AGENT_RUNNER_SHARED_TOKEN
-  ) {
-    const runnerId =
-      env.AGENT_RUNNER_ID || url.searchParams.get('runnerId') || 'local-dev-runner';
-    return {
-      id: runnerId,
-      userId: 'local-dev-user',
-      workspaceId: env.AGENT_RUNNER_WORKSPACE_ID || '*',
-      displayName: url.searchParams.get('name') || runnerId,
-      credentialHash: '',
-      credentialPrefix: 'shared',
-      status: 'online',
-      lastSeenAt: new Date().toISOString(),
-      version: null,
-      capabilities: {},
-      revokedAt: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-  }
 
   return authenticateRunnerCredential(credential);
 }
@@ -233,6 +254,7 @@ function pickRunner(
     return null;
   }
 
+  // Prefer the least-loaded runner; break ties deterministically by most-recent heartbeat.
   return [...runners.values()]
     .filter((runner) => runnerMatchesJob(runner, userId, workspaceId, provider))
     .sort((a, b) => {
@@ -265,6 +287,11 @@ function getConnectedRunnerLiveStatus(
 function failPendingJob(jobId: string, error: Error) {
   const pending = jobsById.get(jobId);
   if (!pending) return;
+  recordRunLifecycle(pending.runId, {
+    event: 'backend_job_failed',
+    jobId,
+    message: error.message,
+  });
   if (pending.timeout) clearTimeout(pending.timeout);
   jobsById.delete(jobId);
   jobIdByRunId.delete(pending.runId);
@@ -280,6 +307,16 @@ function failPendingJob(jobId: string, error: Error) {
   pending.reject(error);
 }
 
+/** Merge runner `completed` stdout with chunks already buffered via `output_event` / `final_message`. */
+function mergeRunnerCompletedStdout(pendingStdout: string, completedStdout: string): string {
+  if (completedStdout) {
+    return `${completedStdout}${
+      pendingStdout && !completedStdout.includes(pendingStdout) ? pendingStdout : ''
+    }`;
+  }
+  return pendingStdout;
+}
+
 function completePendingJob(
   jobId: string,
   result: RemoteAgentJobResult,
@@ -287,6 +324,14 @@ function completePendingJob(
 ) {
   const pending = jobsById.get(jobId);
   if (!pending) return;
+  recordRunLifecycle(pending.runId, {
+    event: 'runner_job_completed',
+    runnerId: runner?.id,
+    jobId,
+    code: result.code,
+    stdoutBytes: result.stdout.length,
+    stderrBytes: result.stderr.length,
+  });
   if (pending.timeout) clearTimeout(pending.timeout);
   jobsById.delete(jobId);
   jobRunnerById.delete(jobId);
@@ -297,15 +342,12 @@ function completePendingJob(
     noteConnectedRunnerSeen(runner);
   }
   notifyAvailableRunner();
-  const stdout = result.stdout
-    ? `${result.stdout}${pending.stdout && !result.stdout.includes(pending.stdout) ? pending.stdout : ''}`
-    : pending.stdout;
   const stderr = result.stderr
     ? `${result.stderr}${pending.stderr && !result.stderr.includes(pending.stderr) ? pending.stderr : ''}`
     : pending.stderr;
   pending.resolve({
     code: result.code,
-    stdout,
+    stdout: mergeRunnerCompletedStdout(pending.stdout, result.stdout),
     stderr,
   });
 }
@@ -321,6 +363,14 @@ async function completeUnknownRunnerTerminalMessage(
         : message.type === 'failed'
           ? message.message
           : message.message || 'Remote runner cancelled the job';
+    recordRunLifecycle(message.runId, {
+      event: `runner_job_${message.type}_after_recovery`,
+      jobId: message.jobId,
+      code: message.type === 'cancelled' ? null : message.code,
+      message: errorMessage ?? undefined,
+      stdoutBytes: message.stdout.length,
+      stderrBytes: message.stderr.length,
+    });
     await completeAgentRun(message.runId, errorMessage, {
       stdout: message.stdout,
       stderr: message.stderr,
@@ -342,6 +392,17 @@ function appendRunnerFinalMessage(pending: PendingJob, message: Extract<RunnerSe
   const line = `${JSON.stringify(event)}\n`;
   pending.stdout += line;
   pending.callbacks.onStdout?.(line);
+}
+
+async function appendUnknownRunnerOutputEvent(
+  message: Extract<RunnerServerMessage, { type: 'output_event' }>,
+) {
+  try {
+    const { appendAgentRunOutput } = await import('./agent-runs.js');
+    appendAgentRunOutput(message.runId, message.stream, message.text);
+  } catch (err) {
+    console.error(`[runners] Failed to append output for unknown runner job ${message.runId}:`, err);
+  }
 }
 
 export function getCompletedRunnerProtocolError(
@@ -378,18 +439,40 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
 
   if (message.type === 'job_accepted') {
     const pending = jobsById.get(message.jobId);
-    if (!pending) return;
+    recordRunLifecycle(message.runId, {
+      event: pending ? 'runner_job_accepted' : 'runner_job_recovered',
+      runnerId: runner.id,
+      jobId: message.jobId,
+    });
+    if (!pending) {
+      jobRunnerById.set(message.jobId, runner.id);
+      jobIdByRunId.set(message.runId, message.jobId);
+      runner.activeJobIds.add(message.jobId);
+      noteConnectedRunnerSeen(runner);
+      return;
+    }
     return;
   }
 
   if (message.type === 'job_rejected') {
+    if (message.runId) {
+      recordRunLifecycle(message.runId, {
+        event: 'runner_job_rejected',
+        runnerId: runner.id,
+        jobId: message.jobId,
+        message: `${message.code}: ${message.message}`,
+      });
+    }
     failPendingJob(message.jobId, new Error(`${message.code}: ${message.message}`));
     return;
   }
 
   if (message.type === 'output_event' && message.stream === 'stdout') {
     const pending = jobsById.get(message.jobId);
-    if (!pending) return;
+    if (!pending) {
+      void appendUnknownRunnerOutputEvent(message);
+      return;
+    }
     pending.stdout += message.text;
     pending.callbacks.onStdout?.(message.text);
     return;
@@ -397,7 +480,10 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
 
   if (message.type === 'output_event' && message.stream === 'stderr') {
     const pending = jobsById.get(message.jobId);
-    if (!pending) return;
+    if (!pending) {
+      void appendUnknownRunnerOutputEvent(message);
+      return;
+    }
     pending.stderr += message.text;
     pending.callbacks.onStderr?.(message.text);
     return;
@@ -406,6 +492,12 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
   if (message.type === 'final_message') {
     const pending = jobsById.get(message.jobId);
     if (!pending) return;
+    recordRunLifecycle(message.runId, {
+      event: 'runner_final_message_received',
+      runnerId: runner.id,
+      jobId: message.jobId,
+      stdoutBytes: message.text.length,
+    });
     appendRunnerFinalMessage(pending, message);
     return;
   }
@@ -416,10 +508,19 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
 
   if (message.type === 'completed') {
     if (!jobsById.has(message.jobId)) {
+      runner.activeJobIds.delete(message.jobId);
+      jobRunnerById.delete(message.jobId);
+      jobIdByRunId.delete(message.runId);
+      noteConnectedRunnerSeen(runner);
       void completeUnknownRunnerTerminalMessage(message);
       return;
     }
-    const protocolError = getCompletedRunnerProtocolError(message);
+    const pending = jobsById.get(message.jobId)!;
+    const mergedStdout = mergeRunnerCompletedStdout(pending.stdout, message.stdout ?? '');
+    const protocolError = getCompletedRunnerProtocolError({
+      ...message,
+      stdout: mergedStdout,
+    });
     if (protocolError) {
       failPendingJob(message.jobId, protocolError);
       return;
@@ -438,6 +539,10 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
 
   if (message.type === 'failed') {
     if (!jobsById.has(message.jobId)) {
+      runner.activeJobIds.delete(message.jobId);
+      jobRunnerById.delete(message.jobId);
+      jobIdByRunId.delete(message.runId);
+      noteConnectedRunnerSeen(runner);
       void completeUnknownRunnerTerminalMessage(message);
       return;
     }
@@ -451,6 +556,10 @@ function handleRunnerMessage(runner: ConnectedRunner, message: RunnerServerMessa
 
   if (message.type === 'cancelled') {
     if (!jobsById.has(message.jobId)) {
+      runner.activeJobIds.delete(message.jobId);
+      jobRunnerById.delete(message.jobId);
+      jobIdByRunId.delete(message.runId);
+      noteConnectedRunnerSeen(runner);
       void completeUnknownRunnerTerminalMessage(message);
       return;
     }
@@ -621,14 +730,28 @@ const PROVIDER_COMMANDS: Record<RunnerJobIntent['provider'], string> = {
   opencode: 'opencode',
 };
 
+function hasAnyLiveOpenRunner(): boolean {
+  return [...runners.values()].some(
+    (runner) => runnerIsOpen(runner) && getConnectedRunnerLiveStatus(runner) !== 'stale',
+  );
+}
+
 export function getRemoteAgentRunnerUnavailableMessage(
-  workspaceId?: string | null,
-  provider?: RunnerJobIntent['provider'],
+  first?: string | null,
+  second?: string | RunnerJobIntent['provider'] | null,
+  third?: RunnerJobIntent['provider'],
 ): string {
-  if (!hasConnectedRemoteAgentRunner(workspaceId)) {
+  const userId = third === undefined ? undefined : first;
+  const workspaceId = third === undefined ? first : second;
+  const provider = third === undefined ? (second as RunnerJobIntent['provider'] | undefined) : third;
+
+  if (!hasAnyLiveOpenRunner()) {
     return 'No remote agent runner is connected. Start or pair an OpenWork runner, then try again.';
   }
-  if (provider && !hasAvailableRemoteAgentRunner(workspaceId, provider)) {
+  if (!hasConnectedRemoteAgentRunner(userId, workspaceId)) {
+    return 'No eligible remote agent runner is connected for this workspace.';
+  }
+  if (provider && !hasAvailableRemoteAgentRunner(userId, workspaceId, provider)) {
     return `No eligible remote agent runner supports ${provider}. Install ${PROVIDER_COMMANDS[provider]} on the runner, restart it, or choose another model.`;
   }
   return 'No eligible remote agent runner is connected for this workspace.';
@@ -648,7 +771,9 @@ export function dispatchRemoteAgentJob(
   const runner = pickRunner(job.userId, job.workspaceId, job.intent.provider);
   if (!runner) {
     return Promise.reject(
-      new Error(getRemoteAgentRunnerUnavailableMessage(job.workspaceId, job.intent.provider)),
+      new Error(
+        getRemoteAgentRunnerUnavailableMessage(job.userId, job.workspaceId, job.intent.provider),
+      ),
     );
   }
 
@@ -656,6 +781,12 @@ export function dispatchRemoteAgentJob(
   runner.activeJobIds.add(jobId);
   runner.lastSeenAt = new Date().toISOString();
   noteConnectedRunnerSeen(runner);
+  recordRunLifecycle(job.intent.runId, {
+    event: 'backend_job_dispatching',
+    runnerId: runner.id,
+    jobId,
+    message: `Dispatching ${job.intent.provider} runner job`,
+  });
 
   return new Promise<RemoteAgentJobResult>((resolve, reject) => {
     const timeoutMs = job.timeoutMs ?? env.REMOTE_AGENT_RUN_TIMEOUT_MS;
@@ -687,6 +818,11 @@ export function dispatchRemoteAgentJob(
       jobId,
       job: job.intent,
     });
+    recordRunLifecycle(job.intent.runId, {
+      event: 'backend_job_offer_sent',
+      runnerId: runner.id,
+      jobId,
+    });
   });
 }
 
@@ -715,4 +851,5 @@ export const __runnerTestUtils = {
   jobsById,
   jobRunnerById,
   jobIdByRunId,
+  failJobsForDisconnectedRunner,
 };

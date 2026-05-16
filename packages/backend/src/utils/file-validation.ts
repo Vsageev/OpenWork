@@ -2,7 +2,8 @@
  * File upload validation (OWASP Unrestricted File Upload).
  *
  * Strict uploads use a MIME allowlist.
- * Relaxed uploads still block executable/script-like files by extension and MIME.
+ * Relaxed uploads still block executable files by extension and MIME, but allow
+ * source code files to be stored inertly as chat input.
  */
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -59,6 +60,13 @@ const BLOCKED_EXTENSIONS = new Set([
   '.htaccess', '.htpasswd',
 ]);
 
+const NON_EXECUTABLE_SOURCE_EXTENSIONS = new Set([
+  '.js',
+  '.py',
+  '.rb',
+  '.pl',
+]);
+
 const BLOCKED_MIME_TYPES = new Set([
   'application/x-msdownload',
   'application/x-msdos-program',
@@ -73,6 +81,11 @@ const BLOCKED_MIME_TYPES = new Set([
   'application/x-dosexec',
   'application/x-httpd-php',
   'application/x-php',
+  'application/javascript',
+  'text/javascript',
+]);
+
+const NON_EXECUTABLE_SOURCE_MIME_TYPES = new Set([
   'application/javascript',
   'text/javascript',
 ]);
@@ -105,7 +118,11 @@ export function validateUploadedFile(
         error: `File type "${mimeType}" is not allowed`,
       };
     }
-  } else if (normalizedMimeType && BLOCKED_MIME_TYPES.has(normalizedMimeType)) {
+  } else if (
+    normalizedMimeType &&
+    BLOCKED_MIME_TYPES.has(normalizedMimeType) &&
+    !NON_EXECUTABLE_SOURCE_MIME_TYPES.has(normalizedMimeType)
+  ) {
     return {
       valid: false,
       error: `File type "${mimeType}" is not allowed`,
@@ -114,7 +131,10 @@ export function validateUploadedFile(
 
   // Check file extension against blocklist
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
-  if (BLOCKED_EXTENSIONS.has(ext)) {
+  if (
+    BLOCKED_EXTENSIONS.has(ext) &&
+    (mode === 'strict' || !NON_EXECUTABLE_SOURCE_EXTENSIONS.has(ext))
+  ) {
     return {
       valid: false,
       error: `File extension "${ext}" is not allowed`,

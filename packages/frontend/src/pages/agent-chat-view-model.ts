@@ -33,6 +33,7 @@ export interface AgentChatQueueItem {
   targetMessageId?: string | null;
   queuedMessageId?: string | null;
   previousUserMessageId?: string | null;
+  attachments?: AgentChatAttachment[] | null;
   runId?: string | null;
   errorMessage?: string | null;
 }
@@ -170,11 +171,11 @@ export function buildAgentConversationViewModel(
       )
       .map((item) => item.queuedMessageId!),
   );
-  const selectedUserMessageIdByPreviousMessageId = new Map<string, string>();
+  const selectedUserMessageByPreviousMessageId = new Map<string, AgentChatMessage>();
   for (const message of activeBranchMessages) {
     if (message.direction !== 'outbound') continue;
     const key = message.previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
-    selectedUserMessageIdByPreviousMessageId.set(key, message.id);
+    selectedUserMessageByPreviousMessageId.set(key, message);
   }
 
   const queuedQueueItems = queueItems
@@ -187,13 +188,24 @@ export function buildAgentConversationViewModel(
       const previousUserMessageId = item.previousUserMessageId ?? null;
       const queuedMessageId = item.queuedMessageId ?? null;
       const selectionKey = previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
-      const selectedMessageId = selectedUserMessageIdByPreviousMessageId.get(selectionKey) ?? null;
+      const selectedMessage = selectedUserMessageByPreviousMessageId.get(selectionKey) ?? null;
+      const selectedMessageId = selectedMessage?.id ?? null;
 
       if (
         previousUserMessageId !== null &&
         selectedMessageId &&
         queuedMessageId &&
         selectedMessageId !== queuedMessageId
+      ) {
+        return false;
+      }
+
+      if (
+        previousUserMessageId === null &&
+        selectedMessageId &&
+        queuedMessageId &&
+        selectedMessageId !== queuedMessageId &&
+        (selectedMessage?.siblingIds ?? []).includes(queuedMessageId)
       ) {
         return false;
       }
@@ -241,7 +253,10 @@ export function buildAgentConversationViewModel(
   }
 
   const visibleConversationRuns = activeConversationRuns.filter(
-    (run) => run.status === 'running' && Boolean(run.responseParentId) && activeMessageIds.has(run.responseParentId!),
+    (run) =>
+      run.status === 'running' &&
+      Boolean(run.responseParentId) &&
+      activeMessageIds.has(run.responseParentId!),
   );
   const activeConversationRun = visibleConversationRuns[0] ?? null;
 
@@ -274,9 +289,7 @@ export function buildAgentConversationViewModel(
       const hasProcessingExecution =
         appendQueueItem?.status === 'processing' ||
         pendingExecutions.some((item) => item.status === 'processing');
-      const status: 'queued' | 'processing' = hasProcessingExecution
-        ? 'processing'
-        : 'queued';
+      const status: 'queued' | 'processing' = hasProcessingExecution ? 'processing' : 'queued';
       return {
         message,
         status,
@@ -297,9 +310,13 @@ export function buildAgentConversationViewModel(
         direction: 'outbound',
         content: item.prompt,
         createdAt: item.createdAt,
-        type: 'text',
+        type: item.attachments?.length
+          ? item.attachments.every((attachment) => attachment.type === 'image')
+            ? 'image'
+            : 'file'
+          : 'text',
         metadata: null,
-        attachments: null,
+        attachments: item.attachments ?? null,
         parentId: null,
         previousUserMessageId: item.previousUserMessageId ?? null,
       },
@@ -352,22 +369,22 @@ export function buildAgentConversationViewModel(
     activeProcessingTargetMessageId = visibleConversationRuns[0].responseParentId ?? null;
   } else {
     const processingQueueItem = queueItems.find((item) => {
-        if (item.status !== 'processing') return false;
-        if (getQueueItemMode(item) !== 'respond_to_message') return false;
-        const anchorId = item.targetMessageId;
-        return Boolean(anchorId && activeMessageIds.has(anchorId));
-      });
+      if (item.status !== 'processing') return false;
+      if (getQueueItemMode(item) !== 'respond_to_message') return false;
+      const anchorId = item.targetMessageId;
+      return Boolean(anchorId && activeMessageIds.has(anchorId));
+    });
     if (processingQueueItem) {
       activeProcessingTargetMessageId = processingQueueItem.targetMessageId ?? null;
     } else {
       const queuedBranchItem = queueItems.find((item) => {
-          if (item.status !== 'queued') return false;
-          const anchorId =
-            getQueueItemMode(item) === 'respond_to_message'
-              ? item.targetMessageId
-              : item.queuedMessageId;
-          return Boolean(anchorId && activeMessageIds.has(anchorId));
-        });
+        if (item.status !== 'queued') return false;
+        const anchorId =
+          getQueueItemMode(item) === 'respond_to_message'
+            ? item.targetMessageId
+            : item.queuedMessageId;
+        return Boolean(anchorId && activeMessageIds.has(anchorId));
+      });
       if (queuedBranchItem) {
         activeProcessingTargetMessageId =
           (getQueueItemMode(queuedBranchItem) === 'respond_to_message'
@@ -376,7 +393,9 @@ export function buildAgentConversationViewModel(
       } else if (activeConversationKey) {
         const optimisticTargetId = optimisticResponseParentIds[activeConversationKey] ?? null;
         activeProcessingTargetMessageId =
-          optimisticTargetId && activeMessageIds.has(optimisticTargetId) ? optimisticTargetId : null;
+          optimisticTargetId && activeMessageIds.has(optimisticTargetId)
+            ? optimisticTargetId
+            : null;
       }
     }
   }

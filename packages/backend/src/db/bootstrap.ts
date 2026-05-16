@@ -127,48 +127,9 @@ function ensureGeneralCollection(
   });
 }
 
-function ensureDefaultBoard(
-  store: Store,
-  createdById: string,
-  defaultCollectionId: string,
-): Record<string, unknown> {
-  const existing = findByField(store, 'boards', 'name', 'auto-dev-cards');
-  if (existing) return existing;
-
-  const board = store.insert('boards', {
-    name: 'auto-dev-cards',
-    description: 'Default board for automation and refactor tasks',
-    collectionId: null,
-    defaultCollectionId,
-    isGeneral: false,
-    createdById,
-  });
-
-  const columns = [
-    { name: 'ui-tasks', color: '#6B7280', position: 0 },
-    { name: 'refactor-tasks', color: '#3B82F6', position: 1 },
-    { name: 'testing', color: '#F59E0B', position: 2 },
-    { name: 'done', color: '#10B981', position: 3 },
-  ];
-
-  for (const column of columns) {
-    store.insert('boardColumns', {
-      boardId: board.id,
-      name: column.name,
-      color: column.color,
-      position: column.position,
-      assignAgentId: null,
-      assignAgentPrompt: null,
-    });
-  }
-
-  return board;
-}
-
 function ensureWorkspace(
   store: Store,
   userId: string,
-  boardId: string,
   collectionId: string,
 ): void {
   const existing = store.getAll('workspaces').find((r) => r.userId === userId);
@@ -177,7 +138,7 @@ function ensureWorkspace(
   store.insert('workspaces', {
     name: 'Default Workspace',
     userId,
-    boardIds: [boardId],
+    boardIds: [],
     collectionIds: [collectionId],
     agentGroupIds: [],
   });
@@ -198,12 +159,10 @@ async function bootstrap() {
   ensureRateLimitSettings(store);
 
   const generalCollection = ensureGeneralCollection(store, adminId);
-  const defaultBoard = ensureDefaultBoard(store, adminId, generalCollection.id as string);
 
   ensureWorkspace(
     store,
     adminId,
-    defaultBoard.id as string,
     generalCollection.id as string,
   );
 

@@ -140,7 +140,9 @@ export function RunnerDevicesTab() {
         <div>
           <h2 className={styles.sectionTitle}>Runner Devices</h2>
           <p className={styles.sectionDescription}>
-            Pair user-owned runners for this workspace and revoke access from old machines.
+            Pair user-owned runners for this workspace. Status reflects the live socket and recent
+            heartbeats: online when idle, busy while a job runs, stale when the runner stopped
+            responding, offline when disconnected, and revoked when access is removed.
           </p>
         </div>
         <Button size="sm" variant="secondary" onClick={() => void fetchDevices()}>

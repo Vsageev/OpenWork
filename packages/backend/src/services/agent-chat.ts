@@ -23,7 +23,7 @@ import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import { env } from '../config/env.js';
 import { extractAgentOutputErrorText, extractFinalResponseText } from '../lib/agent-output.js';
 import { allocatePort, releasePort } from '../lib/port-allocator.js';
-import type { RunnerJobIntent, RunnerProvider } from 'shared';
+import type { RunnerAttachment, RunnerJobIntent, RunnerProvider } from 'shared';
 import {
   dispatchRemoteAgentJob,
   getRemoteAgentRunnerUnavailableMessage,
@@ -31,12 +31,8 @@ import {
   hasConnectedRemoteAgentRunner,
   RemoteAgentJobError,
 } from './agent-runners.js';
-import {
-  getAgent,
-  listAgents,
-  prepareAgentWorkspaceAccess,
-} from './agents.js';
-import { workspaceIdsForAgentGroup } from './runner-devices.js';
+import { getAgent, listAgents, prepareAgentWorkspaceAccess } from './agents.js';
+import { runnerRoutingScopesForAgentGroup } from './runner-devices.js';
 import {
   ensureConversationSubfolderWorkspace,
   resolveAgentExecutionRootFromRecord,
@@ -44,7 +40,12 @@ import {
   resolveSubfolderProcessCwd,
 } from './agent-workspaces.js';
 import { listRuntimeAgentEnvVarBindings } from './agent-env-vars.js';
-import { createAgentRun, completeAgentRun, failAgentRunCompletionSideEffect, getAgentRun } from './agent-runs.js';
+import {
+  createAgentRun,
+  completeAgentRun,
+  failAgentRunCompletionSideEffect,
+  getAgentRun,
+} from './agent-runs.js';
 import { getFallbackModelConfig } from './project-settings.js';
 
 const STORAGE_DIR = path.resolve(env.DATA_DIR, 'storage');
@@ -395,6 +396,67 @@ function inferRunnerProvider(model: string): RunnerProvider | null {
   return null;
 }
 
+function getFileSizeBytes(filePath: string): number {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
+function inferAttachmentMimeType(filePath: string, fallback = 'application/octet-stream'): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    '.csv': 'text/csv',
+    '.gif': 'image/gif',
+    '.jpeg': 'image/jpeg',
+    '.jpg': 'image/jpeg',
+    '.json': 'application/json',
+    '.md': 'text/markdown',
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.svg': 'image/svg+xml',
+    '.txt': 'text/plain',
+    '.webp': 'image/webp',
+    '.xml': 'application/xml',
+  };
+  return mimeTypes[ext] ?? fallback;
+}
+
+function isTextLikeMimeType(mimeType: string): boolean {
+  return (
+    mimeType.startsWith('text/') ||
+    mimeType === 'application/json' ||
+    mimeType === 'application/xml' ||
+    mimeType === 'application/javascript'
+  );
+}
+
+function createRunnerAttachmentFromPath(
+  type: RunnerAttachment['type'],
+  attachmentPath: string,
+  source?: {
+    filename?: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    manifest?: Record<string, unknown>;
+  },
+): RunnerAttachment {
+  const mimeType = source?.mimeType ?? inferAttachmentMimeType(attachmentPath);
+  return {
+    type,
+    path: attachmentPath,
+    filename: source?.filename ?? path.basename(attachmentPath),
+    mimeType,
+    sizeBytes: source?.sizeBytes ?? getFileSizeBytes(attachmentPath),
+    textExtraction: {
+      status: isTextLikeMimeType(mimeType) ? 'available' : 'not_applicable',
+      ...(isTextLikeMimeType(mimeType) ? { textPath: attachmentPath } : {}),
+    },
+    ...(source?.manifest ? { manifest: source.manifest } : {}),
+  };
+}
+
 export function buildRunnerJobIntent(params: {
   runId: string;
   agentId: string;
@@ -403,6 +465,7 @@ export function buildRunnerJobIntent(params: {
   prompt: string;
   workDir: string;
   childEnv: Record<string, string | undefined>;
+  attachments?: RunnerAttachment[];
   imagePaths?: string[];
   filePaths?: string[];
 }): RunnerJobIntent {
@@ -427,15 +490,13 @@ export function buildRunnerJobIntent(params: {
       path: params.workDir,
       workspaceId: params.workspaceId,
     },
-    attachments: [
-      ...(params.imagePaths ?? []).map((attachmentPath) => ({
-        type: 'image' as const,
-        path: attachmentPath,
-      })),
-      ...(params.filePaths ?? []).map((attachmentPath) => ({
-        type: 'file' as const,
-        path: attachmentPath,
-      })),
+    attachments: params.attachments ?? [
+      ...(params.imagePaths ?? []).map((attachmentPath) =>
+        createRunnerAttachmentFromPath('image', attachmentPath),
+      ),
+      ...(params.filePaths ?? []).map((attachmentPath) =>
+        createRunnerAttachmentFromPath('file', attachmentPath),
+      ),
     ],
     allowedOperations: {
       tools: [provider],
@@ -1644,9 +1705,7 @@ function findPendingBranchDependencyForAppendPrompt(
 
   if (!continuationParentId) {
     return (
-      [...pendingItems]
-        .reverse()
-        .find((item) => getQueueItemMode(item) === 'append_prompt') ?? null
+      [...pendingItems].reverse().find((item) => getQueueItemMode(item) === 'append_prompt') ?? null
     );
   }
 
@@ -1710,6 +1769,7 @@ function ensureQueuedPromptMessage(
     activateMessagePath(conversationId, parentId);
   }
 
+  const queuedAttachments = parseAttachments(queueItem.attachments);
   const userMessage = saveAgentConversationMessage({
     id:
       typeof queueItem.queuedMessageId === 'string'
@@ -1718,8 +1778,9 @@ function ensureQueuedPromptMessage(
     conversationId,
     direction: 'outbound',
     content: prompt,
-    type: 'text',
+    type: getMessageTypeForAttachments(queuedAttachments),
     metadata: null,
+    attachments: queuedAttachments.length > 0 ? queuedAttachments : null,
     parentId,
     previousUserMessageId:
       typeof queueItem.previousUserMessageId === 'string' ||
@@ -1809,6 +1870,13 @@ function cloneAttachmentRecords(
   return attachments.map((attachment) => ({ ...attachment }));
 }
 
+function getMessageTypeForAttachments(
+  attachments: Array<Record<string, unknown>>,
+): AgentConversationMessageType | 'image' {
+  if (attachments.length === 0) return 'text';
+  return attachments.every((attachment) => attachment.type === 'image') ? 'image' : 'file';
+}
+
 function storageDiskPath(storagePath: string): string {
   return path.resolve(STORAGE_DIR, '.' + storagePath);
 }
@@ -1816,6 +1884,7 @@ function storageDiskPath(storagePath: string): string {
 interface ConversationAttachmentDiskPaths {
   imagePaths: string[];
   filePaths: string[];
+  attachments: RunnerAttachment[];
 }
 
 /** Returns disk paths for attachments across the full active path in chronological order. */
@@ -1831,19 +1900,36 @@ export function getConversationAttachmentDiskPaths(
 
   const imagePaths: string[] = [];
   const filePaths: string[] = [];
+  const runnerAttachments: RunnerAttachment[] = [];
   const seenStoragePaths = new Set<string>();
   for (const message of activePath) {
     const attachments = parseAttachments(message.attachments);
     for (const att of attachments) {
-      if (typeof att.storagePath !== 'string' || seenStoragePaths.has(att.storagePath)) continue;
+      if (typeof att.storagePath !== 'string' || seenStoragePaths.has(att.storagePath)) {
+        continue;
+      }
       seenStoragePaths.add(att.storagePath);
       const diskPath = storageDiskPath(att.storagePath);
       if (!fs.existsSync(diskPath)) continue;
-      if (att.type === 'image') imagePaths.push(diskPath);
+      const type = att.type === 'image' ? 'image' : 'file';
+      const manifest: Record<string, unknown> = { storagePath: att.storagePath };
+      if (typeof att.localPath === 'string') manifest.localPath = att.localPath;
+      if (att.metadata && typeof att.metadata === 'object' && !Array.isArray(att.metadata)) {
+        manifest.metadata = att.metadata;
+      }
+      runnerAttachments.push(
+        createRunnerAttachmentFromPath(type, diskPath, {
+          filename: typeof att.fileName === 'string' ? att.fileName : undefined,
+          mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+          sizeBytes: typeof att.fileSize === 'number' ? att.fileSize : undefined,
+          manifest,
+        }),
+      );
+      if (type === 'image') imagePaths.push(diskPath);
       else filePaths.push(diskPath);
     }
   }
-  return { imagePaths, filePaths };
+  return { imagePaths, filePaths, attachments: runnerAttachments };
 }
 
 function describeAttachmentLabel(attachments: Array<Record<string, unknown>>): string | null {
@@ -1937,7 +2023,9 @@ interface AgentProcessResult {
   runStartedAt: number;
 }
 
-function getAgentProcessError(result: Pick<AgentProcessResult, 'code' | 'stdout' | 'stderr'>): string | null {
+function getAgentProcessError(
+  result: Pick<AgentProcessResult, 'code' | 'stdout' | 'stderr'>,
+): string | null {
   const structuredStdoutError = extractAgentOutputErrorText(result.stdout);
   if (structuredStdoutError) return structuredStdoutError;
 
@@ -1974,6 +2062,7 @@ interface AgentProcessOptions {
   };
   runKey: string;
   prompt: string;
+  attachments?: RunnerAttachment[];
   imagePaths?: string[];
   filePaths?: string[];
   triggerType: TriggerType;
@@ -2198,43 +2287,6 @@ function resolveFinalMessageForCompletedRun(
   return null;
 }
 
-/** Matches `POST /api/cards/:id/comments` body max length. */
-const MAX_CARD_AUTO_COMMENT_LENGTH = 5000;
-
-/**
- * When a card-assignment run finishes successfully, persist the same final text
- * users see on the agent run (stdout extraction) as a card comment — parallel to
- * chat runs saving `saveAgentRunResponse`. Uses `agentRunId` for idempotency.
- */
-export function persistCompletedCardAssignmentComment(params: {
-  cardId: string;
-  agentId: string;
-  runId: string;
-  runStartedAtMs: number;
-  stdout: string;
-}): void {
-  const { cardId, agentId, runId, runStartedAtMs, stdout } = params;
-  const dupByRun = store
-    .getAll('cardComments')
-    .filter((r: Record<string, unknown>) => r.cardId === cardId && r.agentRunId === runId);
-  if (dupByRun.length > 0) return;
-
-  let content = extractFinalResponseText(stdout).trim();
-  if (!content) content = '(empty response)';
-  if (content.length > MAX_CARD_AUTO_COMMENT_LENGTH) {
-    content = `${content.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 1)}…`;
-  }
-
-  void runStartedAtMs;
-
-  store.insert('cardComments', {
-    cardId,
-    authorId: agentId,
-    content,
-    agentRunId: runId,
-  });
-}
-
 async function persistFailedCardAssignmentStartupRun(params: {
   agentId: string;
   agent: AgentProcessOptions['agent'];
@@ -2290,7 +2342,10 @@ function hasLivePersistedChatRun(
       ? { agentId, conversationId }
       : { agentId, conversationId, targetMessageId },
   );
-  return runs.some((run) => run.executor === 'remote');
+  // Any persisted chat run still marked running should keep the conversation "busy" so the
+  // Agents sidebar matches /agent-runs and the chat view (which lists running rows without
+  // filtering on executor). Legacy rows may omit `executor`; schema default is remote.
+  return runs.length > 0;
 }
 
 function hasRunningProcessForTargetMessage(
@@ -2331,6 +2386,20 @@ function isRunMarkedKilledByUser(runId: string | null): boolean {
   return run.killedByUser === true || run.errorMessage === 'Killed by user';
 }
 
+function isCurrentRunKilledByUser(runId: string | null, errorMessage?: string | null): boolean {
+  return isRunMarkedKilledByUser(runId) || errorMessage === 'Killed by user';
+}
+
+function shouldAttemptFallbackRetry(options: {
+  runId: string | null;
+  errorMessage?: string | null;
+  isFallback: boolean;
+  hasFallback: boolean;
+}): boolean {
+  if (options.isFallback || !options.hasFallback) return false;
+  return !isCurrentRunKilledByUser(options.runId, options.errorMessage);
+}
+
 function listConversationQueueItems(
   agentId: string,
   conversationId: string,
@@ -2366,7 +2435,17 @@ function isPendingQueueItem(item: Record<string, unknown>): boolean {
   return item.status === 'queued' || item.status === 'processing';
 }
 
+function reconcileTerminalProcessingExecutionItems(agentId: string, conversationId: string) {
+  const processingItems = listConversationQueueItems(agentId, conversationId).filter(
+    (item) => item.status === 'processing',
+  );
+  for (const item of processingItems) {
+    recoverInterruptedQueueItemFromRun(item);
+  }
+}
+
 function hasPendingExecutionItems(agentId: string, conversationId: string): boolean {
+  reconcileTerminalProcessingExecutionItems(agentId, conversationId);
   return listConversationQueueItems(agentId, conversationId).some((item) =>
     isPendingQueueItem(item),
   );
@@ -2484,13 +2563,27 @@ function buildRemoteRunnerEnv(childEnv: Record<string, string | undefined>) {
   return safeEnv;
 }
 
+function resolveRemoteRunnerRoutingScope(agent: {
+  groupId?: string | null;
+}): { userId: string; workspaceId: string } | null {
+  const scopes = runnerRoutingScopesForAgentGroup(agent.groupId);
+  return scopes[0] ?? null;
+}
+
 function resolveRemoteRunnerWorkspaceId(agent: { groupId?: string | null }): string | null {
-  return workspaceIdsForAgentGroup(agent.groupId)[0] ?? null;
+  return resolveRemoteRunnerRoutingScope(agent)?.workspaceId ?? null;
 }
 
 function resolveAgentRemoteRunnerWorkspaceId(agentId: string): string | null {
   const agent = getAgent(agentId);
   return agent ? resolveRemoteRunnerWorkspaceId(agent) : null;
+}
+
+function resolveAgentRemoteRunnerRoutingScope(
+  agentId: string,
+): { userId: string; workspaceId: string } | null {
+  const agent = getAgent(agentId);
+  return agent ? resolveRemoteRunnerRoutingScope(agent) : null;
 }
 
 function resolveAgentRemoteRunnerProvider(agentId: string): RunnerProvider | null {
@@ -2528,13 +2621,21 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
   let allocatedPort: number | null = null;
 
   try {
-    const remoteWorkspaceId = resolveRemoteRunnerWorkspaceId(options.agent);
+    const routingScope = resolveRemoteRunnerRoutingScope(options.agent);
+    const remoteWorkspaceId = routingScope?.workspaceId ?? null;
+    const remoteRunnerUserId = routingScope?.userId ?? null;
     const provider = inferRunnerProvider(options.agent.model);
     if (!provider) {
       throw new Error(`Unsupported remote runner model/provider: ${options.agent.model}`);
     }
-    if (!remoteWorkspaceId || !hasAvailableRemoteAgentRunner(remoteWorkspaceId, provider)) {
-      throw new Error(getRemoteAgentRunnerUnavailableMessage(remoteWorkspaceId, provider));
+    if (
+      !remoteWorkspaceId ||
+      !remoteRunnerUserId ||
+      !hasAvailableRemoteAgentRunner(remoteRunnerUserId, remoteWorkspaceId, provider)
+    ) {
+      throw new Error(
+        getRemoteAgentRunnerUnavailableMessage(remoteRunnerUserId, remoteWorkspaceId, provider),
+      );
     }
 
     const workDir = resolveAgentChatProcessWorkingDirectory(
@@ -2599,12 +2700,14 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
       prompt: options.prompt,
       workDir,
       childEnv: buildRemoteRunnerEnv(childEnv),
+      attachments: options.attachments,
       imagePaths: options.imagePaths,
       filePaths: options.filePaths,
     });
 
     void dispatchRemoteAgentJob(
       {
+        userId: remoteRunnerUserId,
         workspaceId: remoteWorkspaceId,
         intent: runnerIntent,
       },
@@ -2649,9 +2752,10 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
         remoteRunKeys.delete(options.runKey);
         releasePort(projectPort);
         releaseConcurrencySlot();
-        const resultLogs = err instanceof RemoteAgentJobError
-          ? { stdout: err.stdout, stderr: err.stderr || err.message }
-          : { stderr: err.message };
+        const resultLogs =
+          err instanceof RemoteAgentJobError
+            ? { stdout: err.stdout, stderr: err.stderr || err.message }
+            : { stderr: err.message };
         void completeAgentRun(runId, err.message, resultLogs).catch((e) => {
           console.error(`[agent-chat] completeAgentRun failed for ${runId}:`, e);
         });
@@ -2823,6 +2927,8 @@ function spawnChatProcess(
         agent: effectiveAgent!,
         runKey: key,
         prompt: fullPrompt,
+        attachments:
+          attachmentPaths.attachments.length > 0 ? attachmentPaths.attachments : undefined,
         imagePaths: hasImages ? attachmentPaths.imagePaths : undefined,
         filePaths: hasFiles ? attachmentPaths.filePaths : undefined,
         triggerType: 'chat',
@@ -2905,10 +3011,23 @@ function spawnChatProcess(
           callbacks.onDone(msg);
         },
         onSpawnError: (err) => {
+          if (isCurrentRunKilledByUser(spawnedRunId, err.message)) {
+            callbacks.onError('Killed by user');
+            return;
+          }
+
           // Primary model failed before runner execution completed — attempt fallback
           if (!isFallback) {
             const fallback = globalFallback;
-            if (fallback) {
+            if (
+              fallback &&
+              shouldAttemptFallbackRetry({
+                runId: spawnedRunId,
+                errorMessage: err.message,
+                isFallback,
+                hasFallback: true,
+              })
+            ) {
               console.log(
                 `[agent-chat] Primary model runner dispatch failed for agent ${agentId}: ${err.message}. Retrying with fallback model "${fallback.model}"...`,
               );
@@ -2931,6 +3050,10 @@ function spawnChatProcess(
       callbacks.onError((error as Error).message);
     });
 }
+
+export const __agentChatTestUtils = {
+  shouldAttemptFallbackRetry,
+};
 
 /**
  * Returns a copy of the agent config with the model overridden by the global fallback model.
@@ -2984,7 +3107,7 @@ export function executePrompt(
       agentId,
       conversationId,
       fullPrompt,
-      { imagePaths: [], filePaths: [] },
+      { imagePaths: [], filePaths: [], attachments: [] },
       wrapChatExecuteCallbacks({
         onRunCreated: options.onRunCreated,
         onFallbackStarted: options.onFallbackStarted,
@@ -3081,9 +3204,13 @@ export function canRespondToMessageStartImmediately(
   conversationId: string,
   targetMessageId: string,
 ): boolean {
-  const workspaceId = resolveAgentRemoteRunnerWorkspaceId(agentId);
+  const scope = resolveAgentRemoteRunnerRoutingScope(agentId);
   const provider = resolveAgentRemoteRunnerProvider(agentId);
-  if (!workspaceId || !provider || !hasAvailableRemoteAgentRunner(workspaceId, provider)) {
+  if (
+    !scope ||
+    !provider ||
+    !hasAvailableRemoteAgentRunner(scope.userId, scope.workspaceId, provider)
+  ) {
     return false;
   }
   if (hasRunningProcessForTargetMessage(agentId, conversationId, targetMessageId)) {
@@ -3459,9 +3586,13 @@ function canStartQueuedItemNow(
     return false;
   }
 
-  const workspaceId = resolveAgentRemoteRunnerWorkspaceId(agentId);
+  const scope = resolveAgentRemoteRunnerRoutingScope(agentId);
   const provider = resolveAgentRemoteRunnerProvider(agentId);
-  if (!workspaceId || !provider || !hasAvailableRemoteAgentRunner(workspaceId, provider)) {
+  if (
+    !scope ||
+    !provider ||
+    !hasAvailableRemoteAgentRunner(scope.userId, scope.workspaceId, provider)
+  ) {
     return false;
   }
 
@@ -3552,7 +3683,8 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
                 ? (readyItem.targetMessageId as string)
                 : null;
 
-            if (mode === 'append_prompt' && !prompt) {
+            const hasQueuedAttachments = parseAttachments(readyItem.attachments).length > 0;
+            if (mode === 'append_prompt' && !prompt && !hasQueuedAttachments) {
               store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
                 status: 'failed',
                 completedAt: new Date().toISOString(),
@@ -3761,13 +3893,19 @@ export function enqueueAgentPrompt(
   const mode = options.mode ?? 'append_prompt';
   const runnerWorkspaceId = getAgentRunnerWorkspaceIdOrThrow(agentId);
   const runnerProvider = getAgentRunnerProviderOrThrow(agentId);
+  const runnerScope = resolveAgentRemoteRunnerRoutingScope(agentId);
   if (
-    !hasConnectedRemoteAgentRunner(runnerWorkspaceId) ||
-    !hasAvailableRemoteAgentRunner(runnerWorkspaceId, runnerProvider)
+    !runnerScope ||
+    !hasConnectedRemoteAgentRunner(runnerScope.userId, runnerWorkspaceId) ||
+    !hasAvailableRemoteAgentRunner(runnerScope.userId, runnerWorkspaceId, runnerProvider)
   ) {
     throw AgentChatError.conflict(
       'agent_runner_unavailable',
-      getRemoteAgentRunnerUnavailableMessage(runnerWorkspaceId, runnerProvider),
+      getRemoteAgentRunnerUnavailableMessage(
+        runnerScope?.userId,
+        runnerWorkspaceId,
+        runnerProvider,
+      ),
     );
   }
   if (!trimmedPrompt && mode !== 'respond_to_message') {
@@ -3848,6 +3986,48 @@ export function enqueueAgentPrompt(
   };
 }
 
+export interface EnqueueAgentResponseToMessageResult extends EnqueueAgentPromptResult {
+  targetMessageId: string;
+  willQueueBehind: boolean;
+}
+
+export function enqueueAgentResponseToMessage(
+  agentId: string,
+  conversationId: string,
+  options: { targetMessageId?: string | null } = {},
+): EnqueueAgentResponseToMessageResult {
+  const targetMessageId =
+    options.targetMessageId ??
+    (() => {
+      const activePath = getActiveMessagePath(conversationId);
+      const leaf = activePath.length > 0 ? activePath[activePath.length - 1] : null;
+      return typeof leaf?.id === 'string' ? (leaf.id as string) : null;
+    })();
+
+  if (!targetMessageId) {
+    throw AgentChatError.badRequest(
+      'response_target_missing',
+      'Conversation has no message to respond to',
+    );
+  }
+
+  const willQueueBehind = !canRespondToMessageStartImmediately(
+    agentId,
+    conversationId,
+    targetMessageId,
+  );
+  const queued = enqueueAgentPrompt(agentId, conversationId, '', {
+    mode: 'respond_to_message',
+    targetMessageId,
+  });
+
+  return {
+    ...queued,
+    targetMessageId,
+    willQueueBehind,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Queue management (view / edit / delete / reorder)
 // ---------------------------------------------------------------------------
@@ -3859,6 +4039,8 @@ export function getConversationQueueItems(agentId: string, conversationId: strin
 }
 
 export function getConversationExecutionItems(agentId: string, conversationId: string) {
+  reconcileTerminalProcessingExecutionItems(agentId, conversationId);
+
   return listConversationQueueItems(agentId, conversationId).map(sanitizeQueueItemForChat);
 }
 
@@ -3866,7 +4048,11 @@ export function updateQueueItem(
   itemId: string,
   agentId: string,
   conversationId: string,
-  updates: { prompt?: string },
+  updates: {
+    prompt?: string;
+    attachments?: unknown[] | null;
+    keepStoragePaths?: string[] | null;
+  },
 ) {
   const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId);
   if (!item || item.agentId !== agentId || item.conversationId !== conversationId) {
@@ -3879,21 +4065,110 @@ export function updateQueueItem(
     );
   }
 
+  const mode = getQueueItemMode(item);
   const patch: Record<string, unknown> = {};
+  const hasPromptUpdate = updates.prompt !== undefined;
+  const hasAttachmentUpdate =
+    Array.isArray(updates.attachments) || Array.isArray(updates.keepStoragePaths);
+  const trimmedPrompt = hasPromptUpdate ? (updates.prompt ?? '').trim() : null;
+  let targetMessageId: string | null = null;
+
   if (updates.prompt !== undefined) {
-    if (item.mode === 'respond_to_message') {
-      throw AgentChatError.badRequest(
-        'queue_item_prompt_immutable',
-        'Branch response items do not support prompt edits',
-      );
+    if (mode === 'append_prompt') {
+      patch.prompt = trimmedPrompt;
     }
-    const trimmed = updates.prompt.trim();
-    if (!trimmed) {
-      throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
-    }
-    patch.prompt = trimmed;
   }
-  if (Object.keys(patch).length === 0) return item;
+
+  if (mode === 'append_prompt') {
+    targetMessageId =
+      typeof item.queuedMessageId === 'string' ? (item.queuedMessageId as string) : null;
+  } else if (hasPromptUpdate || hasAttachmentUpdate) {
+    targetMessageId =
+      typeof item.targetMessageId === 'string' ? (item.targetMessageId as string) : null;
+    if (!targetMessageId) {
+      throw AgentChatError.notFound('queue_target_missing', 'Queued message target is missing');
+    }
+  }
+
+  const targetMessage = targetMessageId ? store.getById('messages', targetMessageId) : null;
+  if (mode === 'respond_to_message' && (hasPromptUpdate || hasAttachmentUpdate) && !targetMessage) {
+    throw AgentChatError.notFound('queue_target_missing', 'Queued message target is missing');
+  }
+  if (targetMessageId && targetMessage && targetMessage.conversationId !== conversationId) {
+    throw AgentChatError.notFound('queue_target_missing', 'Queued message target is missing');
+  }
+  if (targetMessage && targetMessage.direction !== 'outbound') {
+    throw AgentChatError.badRequest(
+      'queue_target_not_editable',
+      'Queued item attachments can only be updated on user messages',
+    );
+  }
+
+  const originalAttachments = targetMessage
+    ? cloneAttachmentRecords(parseAttachments(targetMessage.attachments))
+    : cloneAttachmentRecords(parseAttachments(item.attachments));
+  const keepStoragePathSet = Array.isArray(updates.keepStoragePaths)
+    ? new Set(updates.keepStoragePaths)
+    : null;
+  const retainedAttachments =
+    keepStoragePathSet === null
+      ? originalAttachments
+      : originalAttachments.filter(
+          (attachment) =>
+            typeof attachment.storagePath === 'string' &&
+            keepStoragePathSet.has(attachment.storagePath),
+        );
+  const appendedAttachments = Array.isArray(updates.attachments)
+    ? cloneAttachmentRecords(updates.attachments as Array<Record<string, unknown>>)
+    : [];
+  const combinedAttachments = hasAttachmentUpdate
+    ? [...retainedAttachments, ...appendedAttachments]
+    : originalAttachments;
+  if (combinedAttachments.length > MAX_CHAT_MESSAGE_IMAGES) {
+    throw AgentChatError.badRequest(
+      'message_attachment_limit_exceeded',
+      `A message can contain up to ${MAX_CHAT_MESSAGE_IMAGES} attachments`,
+    );
+  }
+
+  const nextContent =
+    trimmedPrompt !== null
+      ? trimmedPrompt
+      : targetMessage && typeof targetMessage.content === 'string'
+        ? targetMessage.content.trim()
+        : typeof item.prompt === 'string'
+          ? item.prompt.trim()
+          : '';
+  if (!nextContent && combinedAttachments.length === 0) {
+    throw AgentChatError.badRequest(
+      'queued_message_content_required',
+      'Queued message content or attachments are required',
+    );
+  }
+
+  const normalizedAttachments = combinedAttachments.length > 0 ? combinedAttachments : null;
+  if (hasAttachmentUpdate || (!targetMessage && normalizedAttachments)) {
+    patch.attachments = normalizedAttachments;
+  }
+
+  let updatedMessage: Record<string, unknown> | null = null;
+  if (targetMessage) {
+    const messagePatch: Record<string, unknown> = {};
+    if (trimmedPrompt !== null) {
+      messagePatch.content = trimmedPrompt;
+    }
+    if (hasAttachmentUpdate) {
+      messagePatch.attachments = normalizedAttachments;
+      messagePatch.type = getMessageTypeForAttachments(combinedAttachments);
+    }
+    if (Object.keys(messagePatch).length > 0) {
+      updatedMessage = store.update('messages', targetMessageId!, messagePatch) ?? null;
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return updatedMessage ? (store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId) ?? item) : item;
+  }
 
   return store.update(AGENT_CHAT_QUEUE_COLLECTION, itemId, patch);
 }
@@ -4145,10 +4420,22 @@ export function executeCardTask(
             spawnedRunId = runId;
             callbacks.onRunCreated?.(runId);
           },
-          onExit: ({ code, stdout, stderr, runStartedAt }) => {
+          onExit: ({ code, stdout, stderr }) => {
+            if (isCurrentRunKilledByUser(spawnedRunId)) {
+              callbacks.onError('Killed by user');
+              return;
+            }
+
             const terminalRunError = getTerminalRunErrorMessage(spawnedRunId);
             if (terminalRunError) {
-              if (!isFallback) {
+              if (
+                shouldAttemptFallbackRetry({
+                  runId: spawnedRunId,
+                  errorMessage: terminalRunError,
+                  isFallback,
+                  hasFallback: Boolean(globalFallback),
+                })
+              ) {
                 const fallbackAgent = applyFallbackModel(agent, globalFallback);
                 if (fallbackAgent) {
                   console.log(
@@ -4189,22 +4476,25 @@ export function executeCardTask(
               return;
             }
 
-            if (spawnedRunId && !isRunMarkedKilledByUser(spawnedRunId)) {
-              persistCompletedCardAssignmentComment({
-                cardId: card.id,
-                agentId,
-                runId: spawnedRunId,
-                runStartedAtMs: runStartedAt,
-                stdout,
-              });
-            }
-
             callbacks.onDone();
           },
           onSpawnError: (err) => {
+            if (isCurrentRunKilledByUser(spawnedRunId, err.message)) {
+              callbacks.onError('Killed by user');
+              return;
+            }
+
             if (!isFallback) {
               const fallbackAgent = applyFallbackModel(agent, globalFallback);
-              if (fallbackAgent) {
+              if (
+                fallbackAgent &&
+                shouldAttemptFallbackRetry({
+                  runId: spawnedRunId,
+                  errorMessage: err.message,
+                  isFallback,
+                  hasFallback: true,
+                })
+              ) {
                 console.log(
                   `[agent-chat] Card task ${card.id} primary model runner dispatch failed: ${err.message}. Retrying with fallback model "${fallbackAgent.model}"...`,
                 );

@@ -1,10 +1,36 @@
-export const RUNNER_PROTOCOL_VERSION = '1.0';
+export const RUNNER_PROTOCOL_VERSION = '1.1';
 
 export type RunnerProtocolVersion = typeof RUNNER_PROTOCOL_VERSION;
 export type RunnerAgentKind = 'dev_agent';
 export type RunnerProvider = 'claude' | 'codex' | 'qwen' | 'cursor' | 'opencode';
 export type RunnerApprovalMode = 'none' | 'on_request' | 'never' | 'dangerous';
 export type RunnerOutputStream = 'stdout' | 'stderr';
+
+export type RunnerAttachmentType = 'image' | 'file';
+export type RunnerAttachmentTextExtractionStatus =
+  | 'available'
+  | 'not_applicable'
+  | 'failed'
+  | 'truncated'
+  | 'unknown';
+
+export interface RunnerAttachmentTextExtraction {
+  status: RunnerAttachmentTextExtractionStatus;
+  textPath?: string;
+  charCount?: number;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface RunnerAttachment {
+  type: RunnerAttachmentType;
+  path: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  textExtraction: RunnerAttachmentTextExtraction;
+  manifest?: Record<string, unknown>;
+}
 
 export interface RunnerCapabilities {
   protocolVersion: RunnerProtocolVersion;
@@ -44,7 +70,7 @@ export interface RunnerJobIntent {
     path: string;
     workspaceId?: string | null;
   };
-  attachments?: Array<{ type: 'image' | 'file'; path: string }>;
+  attachments?: RunnerAttachment[];
   allowedOperations: {
     tools: RunnerProvider[];
     approvalMode: RunnerApprovalMode;
@@ -77,7 +103,12 @@ export type RunnerRejectionCode =
 
 export type ServerRunnerMessage =
   | { type: 'server_hello'; protocolVersion: RunnerProtocolVersion; runnerId: string }
-  | { type: 'job_offer'; protocolVersion: RunnerProtocolVersion; jobId: string; job: RunnerJobIntent }
+  | {
+      type: 'job_offer';
+      protocolVersion: RunnerProtocolVersion;
+      jobId: string;
+      job: RunnerJobIntent;
+    }
   | { type: 'cancel'; protocolVersion: RunnerProtocolVersion; jobId: string; runId: string };
 
 export type RunnerServerMessage =
@@ -159,8 +190,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+function isRunnerProvider(value: unknown): value is RunnerProvider {
+  return (
+    value === 'claude' ||
+    value === 'codex' ||
+    value === 'qwen' ||
+    value === 'cursor' ||
+    value === 'opencode'
+  );
+}
+
+function isRunnerProviderArray(value: unknown): value is RunnerProvider[] {
+  return Array.isArray(value) && value.every(isRunnerProvider);
+}
+
+function isRunnerApprovalMode(value: unknown): value is RunnerApprovalMode {
+  return value === 'none' || value === 'on_request' || value === 'never' || value === 'dangerous';
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidRunnerAttachmentTextExtraction(
+  value: unknown,
+): value is RunnerAttachmentTextExtraction {
+  if (!isRecord(value)) return false;
+  if (
+    value.status !== 'available' &&
+    value.status !== 'not_applicable' &&
+    value.status !== 'failed' &&
+    value.status !== 'truncated' &&
+    value.status !== 'unknown'
+  ) {
+    return false;
+  }
+  return (
+    (value.textPath === undefined || typeof value.textPath === 'string') &&
+    (value.charCount === undefined || isNonNegativeSafeInteger(value.charCount)) &&
+    (value.truncated === undefined || typeof value.truncated === 'boolean') &&
+    (value.error === undefined || typeof value.error === 'string')
+  );
+}
+
+function isValidRunnerAttachment(value: unknown): value is RunnerAttachment {
+  if (!isRecord(value)) return false;
+  if (
+    (value.type !== 'image' && value.type !== 'file') ||
+    typeof value.path !== 'string' ||
+    typeof value.filename !== 'string' ||
+    typeof value.mimeType !== 'string' ||
+    !isNonNegativeSafeInteger(value.sizeBytes) ||
+    !isValidRunnerAttachmentTextExtraction(value.textExtraction)
+  ) {
+    return false;
+  }
+  return value.manifest === undefined || isRecord(value.manifest);
+}
+
+function isRunnerAttachmentArray(value: unknown): value is RunnerAttachment[] {
+  return Array.isArray(value) && value.every(isValidRunnerAttachment);
 }
 
 export function parseRunnerJobIntent(value: unknown): RunnerJobIntent | null {
@@ -169,7 +258,7 @@ export function parseRunnerJobIntent(value: unknown): RunnerJobIntent | null {
     typeof value.runId !== 'string' ||
     typeof value.agentId !== 'string' ||
     value.agentKind !== 'dev_agent' ||
-    typeof value.provider !== 'string' ||
+    !isRunnerProvider(value.provider) ||
     typeof value.prompt !== 'string' ||
     !isRecord(value.modelPreference) ||
     typeof value.modelPreference.displayName !== 'string' ||
@@ -177,12 +266,13 @@ export function parseRunnerJobIntent(value: unknown): RunnerJobIntent | null {
     value.workspace.type !== 'local_path' ||
     typeof value.workspace.path !== 'string' ||
     !isRecord(value.allowedOperations) ||
-    !isStringArray(value.allowedOperations.tools) ||
-    typeof value.allowedOperations.approvalMode !== 'string' ||
+    !isRunnerProviderArray(value.allowedOperations.tools) ||
+    !isRunnerApprovalMode(value.allowedOperations.approvalMode) ||
     typeof value.allowedOperations.env !== 'boolean' ||
     typeof value.allowedOperations.secrets !== 'boolean' ||
     typeof value.allowedOperations.network !== 'boolean' ||
-    typeof value.allowedOperations.shell !== 'boolean'
+    typeof value.allowedOperations.shell !== 'boolean' ||
+    (value.attachments !== undefined && !isRunnerAttachmentArray(value.attachments))
   ) {
     return null;
   }
@@ -195,7 +285,11 @@ export function parseServerRunnerMessage(value: unknown): ServerRunnerMessage | 
     if (value.type === 'job_offer' && typeof value.jobId === 'string') {
       return value as ServerRunnerMessage;
     }
-    if (value.type === 'cancel' && typeof value.jobId === 'string' && typeof value.runId === 'string') {
+    if (
+      value.type === 'cancel' &&
+      typeof value.jobId === 'string' &&
+      typeof value.runId === 'string'
+    ) {
       return value as ServerRunnerMessage;
     }
     return null;
@@ -210,7 +304,11 @@ export function parseServerRunnerMessage(value: unknown): ServerRunnerMessage | 
   ) {
     return value as ServerRunnerMessage;
   }
-  if (value.type === 'cancel' && typeof value.jobId === 'string' && typeof value.runId === 'string') {
+  if (
+    value.type === 'cancel' &&
+    typeof value.jobId === 'string' &&
+    typeof value.runId === 'string'
+  ) {
     return value as ServerRunnerMessage;
   }
   return null;
@@ -229,7 +327,11 @@ export function parseRunnerServerMessage(value: unknown): RunnerServerMessage | 
   ) {
     return value as RunnerServerMessage;
   }
-  if (value.type === 'job_accepted' && typeof value.jobId === 'string' && typeof value.runId === 'string') {
+  if (
+    value.type === 'job_accepted' &&
+    typeof value.jobId === 'string' &&
+    typeof value.runId === 'string'
+  ) {
     return value as RunnerServerMessage;
   }
   if (
@@ -254,6 +356,17 @@ export function parseRunnerServerMessage(value: unknown): RunnerServerMessage | 
     typeof value.jobId === 'string' &&
     typeof value.runId === 'string' &&
     typeof value.text === 'string'
+  ) {
+    return value as RunnerServerMessage;
+  }
+  if (
+    value.type === 'artifact' &&
+    typeof value.jobId === 'string' &&
+    typeof value.runId === 'string' &&
+    isRecord(value.artifact) &&
+    typeof value.artifact.name === 'string' &&
+    typeof value.artifact.path === 'string' &&
+    (value.artifact.mimeType === undefined || typeof value.artifact.mimeType === 'string')
   ) {
     return value as RunnerServerMessage;
   }

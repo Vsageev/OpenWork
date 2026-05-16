@@ -57,6 +57,13 @@
       "when": 1778620800000,
       "tag": "0007_remote_runner_required",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778841600000,
+      "tag": "0008_remove_auto_dev_cards_board",
+      "breakpoints": true
     }
   ]
 }

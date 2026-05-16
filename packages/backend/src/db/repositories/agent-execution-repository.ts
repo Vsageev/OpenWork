@@ -38,6 +38,7 @@ export type AgentRunListFilter = {
   agentId?: string;
   triggerType?: string;
   conversationId?: string;
+  cardId?: string;
 };
 
 export function findAgentRunsByListFilter(filter: AgentRunListFilter): StoreRecord[] {
@@ -46,6 +47,7 @@ export function findAgentRunsByListFilter(filter: AgentRunListFilter): StoreReco
     if (filter.agentId && r.agentId !== filter.agentId) return false;
     if (filter.triggerType && r.triggerType !== filter.triggerType) return false;
     if (filter.conversationId && r.conversationId !== filter.conversationId) return false;
+    if (filter.cardId && r.cardId !== filter.cardId) return false;
     return true;
   });
 }
@@ -279,6 +281,7 @@ export async function findAgentRunsByListFilterPaged(
   if (filter.conversationId) {
     conditions.push(eq(schema.agentRuns.conversationId, filter.conversationId));
   }
+  if (filter.cardId) conditions.push(eq(schema.agentRuns.cardId, filter.cardId));
 
   const where =
     conditions.length === 0 ? undefined : conditions.length === 1 ? conditions[0] : and(...conditions);

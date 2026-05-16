@@ -79,7 +79,7 @@ pnpm --filter backend db:studio
 
 ### Fresh SQL database (bootstrap)
 
-With `DATABASE_URL` set, `db:bootstrap` applies Drizzle migrations to the target database, then seeds default users, settings, collection, board, and workspace. You can still run `db:migrate` separately in CI or when you only need the schema.
+With `DATABASE_URL` set, `db:bootstrap` applies Drizzle migrations to the target database, then seeds default users, settings, collection, and workspace. You can still run `db:migrate` separately in CI or when you only need the schema.
 
 ```bash
 DATABASE_URL=postgres://openwork:openwork@localhost:5432/openwork \

@@ -13,7 +13,13 @@ const checks = [
   },
   {
     name: 'sidebar/chat state contract',
-    files: ['packages/frontend/src/pages/agent-chat-view-model.test.ts'],
+    files: [
+      'packages/frontend/src/pages/agent-chat-view-model.test.ts',
+      'packages/frontend/src/pages/agent-chat-view-model.contract.test.ts',
+      'packages/frontend/src/pages/AgentsPage.component-contract.test.ts',
+      'packages/frontend/src/pages/AgentsPage.layout-contract.test.ts',
+      'packages/frontend/src/pages/AgentsPage.manual-qa-fixtures.test.ts',
+    ],
   },
   {
     name: 'runner protocol contract',

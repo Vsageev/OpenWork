@@ -1230,30 +1230,52 @@
 }
 
 .batchProgressBar {
+  display: flex;
   height: 6px;
   border-radius: 3px;
   background: var(--color-surface);
   overflow: hidden;
-  position: relative;
 }
 
-.batchProgressFill {
-  position: absolute;
-  top: 0;
-  left: 0;
+.batchSegCompleted {
   height: 100%;
-  border-radius: 3px;
+  flex-shrink: 0;
   background: var(--color-success);
   transition: width 0.4s ease;
 }
 
-.batchProgressFailed {
-  position: absolute;
-  top: 0;
-  right: 0;
+.batchSegFailed {
   height: 100%;
+  flex-shrink: 0;
   background: var(--color-error);
-  opacity: 0.6;
+  transition: width 0.4s ease;
+}
+
+.batchSegCancelled {
+  height: 100%;
+  flex-shrink: 0;
+  background: var(--color-text-tertiary);
+  opacity: 0.35;
+  transition: width 0.4s ease;
+}
+
+.batchSegSkipped {
+  height: 100%;
+  flex-shrink: 0;
+  background: var(--color-warning);
+  transition: width 0.4s ease;
+}
+
+@keyframes batchSegProcessingPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.batchSegProcessing {
+  height: 100%;
+  flex-shrink: 0;
+  background: #7c3aed;
+  animation: batchSegProcessingPulse 1.5s ease-in-out infinite;
   transition: width 0.4s ease;
 }
 
@@ -1283,7 +1305,11 @@
 }
 
 .batchStatProcessing {
-  color: var(--color-info);
+  color: #7c3aed;
+}
+
+.batchStatDetail .batchStatProcessing {
+  color: #7c3aed;
 }
 
 .batchStatFailed {

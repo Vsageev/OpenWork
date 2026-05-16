@@ -16,7 +16,7 @@ import {
   extractFinalResponseText,
   formatAgentRunErrorMessage,
 } from '../lib/agent-output.js';
-import { cancelRemoteAgentRun } from './agent-runners.js';
+import { cancelRemoteAgentRun, isRemoteAgentRunPending } from './agent-runners.js';
 
 type TriggerType = 'chat' | 'cron_job' | 'card_assignment';
 type RunStatus = 'queued' | 'running' | 'completed' | 'error';
@@ -49,7 +49,53 @@ interface CreateAgentRunParams {
   status?: Extract<RunStatus, 'queued' | 'running'>;
 }
 
+export interface AgentRunLifecycleEvent {
+  at: string;
+  event: string;
+  message?: string;
+  runnerId?: string;
+  jobId?: string;
+  pid?: number | null;
+  code?: number | null;
+  signal?: string | null;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+}
+
+const MAX_RUN_LIFECYCLE_EVENTS = 80;
+
+function parseRunLifecycle(run: Record<string, unknown>): AgentRunLifecycleEvent[] {
+  const lifecycle = run.runnerLifecycle;
+  if (!lifecycle || typeof lifecycle !== 'object' || Array.isArray(lifecycle)) return [];
+  const events = (lifecycle as Record<string, unknown>).events;
+  if (!Array.isArray(events)) return [];
+  return events.filter((event): event is AgentRunLifecycleEvent =>
+    Boolean(event && typeof event === 'object' && typeof (event as Record<string, unknown>).event === 'string'),
+  );
+}
+
+export function appendAgentRunLifecycleEvent(
+  runId: string,
+  event: Omit<AgentRunLifecycleEvent, 'at'> & { at?: string },
+): Record<string, unknown> | null {
+  const run = store.getById('agent_runs', runId);
+  if (!run) return null;
+  const nextEvent: AgentRunLifecycleEvent = {
+    ...event,
+    at: event.at ?? new Date().toISOString(),
+  };
+  const events = [...parseRunLifecycle(run), nextEvent].slice(-MAX_RUN_LIFECYCLE_EVENTS);
+  return store.update('agent_runs', runId, {
+    runnerLifecycle: {
+      events,
+      lastEvent: nextEvent.event,
+      lastEventAt: nextEvent.at,
+    },
+  });
+}
+
 export function createAgentRun(params: CreateAgentRunParams): Record<string, unknown> {
+  const now = new Date().toISOString();
   return store.insert('agent_runs', {
     ...(params.id ? { id: params.id } : {}),
     agentId: params.agentId,
@@ -72,7 +118,18 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
     responseParentId: params.responseParentId ?? null,
     errorMessage: null,
     responseText: null,
-    startedAt: new Date().toISOString(),
+    runnerLifecycle: {
+      events: [
+        {
+          at: now,
+          event: 'run_record_created',
+          message: `Agent run record created with status ${params.status ?? 'running'}`,
+        },
+      ],
+      lastEvent: 'run_record_created',
+      lastEventAt: now,
+    },
+    startedAt: now,
     finishedAt: null,
     durationMs: null,
   });
@@ -170,11 +227,6 @@ function buildCardAssignmentTerminalComment(params: {
   patch: Record<string, unknown>,
 }): string {
   const { run, patch } = params;
-  const status = String(patch.status ?? run.status ?? 'unknown');
-  const runId = String(run.id ?? '');
-  const cardId = String(run.cardId ?? '');
-  const agentId = String(run.agentId ?? '');
-  const triggerType = String(run.triggerType ?? 'card_assignment');
   const responseText = typeof patch.responseText === 'string' ? patch.responseText.trim() : '';
   const stdout = typeof patch.stdout === 'string' ? patch.stdout : '';
   const stderr = typeof patch.stderr === 'string' ? patch.stderr.trim() : '';
@@ -197,41 +249,32 @@ function buildCardAssignmentTerminalComment(params: {
     summary = `${summary.slice(0, MAX_CARD_AUTO_COMMENT_LENGTH - 3)}...`;
   }
 
-  return [
-    `Agent run terminal status: ${status}`,
-    `Run ID: ${runId}`,
-    `Card ID: ${cardId}`,
-    `Agent ID: ${agentId}`,
-    `Trigger type: ${triggerType}`,
-    '',
-    'Final summary:',
-    summary,
-    '',
-    'Links:',
-    `- GET /api/agent-runs/${runId}`,
-    `- GET /api/cards/${cardId}/comments`,
-  ].join('\n');
+  return summary;
 }
 
 function persistTerminalCardAssignmentComment(
   run: Record<string, unknown>,
   patch: Record<string, unknown>,
 ): { ok: true } | { ok: false; errorMessage: string } {
+  if (String(run.triggerType ?? '') !== 'card_assignment') {
+    return { ok: true };
+  }
   const status = patch.status as RunStatus;
-  if (
-    run.triggerType !== 'card_assignment' ||
-    !CARD_COMMENT_TERMINAL_STATUSES.has(status)
-  ) {
+  if (!CARD_COMMENT_TERMINAL_STATUSES.has(status)) {
     return { ok: true };
   }
 
   const runId = typeof run.id === 'string' ? run.id : null;
   const cardId = typeof run.cardId === 'string' ? run.cardId : null;
   const agentId = typeof run.agentId === 'string' ? run.agentId : null;
-  if (!runId || !cardId || !agentId) {
+  if (!cardId) {
+    return { ok: true };
+  }
+
+  if (!runId || !agentId) {
     return {
       ok: false,
-      errorMessage: 'Cannot persist card completion comment because run, card, or agent attribution is missing.',
+      errorMessage: 'Cannot persist card completion comment because run or agent attribution is missing.',
     };
   }
 
@@ -383,6 +426,45 @@ export function getAgentRun(
   };
 }
 
+export function appendAgentRunOutput(
+  runId: string,
+  stream: 'stdout' | 'stderr',
+  text: string,
+): Record<string, unknown> | null {
+  if (!text) return store.getById('agent_runs', runId) ?? null;
+
+  const run = store.getById('agent_runs', runId);
+  if (!run || run.status !== 'running') return run ?? null;
+
+  const pathKey = stream === 'stdout' ? 'stdoutPath' : 'stderrPath';
+  const fieldKey = stream;
+  const logPath = typeof run[pathKey] === 'string' ? run[pathKey] as string : '';
+
+  if (logPath) {
+    try {
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.appendFileSync(logPath, text);
+      appendAgentRunLifecycleEvent(runId, {
+        event: `${stream}_chunk_persisted`,
+        [`${stream}Bytes`]: text.length,
+      });
+      return run;
+    } catch {
+      // Fall through to the DB snapshot if the log file is unavailable.
+    }
+  }
+
+  const previous = typeof run[fieldKey] === 'string' ? run[fieldKey] as string : '';
+  const updated = store.update('agent_runs', runId, {
+    [fieldKey]: `${previous}${text}`,
+  });
+  appendAgentRunLifecycleEvent(runId, {
+    event: `${stream}_chunk_persisted`,
+    [`${stream}Bytes`]: text.length,
+  });
+  return updated;
+}
+
 export async function killAgentRun(runId: string): Promise<{ ok: boolean; error?: string }> {
   return store.transaction(async () => {
     await store.lockAgentRunRowForUpdate(runId);
@@ -421,6 +503,7 @@ interface ListAgentRunsParams {
   agentId?: string;
   triggerType?: TriggerType;
   conversationId?: string;
+  cardId?: string;
   limit?: number;
   offset?: number;
 }
@@ -453,7 +536,7 @@ function toAgentRunSummary(run: Record<string, unknown>) {
 }
 
 export async function listAgentRuns(params: ListAgentRunsParams = {}) {
-  const { status, agentId, triggerType, conversationId, limit = 50, offset = 0 } = params;
+  const { status, agentId, triggerType, conversationId, cardId, limit = 50, offset = 0 } = params;
 
   const { rows: all, total } = await findAgentRunsByListFilterPaged(
     {
@@ -461,6 +544,7 @@ export async function listAgentRuns(params: ListAgentRunsParams = {}) {
       agentId,
       triggerType,
       conversationId,
+      cardId,
     },
     limit,
     offset,
@@ -487,6 +571,81 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function finalizeInterruptedRun(
+  run: Record<string, unknown>,
+  errorMessage = 'Process died (server restarted or process killed)',
+): Promise<Record<string, unknown> | null> {
+  const id = run.id as string;
+  const stdoutPath = run.stdoutPath as string | null;
+  const stderrPath = run.stderrPath as string | null;
+  let stdout = '';
+  let stderr = '';
+
+  if (stdoutPath) {
+    try { stdout = fs.readFileSync(stdoutPath, 'utf-8'); } catch { /* */ }
+  }
+  if (stderrPath) {
+    try { stderr = fs.readFileSync(stderrPath, 'utf-8'); } catch { /* */ }
+  }
+
+  const hasOutput = stdout.trim().length > 0;
+  const startedAt = new Date(run.startedAt as string).getTime();
+  const now = Date.now();
+  const structuredErrorMessage = hasOutput ? extractAgentOutputErrorText(stdout) : '';
+
+  if (structuredErrorMessage) {
+    console.log(`[agent-runs] Interrupted stdout reports an error for run ${id}`);
+    appendAgentRunLifecycleEvent(id, {
+      event: 'reconcile_finalize_error_output',
+      message: structuredErrorMessage,
+      stdoutBytes: stdout.length,
+      stderrBytes: stderr.length,
+    });
+    return completeAgentRun(id, structuredErrorMessage, {
+      stdout,
+      stderr,
+    });
+  }
+  if (hasOutput) {
+    console.log(`[agent-runs] Interrupted run ${id} has stdout, finalizing from logs`);
+    appendAgentRunLifecycleEvent(id, {
+      event: 'reconcile_finalize_from_output',
+      stdoutBytes: stdout.length,
+      stderrBytes: stderr.length,
+    });
+    return completeAgentRun(id, null, {
+      stdout,
+      stderr,
+    });
+  }
+
+  console.log(`[agent-runs] Interrupted run ${id} has no output, marking error`);
+  appendAgentRunLifecycleEvent(id, {
+    event: 'reconcile_finalize_no_output',
+    message: errorMessage,
+    stdoutBytes: stdout.length,
+    stderrBytes: stderr.length,
+  });
+  const patch = {
+    status: 'error',
+    errorMessage: stderr.trim() ? DEFAULT_AGENT_RUN_ERROR_MESSAGE : errorMessage,
+    finishedAt: new Date().toISOString(),
+    durationMs: now - startedAt,
+    stdout,
+    stderr,
+  };
+  let updated = store.update('agent_runs', id, patch);
+  const sideEffect = persistTerminalCardAssignmentComment(run, patch);
+  if (!sideEffect.ok) {
+    updated = store.update('agent_runs', id, {
+      status: 'error',
+      errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
+      finishedAt: new Date().toISOString(),
+    });
+  }
+  return updated;
 }
 
 /**
@@ -520,61 +679,36 @@ export async function reconcileRunsOnStartup(
     }
 
     // PID is dead or missing — finalize the run
-    const stdoutPath = run.stdoutPath as string | null;
-    const stderrPath = run.stderrPath as string | null;
-    let stdout = '';
-    let stderr = '';
-
-    if (stdoutPath) {
-      try { stdout = fs.readFileSync(stdoutPath, 'utf-8'); } catch { /* */ }
-    }
-    if (stderrPath) {
-      try { stderr = fs.readFileSync(stderrPath, 'utf-8'); } catch { /* */ }
-    }
-
-    const hasOutput = stdout.trim().length > 0;
-    const startedAt = new Date(run.startedAt as string).getTime();
-    const now = Date.now();
-
-    const structuredErrorMessage = hasOutput ? extractAgentOutputErrorText(stdout) : '';
-
-    if (structuredErrorMessage) {
-      console.log(`[agent-runs] PID dead and stdout reports an error for run ${id}`);
-      await completeAgentRun(id, structuredErrorMessage, {
-        stdout,
-        stderr,
-      });
-    } else if (hasOutput) {
-      console.log(`[agent-runs] PID dead but stdout exists for run ${id}, marking completed`);
-      await completeAgentRun(id, null, {
-        stdout,
-        stderr,
-      });
-    } else {
-      console.log(`[agent-runs] PID dead, no output for run ${id}, marking error`);
-      const patch = {
-        status: 'error',
-        errorMessage: stderr.trim()
-          ? DEFAULT_AGENT_RUN_ERROR_MESSAGE
-          : 'Process died (server restarted or process killed)',
-        finishedAt: new Date().toISOString(),
-        durationMs: now - startedAt,
-        stdout,
-        stderr,
-      };
-      store.update('agent_runs', id, patch);
-      const sideEffect = persistTerminalCardAssignmentComment(run, patch);
-      if (!sideEffect.ok) {
-        store.update('agent_runs', id, {
-          status: 'error',
-          errorMessage: formatAgentRunErrorMessage(sideEffect.errorMessage),
-          finishedAt: new Date().toISOString(),
-        });
-      }
-    }
+    await finalizeInterruptedRun(run);
   }
 
   return stale;
+}
+
+export async function reconcileUnrecoveredRemoteRuns(): Promise<number> {
+  const running = await findRunningAgentRunsAsync();
+  let finalized = 0;
+  const now = Date.now();
+  const minAgeMs = env.REMOTE_AGENT_RUNNER_RECONNECT_GRACE_MS;
+
+  for (const run of running) {
+    const id = typeof run.id === 'string' ? run.id : null;
+    const executor = typeof run.executor === 'string' ? run.executor : 'local';
+    const pid = run.pid as number | null;
+    if (!id || executor !== 'remote' || pid) continue;
+    if (isRemoteAgentRunPending(id)) continue;
+    const startedAtMs = new Date(run.startedAt as string).getTime();
+    if (Number.isFinite(startedAtMs) && now - startedAtMs < minAgeMs) continue;
+
+    await finalizeInterruptedRun(run, 'Remote runner job was not recovered after backend restart');
+    finalized++;
+  }
+
+  if (finalized > 0) {
+    console.log(`[agent-runs] Finalized ${finalized} unrecovered remote run${finalized === 1 ? '' : 's'}`);
+  }
+
+  return finalized;
 }
 
 /**

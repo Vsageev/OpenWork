@@ -52,12 +52,20 @@ interface SupervisedJob {
   runId: string;
   provider: RunnerProvider;
   pid: number | null;
+  startedAt: string;
   stdoutPath: string;
   stderrPath: string;
   outputLastMessagePath?: string;
   child?: DetachedExecutionProcess;
   stdoutOffset: number;
   stderrOffset: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+  lastOutputAt?: string;
+  lastOutputStream?: 'stdout' | 'stderr';
+  finalizedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
   pollTimer: ReturnType<typeof setInterval> | null;
   finalized: boolean;
 }
@@ -67,10 +75,17 @@ interface PersistedJob {
   runId: string;
   provider: SupervisedJob['provider'];
   pid: number | null;
+  startedAt: string;
   stdoutPath: string;
   stderrPath: string;
   outputLastMessagePath?: string;
-  startedAt: string;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  lastOutputAt?: string;
+  lastOutputStream?: 'stdout' | 'stderr';
+  finalizedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
 }
 
 const jobs = new Map<string, SupervisedJob>();
@@ -174,6 +189,17 @@ function flushPendingServerMessages() {
   }
 }
 
+function announceActiveJobs(ws: WebSocket) {
+  for (const job of jobs.values()) {
+    send(ws, {
+      type: 'job_accepted',
+      protocolVersion: RUNNER_PROTOCOL_VERSION,
+      jobId: job.jobId,
+      runId: job.runId,
+    });
+  }
+}
+
 function parseMessage(raw: WebSocket.RawData): ServerRunnerMessage | null {
   try {
     return parseServerRunnerMessage(JSON.parse(raw.toString()));
@@ -220,10 +246,17 @@ function persistJob(job: SupervisedJob) {
     runId: job.runId,
     provider: job.provider,
     pid: job.pid,
+    startedAt: job.startedAt,
     stdoutPath: job.stdoutPath,
     stderrPath: job.stderrPath,
     outputLastMessagePath: job.outputLastMessagePath,
-    startedAt: new Date().toISOString(),
+    stdoutBytes: job.stdoutBytes,
+    stderrBytes: job.stderrBytes,
+    lastOutputAt: job.lastOutputAt,
+    lastOutputStream: job.lastOutputStream,
+    finalizedAt: job.finalizedAt,
+    exitCode: job.exitCode,
+    signal: job.signal,
   };
   fs.writeFileSync(jobStatePath(job.jobId, job.runId), `${JSON.stringify(payload, null, 2)}\n`, {
     mode: 0o600,
@@ -295,10 +328,22 @@ function sendJobOutput(job: SupervisedJob, stream: 'stdout' | 'stderr', text: st
 function readNewJobOutput(job: SupervisedJob) {
   const stdout = readNewLogText(job.stdoutPath, job.stdoutOffset);
   job.stdoutOffset = stdout.offset;
+  if (stdout.text) {
+    job.stdoutBytes += Buffer.byteLength(stdout.text);
+    job.lastOutputAt = new Date().toISOString();
+    job.lastOutputStream = 'stdout';
+    persistJob(job);
+  }
   sendJobOutput(job, 'stdout', stdout.text);
 
   const stderr = readNewLogText(job.stderrPath, job.stderrOffset);
   job.stderrOffset = stderr.offset;
+  if (stderr.text) {
+    job.stderrBytes += Buffer.byteLength(stderr.text);
+    job.lastOutputAt = new Date().toISOString();
+    job.lastOutputStream = 'stderr';
+    persistJob(job);
+  }
   sendJobOutput(job, 'stderr', stderr.text);
 }
 
@@ -327,6 +372,10 @@ function stopPollingJob(job: SupervisedJob) {
 function finalizeJob(job: SupervisedJob, code: number | null, signal: NodeJS.Signals | null) {
   if (job.finalized) return;
   job.finalized = true;
+  job.finalizedAt = new Date().toISOString();
+  job.exitCode = code;
+  job.signal = signal;
+  persistJob(job);
   stopPollingJob(job);
 
   if (signal) {
@@ -421,11 +470,19 @@ function recoverPersistedJobs() {
       runId: persisted.runId,
       provider: persisted.provider,
       pid: persisted.pid,
+      startedAt: persisted.startedAt ?? new Date().toISOString(),
       stdoutPath: persisted.stdoutPath,
       stderrPath: persisted.stderrPath,
       outputLastMessagePath: persisted.outputLastMessagePath,
       stdoutOffset: fileSize(persisted.stdoutPath),
       stderrOffset: fileSize(persisted.stderrPath),
+      stdoutBytes: persisted.stdoutBytes ?? fileSize(persisted.stdoutPath),
+      stderrBytes: persisted.stderrBytes ?? fileSize(persisted.stderrPath),
+      lastOutputAt: persisted.lastOutputAt,
+      lastOutputStream: persisted.lastOutputStream,
+      finalizedAt: persisted.finalizedAt,
+      exitCode: persisted.exitCode,
+      signal: persisted.signal,
       pollTimer: null,
       finalized: false,
     };
@@ -511,12 +568,15 @@ function startJob(ws: WebSocket, jobId: string, job: ServerRunnerMessage & { typ
     runId,
     provider: intent.provider,
     pid: child.pid ?? null,
+    startedAt: new Date().toISOString(),
     stdoutPath,
     stderrPath,
     outputLastMessagePath: plan.outputLastMessagePath,
     child,
     stdoutOffset: 0,
     stderrOffset: 0,
+    stdoutBytes: 0,
+    stderrBytes: 0,
     pollTimer: null,
     finalized: false,
   };
@@ -556,6 +616,7 @@ function connect() {
       capabilities: buildRunnerCapabilities(),
     });
     flushPendingServerMessages();
+    announceActiveJobs(ws);
     console.log(`Connected runner ${runnerId} to ${serverUrl}`);
   });
 

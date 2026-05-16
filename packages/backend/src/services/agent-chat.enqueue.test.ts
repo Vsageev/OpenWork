@@ -33,7 +33,7 @@ vi.mock('./agent-runners.js', () => ({
   hasConnectedRemoteAgentRunner: mocks.hasConnectedRemoteAgentRunner,
 }));
 
-import { enqueueAgentPrompt } from './agent-chat.js';
+import { __agentChatTestUtils, enqueueAgentPrompt } from './agent-chat.js';
 
 describe('enqueueAgentPrompt runner workspace validation', () => {
   beforeEach(() => {
@@ -74,7 +74,47 @@ describe('enqueueAgentPrompt runner workspace validation', () => {
         queuedMessageId: 'message-1',
       }),
     ).toThrow(/No remote agent runner is connected/i);
-    expect(mocks.hasConnectedRemoteAgentRunner).toHaveBeenCalledWith('workspace-1');
+    expect(mocks.hasConnectedRemoteAgentRunner).toHaveBeenCalledWith('user-1', 'workspace-1');
     expect(mocks.store.insert).not.toHaveBeenCalled();
+  });
+});
+
+describe('agent chat fallback retry guard', () => {
+  beforeEach(() => {
+    mocks.store.getById.mockReset();
+  });
+
+  it('does not retry with fallback after a user-stopped run', () => {
+    mocks.store.getById.mockReturnValue({
+      id: 'run-1',
+      killedByUser: true,
+      errorMessage: 'Killed by user',
+    });
+
+    expect(
+      __agentChatTestUtils.shouldAttemptFallbackRetry({
+        runId: 'run-1',
+        errorMessage: 'Remote runner cancelled the job',
+        isFallback: false,
+        hasFallback: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('allows fallback for ordinary primary-run failures', () => {
+    mocks.store.getById.mockReturnValue({
+      id: 'run-1',
+      killedByUser: false,
+      errorMessage: 'Remote runner exited with code 1',
+    });
+
+    expect(
+      __agentChatTestUtils.shouldAttemptFallbackRetry({
+        runId: 'run-1',
+        errorMessage: 'Remote runner exited with code 1',
+        isFallback: false,
+        hasFallback: true,
+      }),
+    ).toBe(true);
   });
 });

@@ -114,6 +114,59 @@ describe('non-Codex runner startup smoke', () => {
     expect(plan.command.args).toContain(plan.outputLastMessagePath);
   });
 
+  it('includes full attachment metadata in prompts and passes OpenCode files natively', () => {
+    const imagePath = path.join(tmpDir, 'diagram.png');
+    const filePath = path.join(tmpDir, 'context.txt');
+    fs.writeFileSync(imagePath, 'fake image');
+    fs.writeFileSync(filePath, 'hello runner');
+
+    const plan = createExecutionPlan(
+      {
+        ...baseJob('opencode'),
+        attachments: [
+          {
+            type: 'image',
+            path: imagePath,
+            filename: 'diagram.png',
+            mimeType: 'image/png',
+            sizeBytes: 10,
+            textExtraction: { status: 'not_applicable' },
+            manifest: { storagePath: '/chat-uploads/diagram.png' },
+          },
+          {
+            type: 'file',
+            path: filePath,
+            filename: 'context.txt',
+            mimeType: 'text/plain',
+            sizeBytes: 12,
+            textExtraction: {
+              status: 'available',
+              textPath: filePath,
+              charCount: 12,
+              truncated: false,
+            },
+            manifest: { storagePath: '/chat-uploads/context.txt' },
+          },
+        ],
+      },
+      baseCapabilities('opencode'),
+    );
+
+    expect(isPolicyFailure(plan)).toBe(false);
+    if (isPolicyFailure(plan)) return;
+    expect(plan.command.args).toContain('--file');
+    expect(plan.command.args).toContain(imagePath);
+    expect(plan.command.args).toContain(filePath);
+    const prompt = plan.command.args.at(-1) ?? '';
+    expect(prompt).toContain('Attachments:');
+    expect(prompt).toContain('filename');
+    expect(prompt).toContain('context.txt');
+    expect(prompt).toContain('mimeType: text/plain');
+    expect(prompt).toContain('sizeBytes: 12');
+    expect(prompt).toContain('textExtraction: status=available');
+    expect(prompt).toContain('manifest: {"storagePath":"/chat-uploads/context.txt"}');
+  });
+
   it('does not open stdin for Codex prompt-only jobs', async () => {
     const plan = createExecutionPlan(baseJob('codex'), baseCapabilities('codex'));
 
