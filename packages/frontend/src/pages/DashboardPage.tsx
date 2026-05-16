@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   XCircle,
   Plus,
-  Search,
   X,
   Inbox,
   Mail,
@@ -81,7 +80,7 @@ interface ConversationPreview {
   contact: ConversationContact | null;
 }
 
-type AgentRunTriggerType = 'chat' | 'cron_job' | 'card_assignment';
+type AgentRunTriggerType = 'chat' | 'cron_job' | 'card_assignment' | 'cron' | 'card' | (string & {});
 
 interface AgentRun {
   id: string;
@@ -118,11 +117,21 @@ const STAT_CARDS = [
   { key: 'agents', label: 'Agents', to: '/agents', icon: Bot, bg: 'rgba(16,185,129,0.1)', color: '#10B981' },
 ] as const;
 
-const TRIGGER_CONFIG: Record<AgentRunTriggerType, { label: string; icon: React.ComponentType<{ size?: number }> }> = {
+type TriggerConfig = { label: string; icon: React.ComponentType<{ size?: number }> };
+
+const UNKNOWN_TRIGGER_CONFIG: TriggerConfig = { label: 'Run', icon: Activity };
+
+const TRIGGER_CONFIG: Record<string, TriggerConfig> = {
   chat: { label: 'Chat', icon: MessageSquare },
   cron_job: { label: 'Cron', icon: Clock },
+  cron: { label: 'Cron', icon: Clock },
   card_assignment: { label: 'Card', icon: Zap },
+  card: { label: 'Card', icon: Zap },
 };
+
+function getTriggerConfig(triggerType: AgentRun['triggerType'] | null | undefined): TriggerConfig {
+  return triggerType ? (TRIGGER_CONFIG[triggerType] ?? UNKNOWN_TRIGGER_CONFIG) : UNKNOWN_TRIGGER_CONFIG;
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -902,7 +911,8 @@ export function DashboardPage() {
               ) : (
                 <div className={styles.taskList}>
                   {recentRuns.map((run) => {
-                    const TriggerIcon = TRIGGER_CONFIG[run.triggerType].icon;
+                    const triggerConfig = getTriggerConfig(run.triggerType);
+                    const TriggerIcon = triggerConfig.icon;
                     return (
                       <Link
                         key={run.id}
@@ -924,7 +934,7 @@ export function DashboardPage() {
                           <div className={styles.taskTitle}>{run.agentName}</div>
                           <div className={styles.runMeta}>
                             <TriggerIcon size={11} />
-                            <span>{TRIGGER_CONFIG[run.triggerType].label}</span>
+                            <span>{triggerConfig.label}</span>
                             {run.durationMs != null && (
                               <>
                                 <span className={styles.runMetaSep} />

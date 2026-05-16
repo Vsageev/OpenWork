@@ -33,10 +33,12 @@ export async function getFlushedNativeDb(): Promise<PostgresDatabase | null> {
 
 export function recordFromLegacyRow<T extends StoreRecord>(row: T): StoreRecord {
   const legacy = row.legacyData;
+  const nativeFields = { ...row };
+  delete nativeFields.legacyData;
   if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
-    return { ...(legacy as StoreRecord) };
+    return { ...(legacy as StoreRecord), ...nativeFields };
   }
-  return { ...row };
+  return { ...nativeFields };
 }
 
 export function recordsFromLegacyRows<T extends StoreRecord>(rows: T[]): StoreRecord[] {

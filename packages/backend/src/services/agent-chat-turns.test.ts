@@ -1,0 +1,323 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => {
+  let nextId = 1;
+  const collections = new Map<string, Map<string, Record<string, unknown>>>();
+  const collection = (name: string) => {
+    let records = collections.get(name);
+    if (!records) {
+      records = new Map();
+      collections.set(name, records);
+    }
+    return records;
+  };
+  const store = {
+    reset() {
+      nextId = 1;
+      collections.clear();
+    },
+    getAll(name: string) {
+      return [...collection(name).values()];
+    },
+    getById(name: string, id: string) {
+      return collection(name).get(id) ?? null;
+    },
+    insert(name: string, data: Record<string, unknown>) {
+      const now = new Date(Date.UTC(2026, 4, 16, 12, 0, nextId)).toISOString();
+      const record = {
+        ...data,
+        id: typeof data.id === 'string' ? data.id : `${name}-${nextId++}`,
+        createdAt: typeof data.createdAt === 'string' ? data.createdAt : now,
+        updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : now,
+      };
+      collection(name).set(String(record.id), record);
+      return record;
+    },
+    update(name: string, id: string, data: Record<string, unknown>) {
+      const existing = collection(name).get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...data, id, updatedAt: new Date().toISOString() };
+      collection(name).set(id, updated);
+      return updated;
+    },
+  };
+  return { store };
+});
+
+vi.mock('../db/index.js', () => ({ store: mocks.store }));
+vi.mock('../db/connection.js', () => ({ store: mocks.store }));
+
+import {
+  backfillLegacyAgentChatTurns,
+  createAgentChatTurn,
+  createReplacementAgentChatTurn,
+  listAgentChatTurns,
+  markAgentChatTurnStopped,
+} from './agent-chat-turns.js';
+
+describe('agent chat turns', () => {
+  beforeEach(() => {
+    mocks.store.reset();
+    mocks.store.insert('agents', {
+      id: 'agent-1',
+      name: 'Test Agent',
+    });
+  });
+
+  it('stores parent and child turns for normal follow-ups', () => {
+    const parent = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-1',
+    });
+    const child = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      parentUserMessageId: 'message-1',
+      userMessageId: 'message-2',
+    });
+
+    expect(child.parentTurnId).toBe(parent.id);
+    expect(listAgentChatTurns('agent-1', 'conversation-1').map((turn) => turn.id)).toEqual([
+      parent.id,
+      child.id,
+    ]);
+  });
+
+  it('creates edit replacement turns and supersedes the original turn', () => {
+    const original = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-original',
+      parentTurnId: 'turn-parent',
+      status: 'completed',
+    });
+
+    const replacement = createReplacementAgentChatTurn(String(original.id), {
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-edited',
+    });
+
+    expect(replacement).toMatchObject({
+      parentTurnId: 'turn-parent',
+      supersedesTurnId: original.id,
+      turnType: 'edit',
+      status: 'queued',
+    });
+    expect(mocks.store.getById('agentChatTurns', String(original.id))).toMatchObject({
+      status: 'superseded',
+    });
+  });
+
+  it('marks stopped turns separately from failed turns', () => {
+    const turn = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-1',
+      runId: 'run-1',
+      status: 'running',
+    });
+
+    const stopped = markAgentChatTurnStopped(String(turn.id), {
+      runId: 'run-1',
+      errorMessage: 'Killed by user',
+    });
+
+    expect(stopped).toMatchObject({
+      status: 'stopped',
+      runId: 'run-1',
+      metadata: { errorMessage: 'Killed by user' },
+    });
+  });
+
+  it('backfills legacy queue and run rows, preserving parent/child links', () => {
+    mocks.store.insert('messages', {
+      id: 'message-1',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      previousUserMessageId: null,
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-2',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      previousUserMessageId: 'message-1',
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'assistant-2',
+      conversationId: 'conversation-1',
+      direction: 'inbound',
+      parentId: 'message-2',
+      metadata: JSON.stringify({ runId: 'run-2' }),
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'completed',
+      queuedMessageId: 'message-1',
+      responseMessageId: 'assistant-1',
+      lastRunId: 'run-1',
+      createdAt: '2026-05-16T12:00:01.000Z',
+      completedAt: '2026-05-16T12:00:30.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      triggerType: 'chat',
+      status: 'completed',
+      responseParentId: 'message-1',
+      startedAt: '2026-05-16T12:00:02.000Z',
+      finishedAt: '2026-05-16T12:00:30.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-2',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      triggerType: 'chat',
+      status: 'completed',
+      responseParentId: 'message-2',
+      startedAt: '2026-05-16T12:01:02.000Z',
+      finishedAt: '2026-05-16T12:02:00.000Z',
+    });
+
+    const result = backfillLegacyAgentChatTurns();
+    const turns = listAgentChatTurns('agent-1', 'conversation-1');
+
+    expect(result).toMatchObject({ created: 2, updatedQueueItems: 1, updatedRuns: 2 });
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({
+      userMessageId: 'message-1',
+      assistantMessageId: 'assistant-1',
+      runId: 'run-1',
+      status: 'completed',
+    });
+    expect(turns[1]).toMatchObject({
+      parentTurnId: turns[0].id,
+      userMessageId: 'message-2',
+      assistantMessageId: 'assistant-2',
+      runId: 'run-2',
+      status: 'completed',
+    });
+    expect(mocks.store.getById('agentChatQueue', 'queue-1')?.turnId).toBe(turns[0].id);
+    expect(mocks.store.getById('agent_runs', 'run-2')?.turnId).toBe(turns[1].id);
+  });
+
+  it('repairs existing root turns that actually belong under an earlier user turn', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({
+        agentId: 'agent-1',
+        activeBranches: {
+          'user:message-root': 'message-stale-child',
+        },
+      }),
+      lastMessageAt: '2026-05-16T12:04:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-root',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      previousUserMessageId: null,
+      parentId: null,
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'assistant-root',
+      conversationId: 'conversation-1',
+      direction: 'inbound',
+      type: 'text',
+      parentId: 'message-root',
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-stale-child',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      previousUserMessageId: 'message-root',
+      parentId: 'assistant-root',
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-latest-child',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      previousUserMessageId: 'message-root',
+      parentId: 'assistant-root',
+      createdAt: '2026-05-16T12:03:00.000Z',
+    });
+    createAgentChatTurn({
+      id: 'turn-root',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-root',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('agentChatTurns', {
+      id: 'turn-stale-child',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      parentTurnId: null,
+      userMessageId: 'message-stale-child',
+      assistantMessageId: null,
+      status: 'completed',
+      runId: null,
+      source: 'legacy_queue',
+      createdById: null,
+      turnType: 'follow_up',
+      supersedesTurnId: null,
+      metadata: {},
+      startedAt: null,
+      completedAt: null,
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('agentChatTurns', {
+      id: 'turn-latest-child',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      parentTurnId: null,
+      userMessageId: 'message-latest-child',
+      assistantMessageId: null,
+      status: 'queued',
+      runId: null,
+      source: 'user',
+      createdById: null,
+      turnType: 'follow_up',
+      supersedesTurnId: null,
+      metadata: {},
+      startedAt: null,
+      completedAt: null,
+      createdAt: '2026-05-16T12:03:00.000Z',
+    });
+
+    const result = backfillLegacyAgentChatTurns();
+
+    expect(result).toMatchObject({
+      repairedParentLinks: 2,
+      updatedActiveBranches: 1,
+    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-stale-child')).toMatchObject({
+      parentTurnId: 'turn-root',
+    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-latest-child')).toMatchObject({
+      parentTurnId: 'turn-root',
+    });
+    const metadata = mocks.store.getById('conversations', 'conversation-1')?.metadata;
+    const parsedMetadata =
+      typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
+    expect(parsedMetadata.activeBranches).toMatchObject({
+      'user:message-root': 'message-latest-child',
+    });
+  });
+});

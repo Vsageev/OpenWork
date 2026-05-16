@@ -591,6 +591,7 @@ export const agentRuns = pgTable(
     errorMessage: text('error_message'),
     responseText: text('response_text'),
     responseParentId: text('response_parent_id'),
+    turnId: text('turn_id'),
     killedByUser: boolean('killed_by_user'),
     avatarIcon: text('avatar_icon'),
     avatarBgColor: text('avatar_bg_color'),
@@ -607,9 +608,47 @@ export const agentRuns = pgTable(
     index('agent_runs_card_id_idx').on(table.cardId),
     index('agent_runs_status_agent_started_idx').on(table.status, table.agentId, table.startedAt),
     index('agent_runs_conv_status_idx').on(table.conversationId, table.status),
+    index('agent_runs_turn_id_idx').on(table.turnId),
     index('agent_runs_live_chat_idx')
       .on(table.agentId, table.conversationId)
       .where(sql`${table.status} = 'running' AND ${table.triggerType} = 'chat'`),
+  ],
+);
+
+export const agentChatTurns = pgTable(
+  'agent_chat_turns',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id),
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    parentTurnId: text('parent_turn_id'),
+    userMessageId: text('user_message_id').references(() => messages.id),
+    assistantMessageId: text('assistant_message_id').references(() => messages.id),
+    status: text('status').notNull(),
+    runId: text('run_id').references(() => agentRuns.id),
+    source: text('source').notNull(),
+    createdById: text('created_by_id').references(() => users.id),
+    turnType: text('turn_type').notNull(),
+    supersedesTurnId: text('supersedes_turn_id'),
+    metadata: jsonb('metadata').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    ...timestamps,
+    ...legacyPayload,
+  },
+  (table) => [
+    index('agent_chat_turns_conversation_created_idx').on(table.conversationId, table.createdAt),
+    index('agent_chat_turns_agent_conversation_idx').on(table.agentId, table.conversationId),
+    index('agent_chat_turns_parent_turn_idx').on(table.parentTurnId),
+    index('agent_chat_turns_user_message_idx').on(table.userMessageId),
+    index('agent_chat_turns_assistant_message_idx').on(table.assistantMessageId),
+    index('agent_chat_turns_run_idx').on(table.runId),
+    index('agent_chat_turns_supersedes_idx').on(table.supersedesTurnId),
+    index('agent_chat_turns_status_idx').on(table.status),
   ],
 );
 
@@ -699,6 +738,7 @@ export const agentChatQueue = pgTable(
     status: text('status').notNull(),
     attempts: integer('attempts').notNull(),
     maxAttempts: integer('max_attempts').notNull(),
+    turnId: text('turn_id').references(() => agentChatTurns.id),
     runId: text('run_id'),
     lastRunId: text('last_run_id').references(() => agentRuns.id),
     targetMessageId: text('target_message_id'),
@@ -720,6 +760,7 @@ export const agentChatQueue = pgTable(
     index('agent_chat_queue_agent_id_idx').on(table.agentId),
     index('agent_chat_queue_conversation_id_idx').on(table.conversationId),
     index('agent_chat_queue_status_idx').on(table.status),
+    index('agent_chat_queue_turn_id_idx').on(table.turnId),
     index('agent_chat_queue_agent_conv_created_idx').on(
       table.agentId,
       table.conversationId,

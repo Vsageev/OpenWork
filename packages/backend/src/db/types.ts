@@ -276,7 +276,7 @@ export interface AgentRun {
   model: string | null;
   modelId: string | null;
   triggerType: 'chat' | 'cron_job' | 'card_assignment';
-  status: 'running' | 'completed' | 'error';
+  status: 'queued' | 'running' | 'completed' | 'error';
   conversationId: string | null;
   cardId: string | null;
   cronJobId: string | null;
@@ -286,9 +286,31 @@ export interface AgentRun {
   stderrPath: string | null;
   errorMessage: string | null;
   responseText: string | null;
+  responseParentId: string | null;
+  turnId: string | null;
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentChatTurn {
+  id: string;
+  conversationId: string;
+  agentId: string;
+  parentTurnId: string | null;
+  userMessageId: string | null;
+  assistantMessageId: string | null;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'superseded';
+  runId: string | null;
+  source: string;
+  createdById: string | null;
+  turnType: 'follow_up' | 'edit' | 'response';
+  supersedesTurnId: string | null;
+  metadata: Record<string, unknown>;
+  startedAt: string | null;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => {
     getAll: vi.fn(),
     getById: vi.fn(),
     insert: vi.fn(),
+    update: vi.fn(),
   };
 
   return {
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('../db/index.js', () => ({ store: mocks.store }));
+vi.mock('../db/connection.js', () => ({ store: mocks.store }));
 vi.mock('./agents.js', () => ({
   getAgent: mocks.getAgent,
   listAgents: vi.fn(() => []),
@@ -40,12 +42,27 @@ describe('enqueueAgentPrompt runner workspace validation', () => {
     mocks.store.getAll.mockReset();
     mocks.store.getById.mockReset();
     mocks.store.insert.mockReset();
+    mocks.store.update.mockReset();
+    mocks.store.getById.mockReturnValue(null);
+    mocks.store.insert.mockImplementation((collection: string, data: Record<string, unknown>) => ({
+      ...data,
+      id: typeof data.id === 'string' ? data.id : `${collection}-1`,
+      createdAt: '2026-05-16T12:00:00.000Z',
+      updatedAt: '2026-05-16T12:00:00.000Z',
+    }));
+    mocks.store.update.mockImplementation(
+      (_collection: string, id: string, data: Record<string, unknown>) => ({
+        ...data,
+        id,
+        updatedAt: '2026-05-16T12:00:01.000Z',
+      }),
+    );
     mocks.getAgent.mockReset();
     mocks.hasConnectedRemoteAgentRunner.mockReset();
     mocks.hasAvailableRemoteAgentRunner.mockReset();
   });
 
-  it('rejects an agent that is not assigned to a workspace before creating a queue item', () => {
+  it('persists a failed prompt turn when the agent is not assigned to a workspace', () => {
     mocks.getAgent.mockReturnValue({ id: 'agent-1', groupId: null });
     mocks.store.getAll.mockImplementation((collection: string) =>
       collection === 'workspaces' ? [{ id: 'workspace-1', agentGroupIds: [] }] : [],
@@ -57,7 +74,23 @@ describe('enqueueAgentPrompt runner workspace validation', () => {
       }),
     ).toThrow(/not assigned to a workspace/i);
     expect(mocks.hasConnectedRemoteAgentRunner).not.toHaveBeenCalled();
-    expect(mocks.store.insert).not.toHaveBeenCalled();
+    expect(mocks.store.insert).toHaveBeenCalledWith(
+      'messages',
+      expect.objectContaining({ id: 'message-1', content: 'hello' }),
+    );
+    expect(mocks.store.insert).toHaveBeenCalledWith(
+      'agentChatTurns',
+      expect.objectContaining({ userMessageId: 'message-1', status: 'queued' }),
+    );
+    expect(mocks.store.insert).not.toHaveBeenCalledWith(
+      'agentChatQueue',
+      expect.anything(),
+    );
+    expect(mocks.store.update).toHaveBeenCalledWith(
+      'agentChatTurns',
+      'agentChatTurns-1',
+      expect.objectContaining({ status: 'failed' }),
+    );
   });
 
   it('checks runner availability in the agent workspace, not globally', () => {
@@ -75,7 +108,19 @@ describe('enqueueAgentPrompt runner workspace validation', () => {
       }),
     ).toThrow(/No remote agent runner is connected/i);
     expect(mocks.hasConnectedRemoteAgentRunner).toHaveBeenCalledWith('user-1', 'workspace-1');
-    expect(mocks.store.insert).not.toHaveBeenCalled();
+    expect(mocks.store.insert).toHaveBeenCalledWith(
+      'messages',
+      expect.objectContaining({ id: 'message-1', content: 'hello' }),
+    );
+    expect(mocks.store.insert).not.toHaveBeenCalledWith(
+      'agentChatQueue',
+      expect.anything(),
+    );
+    expect(mocks.store.update).toHaveBeenCalledWith(
+      'agentChatTurns',
+      'agentChatTurns-1',
+      expect.objectContaining({ status: 'failed' }),
+    );
   });
 });
 

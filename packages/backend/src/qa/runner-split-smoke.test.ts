@@ -91,10 +91,13 @@ vi.mock('../services/audit-log.js', () => ({
 import {
   createAgentConversation,
   enqueueAgentPrompt,
+  editMessageAndBranch,
+  getActiveMessagePath,
   getAgentConversation,
   getConversationExecutionItems,
   saveAgentConversationMessage,
 } from '../services/agent-chat.js';
+import { listAgentChatTurns } from '../services/agent-chat-turns.js';
 import { agentRunRoutes } from '../routes/agent-runs.js';
 import { cardRoutes } from '../routes/cards.js';
 import {
@@ -558,6 +561,85 @@ describe('runner-split QA backend smoke', () => {
     });
   });
 
+  it('keeps completed chat run responses idempotent and hides persisted duplicates from the active path', () => {
+    mocks.store.reset();
+
+    const agentId = 'qa-smoke-agent-duplicate-final';
+    const conversationId = 'qa-smoke-conversation-duplicate-final';
+    const userMessageId = 'qa-smoke-message-duplicate-user';
+    const runId = 'qa-smoke-run-duplicate-final';
+
+    mocks.store.insert('conversations', {
+      id: conversationId,
+      contactId: null,
+      channelType: 'agent',
+      subject: '[qa-smoke] duplicate final conversation',
+      status: 'open',
+      isUnread: false,
+      lastMessageAt: '2026-01-01T00:00:00.000Z',
+      metadata: JSON.stringify({ agentId }),
+    });
+    mocks.store.insert('messages', {
+      id: userMessageId,
+      conversationId,
+      direction: 'outbound',
+      content: 'prompt',
+      type: 'text',
+      status: 'sent',
+      parentId: null,
+      previousUserMessageId: null,
+      metadata: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const first = saveAgentConversationMessage({
+      conversationId,
+      direction: 'inbound',
+      content: 'final answer',
+      type: 'text',
+      parentId: userMessageId,
+      metadata: { runId },
+    });
+    const second = saveAgentConversationMessage({
+      conversationId,
+      direction: 'inbound',
+      content: 'final answer',
+      type: 'text',
+      parentId: userMessageId,
+      metadata: { runId },
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(
+      mocks.store
+        .getAll('messages')
+        .filter(
+          (message) => message.conversationId === conversationId && message.direction === 'inbound',
+        ),
+    ).toHaveLength(1);
+
+    mocks.store.update('messages', String(first.id), {
+      createdAt: '2026-01-01T00:00:01.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'qa-smoke-message-duplicate-response-copy',
+      conversationId,
+      direction: 'inbound',
+      content: 'final answer',
+      type: 'text',
+      status: 'delivered',
+      parentId: userMessageId,
+      previousUserMessageId: null,
+      metadata: JSON.stringify({ runId }),
+      createdAt: '2026-01-01T00:00:02.000Z',
+    });
+
+    const activePath = getActiveMessagePath(conversationId);
+    expect(activePath.map((message) => message.id)).toEqual([userMessageId, first.id]);
+    expect(activePath[1]?.siblingCount).toBeUndefined();
+    expect(activePath[1]?.siblingIds).toBeUndefined();
+  });
+
   it('keeps queue, conversation, active run, and pending prompts aligned across multiple enqueues while a chat run is active', async () => {
     vi.useFakeTimers();
     mocks.store.reset();
@@ -614,28 +696,6 @@ describe('runner-split QA backend smoke', () => {
       content: 'root prompt being answered',
       previousUserMessageId: null,
     });
-    saveAgentConversationMessage({
-      id: 'qa-msg-q1',
-      conversationId: convId,
-      direction: 'outbound',
-      content: 'quick message one',
-      previousUserMessageId: 'qa-msg-root',
-    });
-    saveAgentConversationMessage({
-      id: 'qa-msg-q2',
-      conversationId: convId,
-      direction: 'outbound',
-      content: 'quick message two',
-      previousUserMessageId: 'qa-msg-q1',
-    });
-    saveAgentConversationMessage({
-      id: 'qa-msg-q3',
-      conversationId: convId,
-      direction: 'outbound',
-      content: 'quick message three',
-      previousUserMessageId: 'qa-msg-q2',
-    });
-
     createAgentRun({
       id: ids.chatRun,
       agentId: ids.agent,
@@ -685,6 +745,7 @@ describe('runner-split QA backend smoke', () => {
     expect(queueItems).toHaveLength(3);
     expect(queueItems.map((item) => item.prompt)).toEqual(expectedPrompts);
     expect(queueItems.map((item) => item.queuedMessageId)).toEqual(expectedQueuedMessageIds);
+    expect(queueItems.every((item) => typeof item.turnId === 'string')).toBe(true);
 
     for (let i = 0; i < queueItems.length; i += 1) {
       const check = assertQueueAlignment({
@@ -714,6 +775,14 @@ describe('runner-split QA backend smoke', () => {
     const tail = outboundMessages[outboundMessages.length - 1] as Record<string, unknown>;
     expect(tail.id).toBe('qa-msg-q3');
     expect(tail.previousUserMessageId).toBe('qa-msg-q2');
+    expect(outboundMessages.slice(1).map((row: Record<string, unknown>) => row.content)).toEqual(
+      expectedPrompts,
+    );
+
+    const turns = listAgentChatTurns(ids.agent, convId);
+    expect(turns.map((turn) => turn.userMessageId)).toEqual(expectedQueuedMessageIds);
+    expect(turns.map((turn) => turn.status)).toEqual(['queued', 'queued', 'queued']);
+    expect(turns.map((turn) => turn.id)).toEqual(queueItems.map((item) => item.turnId));
 
     console.info(
       `qa-smoke report: ${JSON.stringify({
@@ -730,6 +799,183 @@ describe('runner-split QA backend smoke', () => {
         },
       })}`,
     );
+  });
+
+  it('tracks chat turns for stop, edit, failed, follow-up, and attachment prompts', async () => {
+    vi.useFakeTimers();
+    mocks.store.reset();
+    mocks.cancelRemoteAgentRun.mockClear();
+    const ids = {
+      agent: 'qa-smoke-agent-turn-paths',
+      group: 'qa-smoke-group-turn-paths',
+      workspace: 'qa-smoke-workspace-turn-paths',
+      collection: 'qa-smoke-collection-turn-paths',
+      user: 'qa-smoke-user-turn-paths',
+    };
+    mocks.store.insert('users', {
+      id: ids.user,
+      email: 'qa-smoke-turns@example.test',
+      firstName: 'QA',
+      lastName: 'Turns',
+      type: 'human',
+      isActive: true,
+    });
+    mocks.store.insert('agents', {
+      id: ids.agent,
+      name: '[qa-smoke] turn paths agent',
+      model: 'codex',
+      modelId: 'gpt-5.3-codex',
+      thinkingLevel: null,
+      groupId: ids.group,
+      status: 'active',
+      separateFolderPerChat: false,
+    });
+    mocks.store.insert('workspaces', {
+      id: ids.workspace,
+      userId: ids.user,
+      name: '[qa-smoke] turn paths workspace',
+      agentGroupIds: [ids.group],
+      collectionIds: [ids.collection],
+    });
+    mocks.store.insert('collections', {
+      id: ids.collection,
+      name: '[qa-smoke] turn paths collection',
+      description: 'Temporary turn path smoke collection',
+    });
+
+    const conversation = createAgentConversation(
+      ids.agent,
+      '[qa-smoke] turn paths conversation',
+    ) as Record<string, unknown>;
+    const convId = String(conversation.id);
+
+    const root = enqueueAgentPrompt(ids.agent, convId, 'root prompt', {
+      queuedMessageId: 'qa-turn-msg-root',
+    });
+    const rootTurnId = String(root.queueItem.turnId);
+    expect(root.userMessage).toMatchObject({
+      id: 'qa-turn-msg-root',
+      direction: 'outbound',
+      content: 'root prompt',
+    });
+    expect(listAgentChatTurns(ids.agent, convId)[0]).toMatchObject({
+      id: rootTurnId,
+      userMessageId: 'qa-turn-msg-root',
+      status: 'queued',
+    });
+
+    createAgentRun({
+      id: 'qa-turn-run-root',
+      agentId: ids.agent,
+      agentName: '[qa-smoke] turn paths agent',
+      model: 'codex',
+      modelId: 'gpt-5.3-codex',
+      triggerType: 'chat',
+      conversationId: convId,
+      responseParentId: 'qa-turn-msg-root',
+      executor: 'remote',
+      status: 'running',
+      turnId: rootTurnId,
+    } as Parameters<typeof createAgentRun>[0]);
+    const activeBeforeStop = getActiveMessagePath(convId).map((message) => message.id);
+    await killAgentRun('qa-turn-run-root');
+    expect(mocks.cancelRemoteAgentRun).toHaveBeenCalledWith('qa-turn-run-root');
+    expect(getActiveMessagePath(convId).map((message) => message.id)).toEqual(activeBeforeStop);
+    expect(mocks.store.getById('agentChatTurns', rootTurnId)).toMatchObject({
+      status: 'stopped',
+      runId: 'qa-turn-run-root',
+    });
+
+    const afterStop = enqueueAgentPrompt(ids.agent, convId, 'after stop follow-up', {
+      queuedMessageId: 'qa-turn-msg-after-stop',
+      previousUserMessageId: 'qa-turn-msg-root',
+    });
+    expect(mocks.store.getById('agentChatTurns', String(afterStop.queueItem.turnId))).toMatchObject(
+      {
+        parentTurnId: rootTurnId,
+        userMessageId: 'qa-turn-msg-after-stop',
+        status: 'queued',
+      },
+    );
+
+    const editedMessage = editMessageAndBranch(convId, 'qa-turn-msg-root', 'edited root prompt', {
+      newMessageId: 'qa-turn-msg-root-edit',
+    });
+    const editQueue = enqueueAgentPrompt(ids.agent, convId, 'edited root prompt', {
+      mode: 'respond_to_message',
+      targetMessageId: String(editedMessage.id),
+      turnType: 'edit',
+      supersedesMessageId: 'qa-turn-msg-root',
+    });
+    const editTurnId = String(editQueue.queueItem.turnId);
+    expect(mocks.store.getById('agentChatTurns', editTurnId)).toMatchObject({
+      turnType: 'edit',
+      supersedesTurnId: rootTurnId,
+      userMessageId: 'qa-turn-msg-root-edit',
+      status: 'queued',
+    });
+    expect(mocks.store.getById('agentChatTurns', rootTurnId)).toMatchObject({
+      status: 'superseded',
+    });
+
+    const afterEdit = enqueueAgentPrompt(ids.agent, convId, 'after edit follow-up', {
+      queuedMessageId: 'qa-turn-msg-after-edit',
+      previousUserMessageId: 'qa-turn-msg-root-edit',
+    });
+    expect(mocks.store.getById('agentChatTurns', String(afterEdit.queueItem.turnId))).toMatchObject({
+      parentTurnId: editTurnId,
+      userMessageId: 'qa-turn-msg-after-edit',
+      status: 'queued',
+    });
+
+    const failed = enqueueAgentPrompt(ids.agent, convId, 'failed prompt', {
+      queuedMessageId: 'qa-turn-msg-failed',
+    });
+    const failedTurnId = String(failed.queueItem.turnId);
+    createAgentRun({
+      id: 'qa-turn-run-failed',
+      agentId: ids.agent,
+      agentName: '[qa-smoke] turn paths agent',
+      model: 'codex',
+      modelId: 'gpt-5.3-codex',
+      triggerType: 'chat',
+      conversationId: convId,
+      responseParentId: 'qa-turn-msg-failed',
+      executor: 'remote',
+      status: 'running',
+      turnId: failedTurnId,
+    } as Parameters<typeof createAgentRun>[0]);
+    await failAgentRunCompletionSideEffect('qa-turn-run-failed', 'runner failed hard');
+    expect(mocks.store.getById('agentChatTurns', failedTurnId)).toMatchObject({
+      status: 'failed',
+      runId: 'qa-turn-run-failed',
+      metadata: { errorMessage: 'runner failed hard' },
+    });
+
+    const attachment = {
+      type: 'file',
+      fileName: 'spec.txt',
+      mimeType: 'text/plain',
+      fileSize: 42,
+      storagePath: '/chat-uploads/spec.txt',
+    };
+    const attachmentPrompt = enqueueAgentPrompt(ids.agent, convId, '', {
+      queuedMessageId: 'qa-turn-msg-attachment',
+      attachments: [attachment],
+    });
+    expect(attachmentPrompt.userMessage).toMatchObject({
+      id: 'qa-turn-msg-attachment',
+      type: 'file',
+      attachments: [attachment],
+    });
+    expect(attachmentPrompt.queueItem).toMatchObject({
+      queuedMessageId: 'qa-turn-msg-attachment',
+      attachments: [attachment],
+    });
+    expect(mocks.store.getById('agentChatTurns', String(attachmentPrompt.queueItem.turnId))).toMatchObject({
+      userMessageId: 'qa-turn-msg-attachment',
+      status: 'queued',
+    });
   });
 
   it('persists automatic comments for terminal card-assignment states across runner outcomes', async () => {

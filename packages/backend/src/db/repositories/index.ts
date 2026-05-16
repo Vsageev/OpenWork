@@ -1,4 +1,5 @@
 export * from './agent-execution-repository.js';
+export * from './agent-chat-turns-repository.js';
 export * from './agents-query-repository.js';
 export * from './agent-env-vars-repository.js';
 export * from './api-keys-repository.js';

@@ -355,6 +355,11 @@
   color: var(--color-warning);
 }
 
+.triggerUnknown {
+  background: var(--color-border-subtle);
+  color: var(--color-text-tertiary);
+}
+
 /* Status badges */
 .statusBadge {
   display: inline-flex;

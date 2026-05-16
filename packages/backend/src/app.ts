@@ -59,6 +59,7 @@ import {
   RUNS_DIR,
   scheduleQueuedAgentChatDrains,
 } from './services/agent-chat.js';
+import { backfillLegacyAgentChatTurns } from './services/agent-chat-turns.js';
 import { initializeAgentBatchQueue } from './services/agent-batch-queue.js';
 import { restoreManagedTelegramWebhooks } from './services/telegram.js';
 import { seedBuiltinSkills } from './services/skills.js';
@@ -106,6 +107,26 @@ export async function buildApp() {
   await store.init();
 
   // Run one-time data migrations, then seed built-in skills
+  const chatTurnBackfill = backfillLegacyAgentChatTurns({ linkReferences: false });
+  await store.flush();
+  const chatTurnReferenceBackfill = backfillLegacyAgentChatTurns({ linkReferences: true });
+  const chatTurnBackfillChanged =
+    chatTurnBackfill.created > 0 ||
+    chatTurnBackfill.updatedQueueItems > 0 ||
+    chatTurnBackfill.updatedRuns > 0 ||
+    chatTurnBackfill.repairedParentLinks > 0 ||
+    chatTurnBackfill.updatedActiveBranches > 0 ||
+    chatTurnReferenceBackfill.created > 0 ||
+    chatTurnReferenceBackfill.updatedQueueItems > 0 ||
+    chatTurnReferenceBackfill.updatedRuns > 0 ||
+    chatTurnReferenceBackfill.repairedParentLinks > 0 ||
+    chatTurnReferenceBackfill.updatedActiveBranches > 0;
+  if (chatTurnBackfillChanged) {
+    app.log.info(
+      { chatTurnBackfill, chatTurnReferenceBackfill },
+      'backfilled agent chat turns',
+    );
+  }
   seedBuiltinSkills();
   await store.flush();
 

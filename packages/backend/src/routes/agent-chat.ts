@@ -44,6 +44,7 @@ import {
   resolveAgentChatProcessWorkingDirectory,
 } from '../services/agent-chat.js';
 import { listAgentRuns } from '../services/agent-runs.js';
+import { getAgentConversationChatView } from '../services/agent-chat-view.js';
 import { ApiError } from '../utils/api-errors.js';
 
 // Rate limiter for agent prompt execution — shared across all requests in this process
@@ -290,6 +291,25 @@ export async function agentChatRoutes(app: FastifyInstance) {
     },
   );
 
+  typedApp.get(
+    '/api/agents/:id/chat/conversations/:conversationId/view',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Agent Chat'],
+        summary: 'Get canonical chat turn view for an agent conversation',
+        params: z.object({ id: z.string(), conversationId: z.string() }),
+      },
+    },
+    async (request, reply) => {
+      requireAgentExists(request.params.id);
+      requireConversationExists(request.params.conversationId, request.params.id);
+
+      const view = getAgentConversationChatView(request.params.id, request.params.conversationId);
+      return reply.send(view);
+    },
+  );
+
   typedApp.post(
     '/api/agents/:id/chat/conversations/:conversationId/reveal-folder',
     {
@@ -497,11 +517,13 @@ export async function agentChatRoutes(app: FastifyInstance) {
           {
             queuedMessageId: request.body.messageId,
             previousUserMessageId: request.body.previousUserMessageId ?? null,
+            createdById: userId,
           },
         );
         const statusCode = wasQueuedOrBusy ? 202 : 201;
         return reply.status(statusCode).send({
           status: 'queued',
+          message: queued.userMessage,
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {
@@ -769,6 +791,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
           request.body.conversationId,
           {
             targetMessageId: request.body.targetMessageId ?? null,
+            createdById: userId,
           },
         );
         const statusCode = queued.willQueueBehind ? 202 : 201;
@@ -837,6 +860,9 @@ export async function agentChatRoutes(app: FastifyInstance) {
           {
             mode: 'respond_to_message',
             targetMessageId: newMessage.id as string,
+            createdById: userId,
+            turnType: 'edit',
+            supersedesMessageId: request.body.originalMessageId,
           },
         );
         const statusCode = willQueueBehind ? 202 : 201;
@@ -942,6 +968,9 @@ export async function agentChatRoutes(app: FastifyInstance) {
         const queued = enqueueAgentPrompt(request.params.id, request.params.cid, content, {
           mode: 'respond_to_message',
           targetMessageId: newMessage.id as string,
+          createdById: userId,
+          turnType: 'edit',
+          supersedesMessageId: originalMessageId,
         });
         const statusCode = willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
@@ -1082,27 +1111,19 @@ export async function agentChatRoutes(app: FastifyInstance) {
       try {
         const attachments = await persistUploadedChatFiles(fileParts);
 
-        const messageType = attachments.every((attachment) => attachment.type === 'image')
-          ? 'image'
-          : 'file';
-
-        const message = saveAgentConversationMessage({
-          id: messageId,
-          conversationId,
-          direction: 'outbound',
-          content: caption || '',
-          type: messageType,
-          attachments,
+        const wasQueuedOrBusy =
+          isAgentBusy(request.params.id, conversationId) ||
+          getAgentQueuedPromptCount(request.params.id, conversationId) > 0;
+        const queued = enqueueAgentPrompt(request.params.id, conversationId, caption || '', {
+          queuedMessageId: messageId,
           previousUserMessageId,
+          attachments,
+          createdById: userId,
         });
-
-        const queued = enqueueAgentResponseToMessage(request.params.id, conversationId, {
-          targetMessageId: message.id as string,
-        });
-        const statusCode = queued.willQueueBehind ? 202 : 201;
+        const statusCode = wasQueuedOrBusy ? 202 : 201;
         return reply.status(statusCode).send({
           status: 'queued',
-          message,
+          message: queued.userMessage,
           entries: serializeActivePathEntries(conversationId),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,

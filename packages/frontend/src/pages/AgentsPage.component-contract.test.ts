@@ -198,6 +198,13 @@ describe('AgentsPage component contract', () => {
     });
     assertContains({
       componentName: 'AgentSidebarItem.memo',
+      stateInput: 'main chat Thinking/streaming without isBusy or pending keys',
+      contractName: 'memo-open-chat-panel-streaming',
+      sourceText: memoEq,
+      expected: 'if (prev.openChatPanelStreaming !== next.openChatPanelStreaming) return false;',
+    });
+    assertContains({
+      componentName: 'AgentSidebarItem.memo',
       stateInput: 'pendingConversationKeys differs for same conversation list ref',
       contractName: 'memo-pending-keys-per-conversation',
       sourceText: memoEq,

@@ -17,6 +17,11 @@ import {
   formatAgentRunErrorMessage,
 } from '../lib/agent-output.js';
 import { cancelRemoteAgentRun, isRemoteAgentRunPending } from './agent-runners.js';
+import {
+  markAgentChatTurnCompleted,
+  markAgentChatTurnFailed,
+  markAgentChatTurnStopped,
+} from './agent-chat-turns.js';
 
 type TriggerType = 'chat' | 'cron_job' | 'card_assignment';
 type RunStatus = 'queued' | 'running' | 'completed' | 'error';
@@ -46,6 +51,7 @@ interface CreateAgentRunParams {
   stderrPath?: string | null;
   triggerPrompt?: string | null;
   responseParentId?: string | null;
+  turnId?: string | null;
   status?: Extract<RunStatus, 'queued' | 'running'>;
 }
 
@@ -116,6 +122,7 @@ export function createAgentRun(params: CreateAgentRunParams): Record<string, unk
     stderrPath: params.stderrPath ?? null,
     triggerPrompt: params.triggerPrompt ?? null,
     responseParentId: params.responseParentId ?? null,
+    turnId: params.turnId ?? null,
     errorMessage: null,
     responseText: null,
     runnerLifecycle: {
@@ -311,6 +318,17 @@ export async function completeAgentRun(
     const patch = buildAgentRunCompletionPatch(run, errorMessage, logs);
     let updated = store.update('agent_runs', runId, patch);
     if (!updated) return null;
+    const turnId = typeof run.turnId === 'string' ? (run.turnId as string) : null;
+    if (turnId) {
+      if (patch.status === 'completed') {
+        markAgentChatTurnCompleted(turnId, { runId });
+      } else {
+        markAgentChatTurnFailed(turnId, {
+          runId,
+          errorMessage: typeof patch.errorMessage === 'string' ? patch.errorMessage : null,
+        });
+      }
+    }
 
     const sideEffect = persistTerminalCardAssignmentComment(run, patch);
     if (!sideEffect.ok) {
@@ -360,6 +378,10 @@ export async function failAgentRunCompletionSideEffect(
     };
     let updated = store.update('agent_runs', runId, patch);
     if (!updated) return null;
+    markAgentChatTurnFailed(typeof run.turnId === 'string' ? (run.turnId as string) : null, {
+      runId,
+      errorMessage: patch.errorMessage,
+    });
     const sideEffect = persistTerminalCardAssignmentComment(run, patch);
     if (!sideEffect.ok) {
       updated = store.update('agent_runs', runId, {
@@ -486,6 +508,10 @@ export async function killAgentRun(runId: string): Promise<{ ok: boolean; error?
     const patch = buildAgentRunCompletionPatch(run, 'Killed by user', undefined);
     const finalPatch = { ...patch, killedByUser: true };
     store.update('agent_runs', runId, finalPatch);
+    markAgentChatTurnStopped(typeof run.turnId === 'string' ? (run.turnId as string) : null, {
+      runId,
+      errorMessage: 'Killed by user',
+    });
     const sideEffect = persistTerminalCardAssignmentComment(run, finalPatch);
     if (!sideEffect.ok) {
       store.update('agent_runs', runId, {
@@ -527,6 +553,7 @@ function toAgentRunSummary(run: Record<string, unknown>) {
     cardId: run.cardId ?? null,
     cronJobId: run.cronJobId ?? null,
     responseParentId: run.responseParentId ?? null,
+    turnId: run.turnId ?? null,
     errorMessage,
     responseText: run.responseText ?? null,
     startedAt: run.startedAt,

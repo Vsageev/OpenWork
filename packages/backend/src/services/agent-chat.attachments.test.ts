@@ -21,6 +21,7 @@ import {
   activateMessagePathForSearchResult,
   getActiveMessagePath,
   getConversationAttachmentDiskPaths,
+  serializeAllConversationMessageEntries,
   updateQueueItem,
 } from './agent-chat.js';
 
@@ -348,5 +349,53 @@ describe('getConversationAttachmentDiskPaths', () => {
       'user:u1': 'u2a',
       'reply:u2a': 'r2a',
     });
+  });
+
+  it('collapses duplicate final assistant messages from the same run and parent', () => {
+    recordsByCollection.conversations = [
+      {
+        id: CONV_ID,
+        metadata: JSON.stringify({
+          activeBranches: {
+            'user:root': 'u1',
+            'reply:u1': 'r1-duplicate',
+          },
+        }),
+      },
+    ];
+    recordsByCollection.messages = [
+      {
+        id: 'u1',
+        conversationId: CONV_ID,
+        direction: 'outbound',
+        content: 'do the work',
+        parentId: null,
+        createdAt: '2026-05-16T01:20:55.088Z',
+      },
+      {
+        id: 'r1',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        content: 'done',
+        parentId: 'u1',
+        metadata: JSON.stringify({ runId: 'run-1', model: 'codex' }),
+        createdAt: '2026-05-16T01:23:10.102Z',
+      },
+      {
+        id: 'r1-duplicate',
+        conversationId: CONV_ID,
+        direction: 'inbound',
+        content: 'done',
+        parentId: 'u1',
+        metadata: JSON.stringify({ runId: 'run-1', model: 'codex' }),
+        createdAt: '2026-05-16T01:23:10.140Z',
+      },
+    ];
+
+    expect(getActiveMessagePath(CONV_ID).map((message) => message.id)).toEqual(['u1', 'r1']);
+    expect(serializeAllConversationMessageEntries(CONV_ID).map((message) => message.id)).toEqual([
+      'u1',
+      'r1',
+    ]);
   });
 });

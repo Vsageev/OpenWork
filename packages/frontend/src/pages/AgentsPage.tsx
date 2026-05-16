@@ -113,6 +113,7 @@ import {
   getBranchTargetIdByOffset,
   queueItemsLabel,
   toQueueCount,
+  type AgentConversationChatView,
 } from './agent-chat-view-model';
 
 /* ── Types ── */
@@ -311,11 +312,20 @@ interface ChatMessage {
   siblingIds?: string[];
   queueItemId?: string | null;
   queueStatus?: 'queued' | 'processing' | null;
+  turnId?: string | null;
+  turnStatus?: AgentConversationChatView['entries'][number]['status'];
+  turnType?: string;
+  availableActions?: AgentConversationChatView['entries'][number]['availableActions'];
+  supersedesTurnId?: string | null;
+  supersededByTurnId?: string | null;
+  isSupersededTurn?: boolean;
 }
 
 interface QueuePromptResponse {
   status: 'queued';
   queuedCount?: number;
+  message?: ChatMessage;
+  queueItem?: QueueItem;
 }
 
 interface ChatUploadAndRespondResponse extends QueuePromptResponse {
@@ -345,11 +355,14 @@ interface QueueItem {
   lastRunId?: string | null;
   usedFallback?: boolean;
   fallbackModel?: string | null;
+  turnId?: string | null;
+  turnStatus?: AgentConversationChatView['entries'][number]['status'];
+  availableActions?: AgentConversationChatView['entries'][number]['availableActions'];
 }
 
 interface AgentRunSummary {
   id: string;
-  agentId: string;
+  agentId?: string;
   conversationId: string | null;
   responseParentId?: string | null;
   status: 'running' | 'completed' | 'error';
@@ -453,6 +466,13 @@ export function getChatMessageEditableAttachments(
 
 export function isEditableChatMessage(message: ChatMessage): boolean {
   if (message.direction !== 'outbound') return false;
+  if (
+    Array.isArray(message.availableActions) &&
+    !message.availableActions.includes('edit_user_message') &&
+    !message.availableActions.includes('edit_queue_item')
+  ) {
+    return false;
+  }
   const type = message.type ?? 'text';
   return type === 'text' || type === 'image' || type === 'file';
 }
@@ -1633,6 +1653,8 @@ interface AgentSidebarItemProps {
   collapsed: boolean;
   isActive: boolean;
   activeConversationId: string | null;
+  /** Matches main chat panel `streaming` for this agent's open conversation (Thinking, runs, etc.). */
+  openChatPanelStreaming: boolean;
   groupsEnabled: boolean;
   pendingConversationKeys: Set<string>;
   runHandoffKeys: Set<string>;
@@ -1653,6 +1675,7 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   collapsed,
   isActive,
   activeConversationId,
+  openChatPanelStreaming,
   groupsEnabled,
   pendingConversationKeys,
   runHandoffKeys,
@@ -1669,8 +1692,12 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
   const hasUnreadAny = conversations.some((conversation) => conversation.isUnread);
   const hasStreamingAny = conversations.some((conversation) => {
     const key = agentConversationKey(agent.id, conversation.id);
+    const isOpenActiveRow = isActive && activeConversationId === conversation.id;
     return (
-      Boolean(conversation.isBusy) || pendingConversationKeys.has(key) || runHandoffKeys.has(key)
+      Boolean(conversation.isBusy) ||
+      pendingConversationKeys.has(key) ||
+      runHandoffKeys.has(key) ||
+      (isOpenActiveRow && openChatPanelStreaming)
     );
   });
   const queuedTotal = conversations.reduce(
@@ -1774,10 +1801,12 @@ const AgentSidebarItem = memo(function AgentSidebarItem({
         <div className={styles.convList}>
           {conversations.map((conversation) => {
             const convKey = agentConversationKey(agent.id, conversation.id);
+            const isOpenActiveRow = isActive && activeConversationId === conversation.id;
             const isStreaming =
               Boolean(conversation.isBusy) ||
               pendingConversationKeys.has(convKey) ||
-              runHandoffKeys.has(convKey);
+              runHandoffKeys.has(convKey) ||
+              (isOpenActiveRow && openChatPanelStreaming);
             const isUnread = conversation.isUnread;
             const queuedCount = toQueueCount(conversation.queuedCount);
             const hasFailed = Boolean(conversation.hasFailed);
@@ -1889,6 +1918,7 @@ function areAgentSidebarItemPropsEqual(
   if (prev.collapsed !== next.collapsed) return false;
   if (prev.isActive !== next.isActive) return false;
   if (prev.activeConversationId !== next.activeConversationId) return false;
+  if (prev.openChatPanelStreaming !== next.openChatPanelStreaming) return false;
   if (prev.groupsEnabled !== next.groupsEnabled) return false;
   if (
     prev.pendingConversationKeys === next.pendingConversationKeys &&
@@ -1995,16 +2025,16 @@ function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function getLastUserMessageId(messages: ChatMessage[]): string | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.direction === 'outbound') {
-      return messages[index]!.id;
-    }
+function getLatestCanonicalUserMessageId(view: AgentConversationChatView | null): string | null {
+  if (!view) return null;
+  for (let index = view.entries.length - 1; index >= 0; index -= 1) {
+    const userMessageId = view.entries[index]?.userMessage?.id ?? null;
+    if (userMessageId) return userMessageId;
   }
   return null;
 }
 
-function getLastPersistedUserMessageId(
+function getLegacyLastPersistedUserMessageId(
   messages: ChatMessage[],
   optimisticMessages: ChatMessage[],
 ): string | null {
@@ -2018,10 +2048,21 @@ function getLastPersistedUserMessageId(
   return null;
 }
 
+function getAppendParentUserMessageId(options: {
+  canonicalView: AgentConversationChatView | null;
+  messages: ChatMessage[];
+  optimisticMessages: ChatMessage[];
+}): string | null {
+  return (
+    getLatestCanonicalUserMessageId(options.canonicalView) ??
+    getLegacyLastPersistedUserMessageId(options.messages, options.optimisticMessages)
+  );
+}
+
 function buildOptimisticChatMessage(params: {
   id: string;
   content: string;
-  previousUserMessageId: string | null;
+  previousUserMessageId?: string | null;
   createdAt?: string;
 }): ChatMessage {
   return {
@@ -2033,7 +2074,7 @@ function buildOptimisticChatMessage(params: {
     metadata: null,
     attachments: null,
     parentId: null,
-    previousUserMessageId: params.previousUserMessageId,
+    previousUserMessageId: params.previousUserMessageId ?? null,
   };
 }
 
@@ -2050,6 +2091,42 @@ function mergeMessagesWithOptimistic(
   }
   merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   return merged;
+}
+
+function flattenCanonicalChatViewMessages(view: AgentConversationChatView): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  for (const turn of view.entries) {
+    for (const message of [turn.userMessage, turn.assistantMessage]) {
+      if (!message) continue;
+      messages.push({
+        id: message.id,
+        direction: message.direction,
+        content: message.content ?? '',
+        createdAt: message.createdAt ?? turn.createdAt ?? new Date(0).toISOString(),
+        type: message.type,
+        metadata:
+          typeof message.metadata === 'string'
+            ? message.metadata
+            : message.metadata
+              ? JSON.stringify(message.metadata)
+              : null,
+        attachments: message.attachments ?? null,
+        parentId:
+          message.direction === 'inbound'
+            ? (turn.userMessage?.id ?? turn.parentTurnId)
+            : turn.parentTurnId,
+        previousUserMessageId: null,
+        turnId: turn.id,
+        turnStatus: turn.status,
+        turnType: turn.turnType,
+        availableActions: turn.availableActions,
+        supersedesTurnId: turn.edit.supersedesTurnId,
+        supersededByTurnId: turn.edit.supersededByTurnId,
+        isSupersededTurn: turn.edit.isSuperseded,
+      });
+    }
+  }
+  return messages;
 }
 
 /* ── Agent Files sub-component ── */
@@ -2368,6 +2445,9 @@ export function AgentsPage() {
 
   // ── Chat state ──
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [canonicalChatView, setCanonicalChatView] = useState<AgentConversationChatView | null>(
+    null,
+  );
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [showChatLoading, setShowChatLoading] = useState(false);
@@ -2638,6 +2718,7 @@ export function AgentsPage() {
       activeConvIdRef.current = conversationId;
       setActiveAgentId(agentId);
       setActiveConvId(conversationId);
+      setCanonicalChatView(null);
       setQueueItems([]);
       setSavingQueueItemId(null);
       setDeletingQueueItemIds(new Set());
@@ -2719,6 +2800,18 @@ export function AgentsPage() {
     [],
   );
 
+  const clearConversationPending = useCallback((agentId: string, conversationId: string) => {
+    const key = agentConversationKey(agentId, conversationId);
+    pendingConversationCountRef.current.delete(key);
+    pendingConversationKeysRef.current.delete(key);
+    setPendingConversationKeys((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
   const setOptimisticResponseParent = useCallback(
     (agentId: string, conversationId: string, messageId: string | null) => {
       const key = agentConversationKey(agentId, conversationId);
@@ -2793,6 +2886,7 @@ export function AgentsPage() {
   } = useMemo(
     () =>
       buildAgentConversationViewModel({
+        canonicalView: canonicalChatView,
         messages,
         queueItems,
         activeConversationRuns,
@@ -2806,6 +2900,7 @@ export function AgentsPage() {
       activeConvId,
       activeConversationKey,
       activeConversationRuns,
+      canonicalChatView,
       messages,
       optimisticResponseParentIds,
       queueItems,
@@ -3206,17 +3301,18 @@ export function AgentsPage() {
       const requestToken = ++activeMessagesRequestTokenRef.current;
       if (!silent) setChatLoading(true);
       try {
-        const data = await api<{ entries: ChatMessage[] }>(
-          `/agents/${agentId}/chat/messages?conversationId=${conversationId}`,
+        const data = await api<AgentConversationChatView>(
+          `/agents/${agentId}/chat/conversations/${conversationId}/view`,
         );
         if (!isActiveConversation(agentId, conversationId)) return;
         if (requestToken !== activeMessagesRequestTokenRef.current) return;
         const conversationKey = agentConversationKey(agentId, conversationId);
         const optimisticMessages =
           optimisticMessagesByConversationRef.current[conversationKey] ?? [];
-        const mergedEntries = mergeMessagesWithOptimistic(data.entries, optimisticMessages);
+        const canonicalEntries = flattenCanonicalChatViewMessages(data);
+        const mergedEntries = mergeMessagesWithOptimistic(canonicalEntries, optimisticMessages);
         if (optimisticMessages.length > 0) {
-          const persistedIds = new Set(data.entries.map((message) => message.id));
+          const persistedIds = new Set(canonicalEntries.map((message) => message.id));
           const remainingOptimisticMessages = optimisticMessages.filter(
             (message) => !persistedIds.has(message.id),
           );
@@ -3234,6 +3330,7 @@ export function AgentsPage() {
         ) {
           clearRunHandoff(agentId, conversationId);
         }
+        setCanonicalChatView(data);
         // Skip update if message list hasn't changed (avoids dropping optimistic
         // temp messages and prevents unnecessary re-renders during polling).
         const prev = messagesRef2.current;
@@ -3882,6 +3979,7 @@ export function AgentsPage() {
         setChatError(null);
         void markConversationRead(result.agentId, result.conversationId);
         void Promise.all([
+          fetchMessages(result.agentId, result.conversationId, { silent: true }),
           fetchQueueItems(result.agentId, result.conversationId),
           fetchConversations(result.agentId),
           fetchConversationRun(result.agentId, result.conversationId),
@@ -3894,6 +3992,7 @@ export function AgentsPage() {
     [
       fetchConversationRun,
       fetchConversations,
+      fetchMessages,
       fetchQueueItems,
       markConversationRead,
       setActiveConversation,
@@ -4147,14 +4246,33 @@ export function AgentsPage() {
       toast.error('No active run found on this branch');
       return;
     }
+    const stoppedRunId = activeConversationRun.id;
     setStoppingRun(true);
     try {
-      await api(`/agent-runs/${activeConversationRun.id}`, { method: 'DELETE' });
+      await api(`/agent-runs/${stoppedRunId}`, { method: 'DELETE' });
+      clearRunHandoff(activeAgentId, activeConvId);
+      clearConversationPending(activeAgentId, activeConvId);
+      setOptimisticResponseParent(activeAgentId, activeConvId, null);
+      setActiveConversationRuns((prev) => prev.filter((run) => run.id !== stoppedRunId));
+      setActiveConversationQueueItems(activeAgentId, activeConvId, (prev) =>
+        prev.map((item) =>
+          item.runId === stoppedRunId
+            ? {
+                ...item,
+                status: 'cancelled',
+                completedAt: new Date().toISOString(),
+                errorMessage: 'Cancelled by user',
+                runId: null,
+              }
+            : item,
+        ),
+      );
       toast.success('Run stopped');
       // Refresh state
       await Promise.all([
         fetchMessages(activeAgentId, activeConvId),
         fetchConversations(activeAgentId),
+        fetchConversationRun(activeAgentId, activeConvId),
         fetchQueueItems(activeAgentId, activeConvId),
       ]);
     } catch {
@@ -4171,12 +4289,14 @@ export function AgentsPage() {
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
       const messageId = `upload-${Date.now()}-${generateId()}`;
-      const previousUserMessageId = getLastPersistedUserMessageId(
-        messagesRef2.current,
-        optimisticMessagesByConversationRef.current[
-          agentConversationKey(sentAgentId, sentConvId)
-        ] ?? [],
-      );
+      const previousUserMessageId = getAppendParentUserMessageId({
+        canonicalView: canonicalChatView,
+        messages: messagesRef2.current,
+        optimisticMessages:
+          optimisticMessagesByConversationRef.current[
+            agentConversationKey(sentAgentId, sentConvId)
+          ] ?? [],
+      });
       setChatError(null);
       requestAutoScrollToBottom();
 
@@ -4233,6 +4353,7 @@ export function AgentsPage() {
             return { ...prev, [sentAgentId]: nextConvs };
           });
           await Promise.all([
+            fetchMessages(sentAgentId, sentConvId, { silent: true }),
             fetchQueueItems(sentAgentId, sentConvId),
             fetchConversations(sentAgentId),
           ]);
@@ -4258,8 +4379,10 @@ export function AgentsPage() {
       activeAgentId,
       activeConvId,
       beginRunHandoff,
+      canonicalChatView,
       ensureAgentCliAvailable,
       fetchConversations,
+      fetchMessages,
       fetchQueueItems,
       fetchRunnerDevices,
       isActiveConversation,
@@ -4279,7 +4402,14 @@ export function AgentsPage() {
       const sentAgentId = activeAgentId;
       const sentConvId = activeConvId;
       const messageId = `direct-${Date.now()}-${generateId()}`;
-      const previousUserMessageId = getLastUserMessageId(messagesRef2.current);
+      const previousUserMessageId = getAppendParentUserMessageId({
+        canonicalView: canonicalChatView,
+        messages: messagesRef2.current,
+        optimisticMessages:
+          optimisticMessagesByConversationRef.current[
+            agentConversationKey(sentAgentId, sentConvId)
+          ] ?? [],
+      });
       setChatError(null);
       requestAutoScrollToBottom();
 
@@ -4333,7 +4463,7 @@ export function AgentsPage() {
               prompt,
               conversationId: sentConvId,
               messageId,
-              previousUserMessageId,
+              ...(previousUserMessageId ? { previousUserMessageId } : {}),
             }),
           },
         );
@@ -4351,8 +4481,24 @@ export function AgentsPage() {
           if (!changed) return prev;
           return { ...prev, [sentAgentId]: nextConvs };
         });
-        // Refetch queue items to replace optimistic entry with real data
-        await fetchQueueItems(sentAgentId, sentConvId);
+        if (queueResponse.message) {
+          setOptimisticConversationMessages(sentAgentId, sentConvId, (prev) =>
+            prev.filter((message) => message.id !== queueResponse.message?.id),
+          );
+          setActiveConversationMessages(sentAgentId, sentConvId, (prev) =>
+            mergeMessagesWithOptimistic(prev, [queueResponse.message!]),
+          );
+        }
+        if (queueResponse.queueItem) {
+          setActiveConversationQueueItems(sentAgentId, sentConvId, (prev) => [
+            ...prev.filter((item) => item.id !== optimisticQueueItem.id),
+            queueResponse.queueItem!,
+          ]);
+        }
+        await Promise.all([
+          fetchMessages(sentAgentId, sentConvId, { silent: true }),
+          fetchQueueItems(sentAgentId, sentConvId),
+        ]);
         if (!alreadyBusy) {
           const conversations = await fetchConversations(sentAgentId);
           const updatedConversation = conversations.find((conv) => conv.id === sentConvId);
@@ -4388,6 +4534,7 @@ export function AgentsPage() {
       activeAgentId,
       activeConvId,
       beginRunHandoff,
+      canonicalChatView,
       clearRunHandoff,
       ensureAgentCliAvailable,
       fetchConversations,
@@ -4398,6 +4545,7 @@ export function AgentsPage() {
       setActiveConversationMessages,
       setActiveConversationQueueItems,
       setOptimisticConversationMessages,
+      setOptimisticResponseParent,
       setConversationPending,
       streaming,
     ],
@@ -4415,6 +4563,7 @@ export function AgentsPage() {
       );
       cancelEditingMessage();
       setActiveConversationMessages(activeAgentId, activeConvId, data.entries);
+      await syncActiveConversation(activeAgentId, activeConvId, { silent: true });
     } catch {
       toast.error('Failed to switch branch');
     }
@@ -4466,9 +4615,6 @@ export function AgentsPage() {
     const { agentId: sentAgentId, conversationId: sentConvId, id: messageId } = editingMessage;
     const content = trimmedContent;
     const newMessageId = `edit-${Date.now()}-${generateId()}`;
-    const previousUserMessageId =
-      messagesRef2.current.find((message) => message.id === messageId)?.previousUserMessageId ??
-      null;
     const requestId = `edit-${Date.now()}-${generateId()}`;
     const headers = {
       'Idempotency-Key': `agent-chat-edit:${sentAgentId}:${sentConvId}:${messageId}:${requestId}`,
@@ -4496,9 +4642,6 @@ export function AgentsPage() {
         const fd = new FormData();
         fd.append('messageId', messageId);
         fd.append('newMessageId', newMessageId);
-        if (previousUserMessageId) {
-          fd.append('previousUserMessageId', previousUserMessageId);
-        }
         if (content) fd.append('content', content);
         for (const storagePath of keepStoragePaths) {
           fd.append('keepStoragePaths', storagePath);
@@ -4521,7 +4664,6 @@ export function AgentsPage() {
             body: JSON.stringify({
               originalMessageId: messageId,
               newMessageId,
-              previousUserMessageId,
               content,
               keepStoragePaths,
             }),
@@ -5847,6 +5989,9 @@ export function AgentsPage() {
                                 activeConversationId={
                                   activeAgentId === agent.id ? activeConvId : null
                                 }
+                                openChatPanelStreaming={
+                                  activeAgentId === agent.id ? streaming : false
+                                }
                                 groupsEnabled={groups.length > 0}
                                 pendingConversationKeys={pendingConversationKeys}
                                 runHandoffKeys={runHandoffKeys}
@@ -5905,6 +6050,9 @@ export function AgentsPage() {
                                 isActive={activeAgentId === agent.id}
                                 activeConversationId={
                                   activeAgentId === agent.id ? activeConvId : null
+                                }
+                                openChatPanelStreaming={
+                                  activeAgentId === agent.id ? streaming : false
                                 }
                                 groupsEnabled={groups.length > 0}
                                 pendingConversationKeys={pendingConversationKeys}
@@ -6095,6 +6243,7 @@ export function AgentsPage() {
                       <div className={styles.emptyText}>Loading messages…</div>
                     </div>
                   ) : visibleMessages.length === 0 &&
+                    queuedMessages.length === 0 &&
                     !streaming &&
                     !chatLoading &&
                     orphanErrorItems.length === 0 ? (
@@ -6219,6 +6368,13 @@ export function AgentsPage() {
                                     hour: '2-digit',
                                     minute: '2-digit',
                                   })}
+                                  {msg.direction === 'outbound' && msg.turnStatus === 'stopped' && (
+                                    <span
+                                      className={`${styles.turnBadge} ${styles.turnBadgeStopped}`}
+                                    >
+                                      Stopped
+                                    </span>
+                                  )}
                                   {isEditableChatMessage(msg) && (
                                     <button
                                       className={styles.editMsgBtn}
@@ -6317,7 +6473,7 @@ export function AgentsPage() {
                                       )}
                                     </div>
                                     <div className={styles.errorNoticeActions}>
-                                      {item.runId && item.status !== 'cancelled' && (
+                                      {item.runId && (
                                         <button
                                           className={styles.messageMonitorBtn}
                                           onClick={() => openMonitorRun(item.runId!)}
@@ -6327,7 +6483,8 @@ export function AgentsPage() {
                                           Monitor
                                         </button>
                                       )}
-                                      {item.status !== 'cancelled' && (
+                                      {(item.availableActions?.includes('retry') ??
+                                        item.status !== 'cancelled') && (
                                         <button
                                           className={styles.errorRetryBtn}
                                           onClick={() => void handleRetryQueueItem(item.id)}
@@ -6387,7 +6544,7 @@ export function AgentsPage() {
                                 )}
                               </div>
                               <div className={styles.errorNoticeActions}>
-                                {item.runId && item.status !== 'cancelled' && (
+                                {item.runId && (
                                   <button
                                     className={styles.messageMonitorBtn}
                                     onClick={() => openMonitorRun(item.runId!)}
@@ -6397,7 +6554,8 @@ export function AgentsPage() {
                                     Monitor
                                   </button>
                                 )}
-                                {item.status !== 'cancelled' && (
+                                {(item.availableActions?.includes('retry') ??
+                                  item.status !== 'cancelled') && (
                                   <button
                                     className={styles.errorRetryBtn}
                                     onClick={() => void handleRetryQueueItem(item.id)}

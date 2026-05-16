@@ -3,6 +3,8 @@ import {
   buildAgentConversationViewModel,
   type AgentChatMessage,
   type AgentChatQueueItem,
+  type AgentConversationChatView,
+  type AgentConversationChatTurn,
   type AgentConversationRunSummary,
 } from './agent-chat-view-model';
 
@@ -31,6 +33,60 @@ function queueItem(overrides: Partial<AgentChatQueueItem>): AgentChatQueueItem {
     createdAt: '2026-01-01T00:00:00.000Z',
     queuedMessageId: 'queued-message-1',
     previousUserMessageId: null,
+    ...overrides,
+  };
+}
+
+function canonicalTurn(overrides: Partial<AgentConversationChatTurn>): AgentConversationChatTurn {
+  const id = overrides.id ?? 'turn-1';
+  const userMessageId = overrides.userMessage?.id ?? `message-${id}`;
+  const createdAt = overrides.createdAt ?? '2026-01-01T00:00:00.000Z';
+  return {
+    id,
+    parentTurnId: null,
+    status: 'completed',
+    turnType: 'follow_up',
+    userMessage: {
+      id: userMessageId,
+      direction: 'outbound',
+      type: 'text',
+      content: userMessageId,
+      status: 'sent',
+      metadata: null,
+      attachments: null,
+      createdAt,
+      updatedAt: null,
+    },
+    assistantMessage: null,
+    execution: { queue: null, run: null },
+    branch: {
+      parentTurnId: null,
+      isSelected: true,
+      siblingIndex: 0,
+      siblingCount: 1,
+      siblingIds: [id],
+      siblings: [
+        {
+          turnId: id,
+          userMessageId,
+          status: 'completed',
+          turnType: 'follow_up',
+          supersedesTurnId: null,
+          isSelected: true,
+          createdAt,
+        },
+      ],
+    },
+    edit: {
+      supersedesTurnId: null,
+      supersededByTurnId: null,
+      isSuperseded: false,
+    },
+    availableActions: ['edit_user_message'],
+    createdAt,
+    updatedAt: null,
+    startedAt: null,
+    completedAt: null,
     ...overrides,
   };
 }
@@ -354,6 +410,73 @@ describe('buildAgentConversationViewModel', () => {
     expect(view.showStreamingBubble).toBe(false);
   });
 
+  it('renders the next prompt normally after the previous prompt was stopped', () => {
+    const activeAgentId = 'agent-stopped-followup';
+    const activeConvId = 'conversation-stopped-followup';
+    const view = buildAgentConversationViewModel({
+      messages: [
+        baseMessage({
+          id: 'stopped-root',
+          content: 'prompt that was stopped',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
+        baseMessage({
+          id: 'followup-after-stop',
+          content: 'new prompt after stop',
+          previousUserMessageId: 'stopped-root',
+          createdAt: '2026-01-01T00:00:30.000Z',
+        }),
+      ],
+      queueItems: [
+        queueItem({
+          id: 'queue-stopped-root',
+          agentId: activeAgentId,
+          conversationId: activeConvId,
+          prompt: 'prompt that was stopped',
+          status: 'cancelled',
+          queuedMessageId: 'stopped-root',
+          previousUserMessageId: null,
+          runId: null,
+          errorMessage: 'Cancelled by user',
+        }),
+        queueItem({
+          id: 'queue-followup-processing',
+          agentId: activeAgentId,
+          conversationId: activeConvId,
+          prompt: 'new prompt after stop',
+          status: 'processing',
+          queuedMessageId: 'followup-after-stop',
+          previousUserMessageId: 'stopped-root',
+          runId: 'run-followup',
+          createdAt: '2026-01-01T00:00:30.000Z',
+        }),
+      ],
+      activeConversationRuns: [
+        {
+          id: 'run-followup',
+          agentId: activeAgentId,
+          conversationId: activeConvId,
+          responseParentId: 'followup-after-stop',
+          status: 'running',
+          startedAt: '2026-01-01T00:00:31.000Z',
+        },
+      ],
+      activeAgentId,
+      activeConvId,
+      activeConversationKey: `${activeAgentId}:${activeConvId}`,
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages.map((message) => message.id)).toEqual([
+      'stopped-root',
+      'followup-after-stop',
+    ]);
+    expect(view.queuedMessages).toHaveLength(0);
+    expect(view.activeConversationRun?.id).toBe('run-followup');
+    expect(view.activeProcessingTargetMessageId).toBe('followup-after-stop');
+    expect(view.showStreamingBubble).toBe(true);
+  });
+
   it('negative control reports mismatched queued conversation identifiers with queue and run context', () => {
     expect(() =>
       assertVisibleQueueContract({
@@ -555,5 +678,393 @@ describe('buildAgentConversationViewModel', () => {
     expect(view.activeConversationRun?.id).toBe('run-edited-root');
     expect(view.activeProcessingTargetMessageId).toBe('edited-root');
     expect(view.showStreamingBubble).toBe(true);
+  });
+
+  it('hides sibling root append queue when siblingIds are missing but siblingCount proves variants', () => {
+    const view = buildAgentConversationViewModel({
+      messages: [
+        baseMessage({
+          id: 'edited-root',
+          content: 'edited version',
+          previousUserMessageId: null,
+          siblingIndex: 1,
+          siblingCount: 2,
+          createdAt: '2026-01-01T00:00:10.000Z',
+        }),
+      ],
+      queueItems: [
+        queueItem({
+          id: 'queue-original-root',
+          agentId: 'agent-1',
+          conversationId: 'conversation-1',
+          prompt: 'original version',
+          status: 'processing',
+          queuedMessageId: 'original-root',
+          previousUserMessageId: null,
+          runId: 'run-original-root',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ],
+      activeConversationRuns: [
+        {
+          id: 'run-edited-root',
+          agentId: 'agent-1',
+          conversationId: 'conversation-1',
+          responseParentId: 'edited-root',
+          status: 'running',
+          startedAt: '2026-01-01T00:00:11.000Z',
+        },
+      ],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.queuedQueueItems.map((item) => item.id)).not.toContain('queue-original-root');
+    expect(view.queuedMessages.map(({ message }) => message.id)).not.toContain('original-root');
+  });
+
+  it('renders canonical turn view statuses without reconstructing from legacy queue lineage', () => {
+    const canonicalView: AgentConversationChatView = {
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      total: 3,
+      branches: [],
+      entries: [
+        {
+          id: 'turn-stopped',
+          parentTurnId: null,
+          status: 'stopped',
+          turnType: 'follow_up',
+          userMessage: {
+            id: 'message-stopped',
+            direction: 'outbound',
+            type: 'text',
+            content: 'stop this',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: null,
+          },
+          assistantMessage: null,
+          execution: {
+            queue: {
+              id: 'queue-stopped',
+              status: 'cancelled',
+              runId: 'run-stopped',
+              errorMessage: 'Cancelled by user',
+              attempts: 1,
+              maxAttempts: 3,
+              nextAttemptAt: null,
+              startedAt: '2026-01-01T00:00:01.000Z',
+              completedAt: '2026-01-01T00:00:02.000Z',
+              usedFallback: false,
+              fallbackModel: null,
+            },
+            run: {
+              id: 'run-stopped',
+              status: 'error',
+              errorMessage: 'Killed by user',
+              responseText: null,
+              startedAt: '2026-01-01T00:00:01.000Z',
+              finishedAt: '2026-01-01T00:00:02.000Z',
+              durationMs: 1000,
+            },
+          },
+          branch: {
+            parentTurnId: null,
+            isSelected: true,
+            siblingIndex: 0,
+            siblingCount: 1,
+            siblingIds: ['turn-stopped'],
+            siblings: [
+              {
+                turnId: 'turn-stopped',
+                userMessageId: 'message-stopped',
+                status: 'stopped',
+                turnType: 'follow_up',
+                supersedesTurnId: null,
+                isSelected: true,
+                createdAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          },
+          edit: {
+            supersedesTurnId: null,
+            supersededByTurnId: null,
+            isSuperseded: false,
+          },
+          availableActions: ['retry', 'switch_branch'],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: null,
+          startedAt: '2026-01-01T00:00:01.000Z',
+          completedAt: '2026-01-01T00:00:02.000Z',
+        },
+        {
+          id: 'turn-edit',
+          parentTurnId: 'turn-stopped',
+          status: 'processing',
+          turnType: 'edit',
+          userMessage: {
+            id: 'message-edit',
+            direction: 'outbound',
+            type: 'text',
+            content: 'edited follow-up',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:01:00.000Z',
+            updatedAt: null,
+          },
+          assistantMessage: null,
+          execution: {
+            queue: {
+              id: 'queue-edit',
+              status: 'processing',
+              runId: 'run-edit',
+              errorMessage: null,
+              attempts: 1,
+              maxAttempts: 3,
+              nextAttemptAt: null,
+              startedAt: '2026-01-01T00:01:01.000Z',
+              completedAt: null,
+              usedFallback: false,
+              fallbackModel: null,
+            },
+            run: {
+              id: 'run-edit',
+              status: 'running',
+              errorMessage: null,
+              responseText: null,
+              startedAt: '2026-01-01T00:01:01.000Z',
+              finishedAt: null,
+              durationMs: null,
+            },
+          },
+          branch: {
+            parentTurnId: 'turn-stopped',
+            isSelected: true,
+            siblingIndex: 1,
+            siblingCount: 2,
+            siblingIds: ['turn-original', 'turn-edit'],
+            siblings: [
+              {
+                turnId: 'turn-original',
+                userMessageId: 'message-original',
+                status: 'superseded',
+                turnType: 'follow_up',
+                supersedesTurnId: null,
+                isSelected: false,
+                createdAt: '2026-01-01T00:00:30.000Z',
+              },
+              {
+                turnId: 'turn-edit',
+                userMessageId: 'message-edit',
+                status: 'processing',
+                turnType: 'edit',
+                supersedesTurnId: 'turn-original',
+                isSelected: true,
+                createdAt: '2026-01-01T00:01:00.000Z',
+              },
+            ],
+          },
+          edit: {
+            supersedesTurnId: 'turn-original',
+            supersededByTurnId: null,
+            isSuperseded: false,
+          },
+          availableActions: ['edit_user_message', 'stop', 'switch_branch'],
+          createdAt: '2026-01-01T00:01:00.000Z',
+          updatedAt: null,
+          startedAt: '2026-01-01T00:01:01.000Z',
+          completedAt: null,
+        },
+        {
+          id: 'turn-queued',
+          parentTurnId: 'turn-edit',
+          status: 'queued',
+          turnType: 'follow_up',
+          userMessage: {
+            id: 'message-queued',
+            direction: 'outbound',
+            type: 'text',
+            content: 'queued next',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:02:00.000Z',
+            updatedAt: null,
+          },
+          assistantMessage: null,
+          execution: {
+            queue: {
+              id: 'queue-queued',
+              status: 'queued',
+              runId: null,
+              errorMessage: null,
+              attempts: 0,
+              maxAttempts: 3,
+              nextAttemptAt: '2026-01-01T00:02:00.000Z',
+              startedAt: null,
+              completedAt: null,
+              usedFallback: false,
+              fallbackModel: null,
+            },
+            run: null,
+          },
+          branch: {
+            parentTurnId: 'turn-edit',
+            isSelected: true,
+            siblingIndex: 0,
+            siblingCount: 1,
+            siblingIds: ['turn-queued'],
+            siblings: [
+              {
+                turnId: 'turn-queued',
+                userMessageId: 'message-queued',
+                status: 'queued',
+                turnType: 'follow_up',
+                supersedesTurnId: null,
+                isSelected: true,
+                createdAt: '2026-01-01T00:02:00.000Z',
+              },
+            ],
+          },
+          edit: {
+            supersedesTurnId: null,
+            supersededByTurnId: null,
+            isSuperseded: false,
+          },
+          availableActions: ['edit_queue_item', 'delete_queue_item'],
+          createdAt: '2026-01-01T00:02:00.000Z',
+          updatedAt: null,
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
+    };
+
+    const view = buildAgentConversationViewModel({
+      canonicalView,
+      messages: [],
+      queueItems: [],
+      activeConversationRuns: [],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages.map((message) => message.id)).toEqual([
+      'message-stopped',
+      'message-edit',
+    ]);
+    expect(view.visibleMessages.find((message) => message.id === 'message-edit')).toMatchObject({
+      turnId: 'turn-edit',
+      turnStatus: 'processing',
+      turnType: 'edit',
+      siblingIds: ['message-original', 'message-edit'],
+    });
+    expect(view.errorsByMessageId.get('message-stopped')?.[0]).toMatchObject({
+      id: 'queue-stopped',
+      status: 'cancelled',
+      turnId: 'turn-stopped',
+      availableActions: ['retry', 'switch_branch'],
+    });
+    expect(view.queuedMessages).toEqual([
+      expect.objectContaining({
+        status: 'queued',
+        queueItem: expect.objectContaining({ id: 'queue-queued', turnId: 'turn-queued' }),
+        message: expect.objectContaining({ id: 'message-queued' }),
+      }),
+    ]);
+    expect(view.activeConversationRun?.id).toBe('run-edit');
+    expect(view.activeProcessingTargetMessageId).toBe('message-edit');
+    expect(view.showStreamingBubble).toBe(true);
+  });
+
+  it('preserves canonical turn order instead of re-sorting messages by timestamp', () => {
+    const canonicalView: AgentConversationChatView = {
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      total: 2,
+      branches: [],
+      entries: [
+        canonicalTurn({
+          id: 'turn-first',
+          userMessage: {
+            id: 'message-first',
+            direction: 'outbound',
+            type: 'text',
+            content: 'server-selected first',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:02:00.000Z',
+            updatedAt: null,
+          },
+          createdAt: '2026-01-01T00:02:00.000Z',
+        }),
+        canonicalTurn({
+          id: 'turn-second',
+          parentTurnId: 'turn-first',
+          userMessage: {
+            id: 'message-second',
+            direction: 'outbound',
+            type: 'text',
+            content: 'server-selected second',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:01:00.000Z',
+            updatedAt: null,
+          },
+          createdAt: '2026-01-01T00:01:00.000Z',
+        }),
+      ],
+    };
+
+    const view = buildAgentConversationViewModel({
+      canonicalView,
+      messages: [],
+      queueItems: [],
+      activeConversationRuns: [],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages.map((message) => message.id)).toEqual([
+      'message-first',
+      'message-second',
+    ]);
+  });
+
+  it('does not render a stale canonical view for a different active conversation', () => {
+    const canonicalView: AgentConversationChatView = {
+      agentId: 'agent-1',
+      conversationId: 'conversation-old',
+      total: 1,
+      branches: [],
+      entries: [canonicalTurn({ id: 'turn-old' })],
+    };
+
+    const view = buildAgentConversationViewModel({
+      canonicalView,
+      messages: [baseMessage({ id: 'legacy-visible', content: 'legacy fallback should not show' })],
+      queueItems: [],
+      activeConversationRuns: [],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages).toEqual([]);
+    expect(view.queuedMessages).toEqual([]);
+    expect(view.showStreamingBubble).toBe(false);
   });
 });

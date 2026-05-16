@@ -8,11 +8,11 @@ import { toast } from '../stores/toast';
 import styles from './AgentMonitorPage.module.css';
 import { MarkdownContent } from '../ui/MarkdownContent';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import { extractFinalResponseText, formatAgentOutputForDisplay, formatAgentRunErrorMessage, parseAgentOutputBlocks } from 'shared';
+import { formatAgentOutputForDisplay, formatAgentRunErrorMessage, parseAgentOutputBlocks } from 'shared';
 import type { OutputBlock } from 'shared';
 import { getAgentModelDefinition } from '../lib/agent-models';
 
-type AgentRunTriggerType = 'chat' | 'cron_job' | 'card_assignment';
+type AgentRunTriggerType = 'chat' | 'cron_job' | 'card_assignment' | 'cron' | 'card' | (string & {});
 
 interface AgentRun {
   id: string;
@@ -174,13 +174,28 @@ function ElapsedTimer({ startedAt }: { startedAt: string }) {
   return <span>{formatDuration(now - new Date(startedAt).getTime())}</span>;
 }
 
+type TriggerBadgeConfig = { label: string; className: string; icon: React.ReactNode };
+
+const UNKNOWN_TRIGGER_BADGE_CONFIG: TriggerBadgeConfig = {
+  label: 'Run',
+  className: styles.triggerUnknown,
+  icon: <Activity size={12} />,
+};
+
+const TRIGGER_BADGE_CONFIG: Record<string, TriggerBadgeConfig> = {
+  chat: { label: 'Chat', className: styles.triggerChat, icon: <MessageSquare size={12} /> },
+  cron_job: { label: 'Cron', className: styles.triggerCron, icon: <Clock size={12} /> },
+  cron: { label: 'Cron', className: styles.triggerCron, icon: <Clock size={12} /> },
+  card_assignment: { label: 'Card', className: styles.triggerCard, icon: <Zap size={12} /> },
+  card: { label: 'Card', className: styles.triggerCard, icon: <Zap size={12} /> },
+};
+
+function getTriggerBadgeConfig(type: AgentRun['triggerType'] | null | undefined): TriggerBadgeConfig {
+  return type ? (TRIGGER_BADGE_CONFIG[type] ?? UNKNOWN_TRIGGER_BADGE_CONFIG) : UNKNOWN_TRIGGER_BADGE_CONFIG;
+}
+
 function TriggerBadge({ type }: { type: AgentRun['triggerType'] }) {
-  const config: Record<AgentRunTriggerType, { label: string; className: string; icon: React.ReactNode }> = {
-    chat: { label: 'Chat', className: styles.triggerChat, icon: <MessageSquare size={12} /> },
-    cron_job: { label: 'Cron', className: styles.triggerCron, icon: <Clock size={12} /> },
-    card_assignment: { label: 'Card', className: styles.triggerCard, icon: <Zap size={12} /> },
-  };
-  const c = config[type];
+  const c = getTriggerBadgeConfig(type);
   return (
     <span className={`${styles.triggerBadge} ${c.className}`}>
       {c.icon} {c.label}
@@ -275,7 +290,11 @@ function SimpleLogView({ blocks }: { blocks: OutputBlock[] }) {
   const toggleThinking = (idx: number) => {
     setExpandedThinking(prev => {
       const next = new Set(prev);
-      next.has(idx) ? next.delete(idx) : next.add(idx);
+      if (next.has(idx)) {
+        next.delete(idx);
+      } else {
+        next.add(idx);
+      }
       return next;
     });
   };
@@ -648,7 +667,6 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
   const stdoutText = detail.stdout?.trim() || null;
   const parsedBlocks = stdoutText ? parseAgentOutputBlocks(stdoutText) : null;
   const formattedStdout = stdoutText ? formatAgentOutputForDisplay(stdoutText) : null;
-  const extractedStdoutResponse = stdoutText ? extractFinalResponseText(stdoutText) : null;
   const formattedStderr = detail.stderr?.trim()
     ? formatAgentOutputForDisplay(detail.stderr.trim())
     : null;
@@ -1051,7 +1069,7 @@ export function AgentMonitorPage() {
       fetchActive(),
       fetchHistory({ status: 'all', triggerType: 'all', agentId: 'all' }),
       fetchActiveBatchRuns(),
-    ]).then(([activeCount, _history, activeBatchCount]) => {
+    ]).then(([activeCount, , activeBatchCount]) => {
       if (cancelled) return;
       prevActiveCountRef.current = activeCount;
       prevActiveBatchCountRef.current = activeBatchCount;

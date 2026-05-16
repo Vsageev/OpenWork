@@ -1226,6 +1226,31 @@
   color: var(--color-text-secondary);
 }
 
+.turnBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--color-info) 20%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-info) 8%, transparent);
+  color: var(--color-info);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.turnBadgeStopped {
+  border-color: color-mix(in srgb, var(--color-warning) 24%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  color: var(--color-warning);
+}
+
+.turnBadgeMuted {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-tertiary);
+}
+
 button.messageMonitorBtn,
 .copyBtn {
   cursor: pointer;

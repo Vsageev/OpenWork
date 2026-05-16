@@ -64,6 +64,20 @@
       "when": 1778841600000,
       "tag": "0008_remove_auto_dev_cards_board",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1778918400000,
+      "tag": "0009_agent_chat_turns",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1778922000000,
+      "tag": "0010_prune_agent_run_legacy_data",
+      "breakpoints": true
     }
   ]
 }

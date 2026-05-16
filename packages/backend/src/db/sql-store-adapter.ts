@@ -370,6 +370,7 @@ const MAPPINGS: CollectionMapping[] = [
     'errorMessage',
     'responseText',
     'responseParentId',
+    'turnId',
     'killedByUser',
     'avatarIcon',
     'avatarBgColor',
@@ -377,6 +378,26 @@ const MAPPINGS: CollectionMapping[] = [
     'startedAt',
     'finishedAt',
     'durationMs',
+    'createdAt',
+    'updatedAt',
+    'legacyData',
+  ]),
+  mapping('agentChatTurns', 'agent_chat_turns', [
+    'id',
+    'conversationId',
+    'agentId',
+    'parentTurnId',
+    'userMessageId',
+    'assistantMessageId',
+    'status',
+    'runId',
+    'source',
+    'createdById',
+    'turnType',
+    'supersedesTurnId',
+    'metadata',
+    'startedAt',
+    'completedAt',
     'createdAt',
     'updatedAt',
     'legacyData',
@@ -418,6 +439,7 @@ const MAPPINGS: CollectionMapping[] = [
     'status',
     'attempts',
     'maxAttempts',
+    'turnId',
     'runId',
     'lastRunId',
     'targetMessageId',
@@ -874,6 +896,7 @@ export class SqlStoreAdapter implements Store, NativeQueryStore<ReturnType<typeo
         row[column] = JSON.stringify(legacyData);
         continue;
       }
+      delete legacyData[field];
       if (field in record || entry.primaryFields.includes(field)) {
         row[column] = sqlValue(field, record[field]);
       }
@@ -883,10 +906,20 @@ export class SqlStoreAdapter implements Store, NativeQueryStore<ReturnType<typeo
 
   private recordFromRow(collection: string, row: StoreRecord): StoreRecord {
     const legacyData = normalizeJson(row.legacy_data);
+    const entry = MAPPING_BY_COLLECTION.get(collection);
     const record =
       legacyData && typeof legacyData === 'object' && !Array.isArray(legacyData)
         ? ({ ...(legacyData as StoreRecord) } as StoreRecord)
         : ({ ...row } as StoreRecord);
+    if (entry) {
+      for (const field of entry.columns) {
+        if (field === 'legacyData') continue;
+        const column = toSnake(field);
+        if (column in row) {
+          record[field] = row[column];
+        }
+      }
+    }
 
     if (!record.id) record.id = this.cacheKey(collection, record);
     return record;

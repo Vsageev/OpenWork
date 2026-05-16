@@ -46,6 +46,18 @@ import {
   failAgentRunCompletionSideEffect,
   getAgentRun,
 } from './agent-runs.js';
+import {
+  createAgentChatTurn,
+  ensureLegacyAgentChatTurnForUserMessage,
+  findAgentChatTurnForUserMessage,
+  markAgentChatTurnCompleted,
+  markAgentChatTurnFailed,
+  markAgentChatTurnQueued,
+  markAgentChatTurnRunning,
+  markAgentChatTurnStopped,
+  updateAgentChatTurn,
+  type AgentChatTurnType,
+} from './agent-chat-turns.js';
 import { getFallbackModelConfig } from './project-settings.js';
 
 const STORAGE_DIR = path.resolve(env.DATA_DIR, 'storage');
@@ -898,10 +910,74 @@ function isTreeEnabledConversation(conversationId: string): boolean {
 }
 
 function listConversationMessages(conversationId: string): Record<string, unknown>[] {
-  return listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<
+  const messages = listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<
     string,
     unknown
   >[];
+  return dedupeFinalRunResponseMessages(messages);
+}
+
+function getFinalRunResponseId(message: Record<string, unknown>): string | null {
+  if (message.direction !== 'inbound') return null;
+  const metadata = parseMetadata(message.metadata);
+  const runId = typeof metadata?.runId === 'string' ? metadata.runId : null;
+  if (!runId) return null;
+  if (metadata?.agentChatUpdate === true && metadata?.isFinal === false) return null;
+  return runId;
+}
+
+function getFinalRunResponseKey(message: Record<string, unknown>): string | null {
+  const runId = getFinalRunResponseId(message);
+  if (!runId) return null;
+  return `${runId}:${(message.parentId as string | null) ?? ROOT_BRANCH_KEY}`;
+}
+
+function dedupeFinalRunResponseMessages(
+  messages: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  return messages.filter((message) => {
+    const key = getFinalRunResponseKey(message);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function findExistingFinalRunResponse(
+  conversationId: string,
+  parentId: string | null,
+  runId: string,
+): Record<string, unknown> | null {
+  return (
+    listConversationMessages(conversationId).find((message) => {
+      if (((message.parentId as string | null) ?? null) !== parentId) return false;
+      return getFinalRunResponseId(message) === runId;
+    }) ?? null
+  );
+}
+
+function pruneDuplicateFinalRunResponses(
+  conversationId: string,
+  parentId: string | null,
+  runId: string,
+): Record<string, unknown> | null {
+  const matches = (
+    listMessagesByConversationId(conversationId, { order: 'asc' }) as Record<string, unknown>[]
+  ).filter((message) => {
+    if (((message.parentId as string | null) ?? null) !== parentId) return false;
+    return getFinalRunResponseId(message) === runId;
+  });
+  if (matches.length === 0) return null;
+
+  const [keep, ...duplicates] = matches;
+  for (const duplicate of duplicates) {
+    if (typeof duplicate.id === 'string') {
+      store.delete('messages', duplicate.id);
+    }
+  }
+  return keep ?? null;
 }
 
 function buildChildrenMap(
@@ -936,9 +1012,19 @@ function getSelectableReplyChildren(
   childrenMap: Map<string, Record<string, unknown>[]>,
   parentId: string,
 ): Record<string, unknown>[] {
-  return getSelectableBranchChildren(childrenMap, parentId).filter(
+  const replyChildren = getSelectableBranchChildren(childrenMap, parentId).filter(
     (message) => message.direction !== 'outbound',
   );
+  const seenFinalRunIds = new Set<string>();
+  return replyChildren.filter((message) => {
+    const metadata = parseMetadata(message.metadata);
+    const runId = typeof metadata?.runId === 'string' ? metadata.runId : null;
+    if (!runId) return true;
+    if (metadata?.agentChatUpdate === true && metadata?.isFinal === false) return true;
+    if (seenFinalRunIds.has(runId)) return false;
+    seenFinalRunIds.add(runId);
+    return true;
+  });
 }
 
 function getUserBranchSelectionKey(previousUserMessageId: string | null): string {
@@ -1610,6 +1696,18 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     ? getCurrentConversationLeafId(params.conversationId)
     : null;
 
+  const runId = typeof params.metadata?.runId === 'string' ? params.metadata.runId : null;
+  if (params.direction === 'inbound' && runId && !isProgressUpdate) {
+    const existingRunResponse = findExistingFinalRunResponse(
+      params.conversationId,
+      parentId,
+      runId,
+    );
+    if (existingRunResponse) {
+      return existingRunResponse;
+    }
+  }
+
   const msg = store.insert('messages', {
     id: params.id,
     conversationId: params.conversationId,
@@ -1629,16 +1727,20 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     isUnread: markUnread,
   });
 
+  const finalRunResponse =
+    runId && params.direction === 'inbound' && !isProgressUpdate
+      ? pruneDuplicateFinalRunResponses(params.conversationId, parentId, runId)
+      : msg;
+  const branchMessage = finalRunResponse ?? msg;
+
   if (canAdvanceActiveBranch) {
     if (params.direction === 'outbound') {
       const selectionKey = getUserBranchSelectionKey(previousUserMessageId);
-      if (shouldAutoSelectNewChild(params.conversationId, selectionKey, currentLeafId)) {
-        setActiveBranchSelection(params.conversationId, selectionKey, msg.id as string);
-      }
+      setActiveBranchSelection(params.conversationId, selectionKey, branchMessage.id as string);
     } else if (parentId) {
       const selectionKey = getReplyBranchSelectionKey(parentId);
       if (shouldAutoSelectNewChild(params.conversationId, selectionKey, currentLeafId)) {
-        setActiveBranchSelection(params.conversationId, selectionKey, msg.id as string);
+        setActiveBranchSelection(params.conversationId, selectionKey, branchMessage.id as string);
       }
     }
   }
@@ -1650,7 +1752,7 @@ export function saveAgentConversationMessage(params: SaveAgentMessageParams) {
     );
   }
 
-  return msg;
+  return branchMessage;
 }
 
 function saveMessage(conversationId: string, direction: 'inbound' | 'outbound', content: string) {
@@ -1721,6 +1823,39 @@ function findPendingBranchDependencyForAppendPrompt(
   );
 }
 
+function resolveQueuedPromptParentId(
+  conversationId: string,
+  options: {
+    previousUserMessageId: string | null;
+    continuationParentId: string | null;
+    dependsOnQueueItemId: string | null;
+  },
+): string | null {
+  const getConversationMessageId = (messageId: unknown): string | null => {
+    if (typeof messageId !== 'string') return null;
+    const message = store.getById('messages', messageId);
+    if (!message || message.conversationId !== conversationId) return null;
+    return messageId;
+  };
+
+  let parentId =
+    options.previousUserMessageId !== null
+      ? getContinuationParentIdForPreviousUserMessage(conversationId, options.previousUserMessageId)
+      : getConversationMessageId(options.continuationParentId);
+
+  if (options.dependsOnQueueItemId) {
+    const dependency = store.getById(AGENT_CHAT_QUEUE_COLLECTION, options.dependsOnQueueItemId);
+    if (dependency && dependency.conversationId === conversationId) {
+      parentId =
+        getConversationMessageId(dependency.responseMessageId) ??
+        getConversationMessageId(getQueueItemAnchorMessageId(dependency)) ??
+        parentId;
+    }
+  }
+
+  return parentId ?? getCurrentConversationLeafId(conversationId);
+}
+
 function ensureQueuedPromptMessage(
   queueItemId: string,
   queueItem: Record<string, unknown>,
@@ -1736,34 +1871,21 @@ function ensureQueuedPromptMessage(
     }
   }
 
-  const getConversationMessageId = (messageId: unknown): string | null => {
-    if (typeof messageId !== 'string') return null;
-    const message = store.getById('messages', messageId);
-    if (!message || message.conversationId !== conversationId) return null;
-    return messageId;
-  };
-
-  let parentId =
+  const previousUserMessageId =
     typeof queueItem.previousUserMessageId === 'string' || queueItem.previousUserMessageId === null
-      ? getContinuationParentIdForPreviousUserMessage(
-          conversationId,
-          (queueItem.previousUserMessageId as string | null | undefined) ?? null,
-        )
-      : getConversationMessageId(queueItem.continuationParentId);
-  const dependsOnQueueItemId =
-    typeof queueItem.dependsOnQueueItemId === 'string'
-      ? (queueItem.dependsOnQueueItemId as string)
+      ? ((queueItem.previousUserMessageId as string | null | undefined) ?? null)
       : null;
-  if (dependsOnQueueItemId) {
-    const dependency = store.getById(AGENT_CHAT_QUEUE_COLLECTION, dependsOnQueueItemId);
-    if (dependency && dependency.conversationId === conversationId) {
-      parentId =
-        getConversationMessageId(dependency.responseMessageId) ??
-        getConversationMessageId(getQueueItemAnchorMessageId(dependency)) ??
-        parentId;
-    }
-  }
-  parentId ??= getCurrentConversationLeafId(conversationId);
+  const parentId = resolveQueuedPromptParentId(conversationId, {
+    previousUserMessageId,
+    continuationParentId:
+      typeof queueItem.continuationParentId === 'string'
+        ? (queueItem.continuationParentId as string)
+        : null,
+    dependsOnQueueItemId:
+      typeof queueItem.dependsOnQueueItemId === 'string'
+        ? (queueItem.dependsOnQueueItemId as string)
+        : null,
+  });
 
   if (parentId) {
     activateMessagePath(conversationId, parentId);
@@ -1782,11 +1904,7 @@ function ensureQueuedPromptMessage(
     metadata: null,
     attachments: queuedAttachments.length > 0 ? queuedAttachments : null,
     parentId,
-    previousUserMessageId:
-      typeof queueItem.previousUserMessageId === 'string' ||
-      queueItem.previousUserMessageId === null
-        ? ((queueItem.previousUserMessageId as string | null | undefined) ?? null)
-        : undefined,
+    previousUserMessageId,
   });
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     queuedMessageId: userMessage.id,
@@ -2068,6 +2186,7 @@ interface AgentProcessOptions {
   triggerType: TriggerType;
   triggerRef?: { conversationId?: string; cardId?: string; cronJobId?: string };
   responseParentId?: string | null;
+  turnId?: string | null;
   onStdoutChunk?: (text: string) => void;
   onRunCreated?: (runId: string) => void;
   onExit: (result: AgentProcessResult) => void;
@@ -2665,6 +2784,7 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
       cronJobId: options.triggerRef?.cronJobId,
       triggerPrompt: options.prompt,
       responseParentId: options.responseParentId ?? null,
+      turnId: options.turnId ?? null,
       executor: 'remote',
       status: 'queued',
     });
@@ -2897,11 +3017,13 @@ function spawnChatProcess(
     isFallback?: boolean;
     responseParentId?: string | null;
     targetMessageId?: string | null;
+    turnId?: string | null;
   },
 ) {
   const isFallback = options?.isFallback ?? false;
   const responseParentId = options?.responseParentId ?? null;
   const targetMessageId = options?.targetMessageId ?? null;
+  const turnId = options?.turnId ?? null;
 
   void Promise.all([prepareAgentWorkspaceAccess(agentId), getFallbackModelConfig()])
     .then(([agent, globalFallback]) => {
@@ -2934,6 +3056,7 @@ function spawnChatProcess(
         triggerType: 'chat',
         triggerRef: { conversationId },
         responseParentId,
+        turnId,
         onRunCreated: (runId) => {
           spawnedRunId = runId;
           callbacks.onRunCreated?.(runId);
@@ -2957,6 +3080,7 @@ function spawnChatProcess(
                   isFallback: true,
                   responseParentId,
                   targetMessageId,
+                  turnId,
                 });
                 return;
               }
@@ -2979,6 +3103,7 @@ function spawnChatProcess(
                   isFallback: true,
                   responseParentId,
                   targetMessageId,
+                  turnId,
                 });
                 return;
               }
@@ -3036,6 +3161,7 @@ function spawnChatProcess(
                 isFallback: true,
                 responseParentId,
                 targetMessageId,
+                turnId,
               });
               return;
             }
@@ -3078,6 +3204,7 @@ export function executePrompt(
   options: {
     onRunCreated?: (runId: string) => void;
     onFallbackStarted?: (model: string) => void;
+    turnId?: string | null;
   } = {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -3116,6 +3243,7 @@ export function executePrompt(
       }),
       {
         responseParentId: userMessage.id as string,
+        turnId: options.turnId ?? null,
       },
     );
   });
@@ -3128,6 +3256,7 @@ function executeRespondToMessage(
   options: {
     onRunCreated?: (runId: string) => void;
     onFallbackStarted?: (model: string) => void;
+    turnId?: string | null;
   } = {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -3170,6 +3299,7 @@ function executeRespondToMessage(
       {
         responseParentId: parentMessageId,
         targetMessageId: parentMessageId,
+        turnId: options.turnId ?? null,
       },
     );
   });
@@ -3269,20 +3399,38 @@ function normalizeQueueMaxAttempts(value: unknown): number {
 }
 
 function markQueueItemCompleted(queueItemId: string, finalMessage: Record<string, unknown> | null) {
+  const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, queueItemId);
+  const turnId = typeof item?.turnId === 'string' ? (item.turnId as string) : null;
+  const runId =
+    typeof item?.runId === 'string'
+      ? (item.runId as string)
+      : typeof item?.lastRunId === 'string'
+        ? (item.lastRunId as string)
+        : null;
+  const assistantMessageId =
+    finalMessage && typeof finalMessage.id === 'string'
+      ? (finalMessage.id as string)
+      : ((finalMessage?.id as string | undefined) ?? null);
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     status: 'completed',
     completedAt: new Date().toISOString(),
     nextAttemptAt: null,
     errorMessage: null,
     runId: null,
-    responseMessageId:
-      finalMessage && typeof finalMessage.id === 'string'
-        ? finalMessage.id
-        : ((finalMessage?.id as string | undefined) ?? null),
+    responseMessageId: assistantMessageId,
   });
+  markAgentChatTurnCompleted(turnId, { assistantMessageId, runId });
 }
 
 function markQueueItemCancelledByUser(queueItemId: string, errorMessage = 'Cancelled by user') {
+  const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, queueItemId);
+  const turnId = typeof item?.turnId === 'string' ? (item.turnId as string) : null;
+  const runId =
+    typeof item?.runId === 'string'
+      ? (item.runId as string)
+      : typeof item?.lastRunId === 'string'
+        ? (item.lastRunId as string)
+        : null;
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     status: 'cancelled',
     completedAt: new Date().toISOString(),
@@ -3290,6 +3438,7 @@ function markQueueItemCancelledByUser(queueItemId: string, errorMessage = 'Cance
     runId: null,
     errorMessage,
   });
+  markAgentChatTurnStopped(turnId, { runId, errorMessage });
 }
 
 function retryOrFailQueueItem(
@@ -3307,6 +3456,11 @@ function retryOrFailQueueItem(
       completedAt: new Date().toISOString(),
       nextAttemptAt: null,
       runId: null,
+      errorMessage: chatErrorSummary,
+    });
+    const turnId = typeof queueItem.turnId === 'string' ? (queueItem.turnId as string) : null;
+    markAgentChatTurnFailed(turnId, {
+      runId: typeof queueItem.runId === 'string' ? (queueItem.runId as string) : null,
       errorMessage: chatErrorSummary,
     });
     return;
@@ -3341,6 +3495,9 @@ function retryOrFailQueueItem(
       usedFallback: false,
       fallbackModel: null,
     });
+    markAgentChatTurnQueued(
+      typeof queueItem.turnId === 'string' ? (queueItem.turnId as string) : null,
+    );
     return;
   }
 
@@ -3355,6 +3512,13 @@ function retryOrFailQueueItem(
     runId: null,
     errorMessage: displayError,
   });
+  markAgentChatTurnFailed(
+    typeof queueItem.turnId === 'string' ? (queueItem.turnId as string) : null,
+    {
+      runId: typeof queueItem.runId === 'string' ? (queueItem.runId as string) : null,
+      errorMessage: displayError,
+    },
+  );
 }
 
 function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>): boolean {
@@ -3502,6 +3666,7 @@ async function processQueueItem(
 ): Promise<void> {
   let spawnedRunId: string | null = null;
   try {
+    const turnId = typeof readyItem.turnId === 'string' ? (readyItem.turnId as string) : null;
     let effectiveTargetId = targetMessageId;
     if (mode === 'append_prompt') {
       const promptMessage = ensureQueuedPromptMessage(
@@ -3512,11 +3677,13 @@ async function processQueueItem(
       );
       effectiveTargetId =
         typeof promptMessage.id === 'string' ? (promptMessage.id as string) : null;
+      updateAgentChatTurn(turnId, { userMessageId: effectiveTargetId });
     }
 
     if (!effectiveTargetId) {
       throw AgentChatError.notFound('queue_target_missing', 'Queued message target is missing');
     }
+    markAgentChatTurnRunning(turnId, { userMessageId: effectiveTargetId });
 
     const onRunCreated = (runId: string) => {
       spawnedRunId = runId;
@@ -3524,6 +3691,7 @@ async function processQueueItem(
         runId,
         lastRunId: runId,
       });
+      markAgentChatTurnRunning(turnId, { runId, userMessageId: effectiveTargetId });
     };
     const onFallbackStarted = (model: string) => {
       store.update(AGENT_CHAT_QUEUE_COLLECTION, readyItemId, {
@@ -3534,6 +3702,7 @@ async function processQueueItem(
     const finalMessage = await executeRespondToMessage(agentId, conversationId, effectiveTargetId, {
       onRunCreated,
       onFallbackStarted,
+      turnId,
     });
     const latestItem = store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId);
     if (!latestItem || latestItem.status !== 'processing') return;
@@ -3654,6 +3823,13 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
                 errorMessage:
                   'This agent is not assigned to a workspace with a runner. Add the agent to a workspace, then try again.',
               });
+              markAgentChatTurnFailed(
+                typeof item.turnId === 'string' ? (item.turnId as string) : null,
+                {
+                  errorMessage:
+                    'This agent is not assigned to a workspace with a runner. Add the agent to a workspace, then try again.',
+                },
+              );
             }
             return { kind: 'idle' as const, hasQueuedItems: false };
           }
@@ -3692,6 +3868,10 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
                 runId: null,
                 errorMessage: 'Queued prompt is empty',
               });
+              markAgentChatTurnFailed(
+                typeof readyItem.turnId === 'string' ? (readyItem.turnId as string) : null,
+                { errorMessage: 'Queued prompt is empty' },
+              );
               continue;
             }
             if (mode === 'respond_to_message' && !targetMessageId) {
@@ -3702,6 +3882,10 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
                 runId: null,
                 errorMessage: 'Queued branch target is missing',
               });
+              markAgentChatTurnFailed(
+                typeof readyItem.turnId === 'string' ? (readyItem.turnId as string) : null,
+                { errorMessage: 'Queued branch target is missing' },
+              );
               continue;
             }
 
@@ -3715,6 +3899,9 @@ async function drainConversationQueue(agentId: string, conversationId: string): 
               usedFallback: false,
               fallbackModel: null,
             });
+            markAgentChatTurnRunning(
+              typeof readyItem.turnId === 'string' ? (readyItem.turnId as string) : null,
+            );
 
             const latest =
               store.getById(AGENT_CHAT_QUEUE_COLLECTION, readyItemId) ??
@@ -3873,24 +4060,7 @@ export function scheduleQueuedAgentChatDrains() {
   }
 }
 
-export interface EnqueueAgentPromptResult {
-  queueItem: Record<string, unknown>;
-  queuedCount: number;
-}
-
-export function enqueueAgentPrompt(
-  agentId: string,
-  conversationId: string,
-  prompt: string,
-  options: {
-    mode?: QueueExecutionMode;
-    targetMessageId?: string | null;
-    queuedMessageId?: string | null;
-    previousUserMessageId?: string | null;
-  } = {},
-): EnqueueAgentPromptResult {
-  const trimmedPrompt = prompt.trim();
-  const mode = options.mode ?? 'append_prompt';
+function assertAgentRunnerAvailableForQueue(agentId: string): void {
   const runnerWorkspaceId = getAgentRunnerWorkspaceIdOrThrow(agentId);
   const runnerProvider = getAgentRunnerProviderOrThrow(agentId);
   const runnerScope = resolveAgentRemoteRunnerRoutingScope(agentId);
@@ -3908,11 +4078,39 @@ export function enqueueAgentPrompt(
       ),
     );
   }
-  if (!trimmedPrompt && mode !== 'respond_to_message') {
+}
+
+export interface EnqueueAgentPromptResult {
+  queueItem: Record<string, unknown>;
+  userMessage: Record<string, unknown> | null;
+  queuedCount: number;
+}
+
+export function enqueueAgentPrompt(
+  agentId: string,
+  conversationId: string,
+  prompt: string,
+  options: {
+    mode?: QueueExecutionMode;
+    targetMessageId?: string | null;
+    queuedMessageId?: string | null;
+    previousUserMessageId?: string | null;
+    createdById?: string | null;
+    source?: string;
+    turnType?: AgentChatTurnType;
+    supersedesMessageId?: string | null;
+    attachments?: unknown[] | null;
+    metadata?: Record<string, unknown>;
+  } = {},
+): EnqueueAgentPromptResult {
+  const trimmedPrompt = prompt.trim();
+  const mode = options.mode ?? 'append_prompt';
+  const appendPromptAttachments = cloneAttachmentRecords(parseAttachments(options.attachments));
+  if (!trimmedPrompt && mode !== 'respond_to_message' && appendPromptAttachments.length === 0) {
     throw AgentChatError.badRequest('prompt_required', 'Prompt is required');
   }
   const targetMessageId = options.targetMessageId ?? null;
-  const queuedMessageId = options.queuedMessageId ?? null;
+  let queuedMessageId = options.queuedMessageId ?? null;
   const previousUserMessageId = resolvePreviousUserMessageId(
     conversationId,
     options.previousUserMessageId ?? null,
@@ -3927,6 +4125,7 @@ export function enqueueAgentPrompt(
     }
   }
 
+  let userMessage: Record<string, unknown> | null = null;
   let continuationParentId: string | null = null;
   let dependsOnQueueItemId: string | null = null;
   if (mode === 'append_prompt') {
@@ -3943,9 +4142,82 @@ export function enqueueAgentPrompt(
     if (dependency && typeof dependency.id === 'string') {
       dependsOnQueueItemId = dependency.id as string;
     }
+
+    const existingQueuedMessage = queuedMessageId
+      ? store.getById('messages', queuedMessageId)
+      : null;
+    if (existingQueuedMessage) {
+      if (
+        existingQueuedMessage.conversationId !== conversationId ||
+        existingQueuedMessage.direction !== 'outbound'
+      ) {
+        throw AgentChatError.badRequest(
+          'queued_message_id_invalid',
+          'Queued message id must refer to a user message in this conversation',
+        );
+      }
+      userMessage = existingQueuedMessage;
+    } else {
+      const parentId = resolveQueuedPromptParentId(conversationId, {
+        previousUserMessageId,
+        continuationParentId,
+        dependsOnQueueItemId,
+      });
+      if (parentId) {
+        activateMessagePath(conversationId, parentId);
+      }
+      userMessage = saveAgentConversationMessage({
+        id: queuedMessageId ?? undefined,
+        conversationId,
+        direction: 'outbound',
+        content: trimmedPrompt,
+        type: getMessageTypeForAttachments(appendPromptAttachments),
+        metadata: null,
+        attachments: appendPromptAttachments.length > 0 ? appendPromptAttachments : null,
+        parentId,
+        previousUserMessageId,
+      });
+    }
+    queuedMessageId =
+      typeof userMessage.id === 'string' ? (userMessage.id as string) : queuedMessageId;
   }
 
   pruneChatQueueHistory();
+
+  const turnUserMessageId = mode === 'respond_to_message' ? targetMessageId : queuedMessageId;
+  const supersededTurn = options.supersedesMessageId
+    ? (findAgentChatTurnForUserMessage(agentId, conversationId, options.supersedesMessageId) ??
+      ensureLegacyAgentChatTurnForUserMessage(agentId, conversationId, options.supersedesMessageId))
+    : null;
+  const turnType =
+    options.turnType ??
+    (supersededTurn ? 'edit' : mode === 'respond_to_message' ? 'response' : 'follow_up');
+  const turn = createAgentChatTurn({
+    agentId,
+    conversationId,
+    parentUserMessageId: previousUserMessageId,
+    userMessageId: turnUserMessageId,
+    source: options.source ?? 'user',
+    createdById: options.createdById ?? null,
+    turnType,
+    supersedesTurnId: typeof supersededTurn?.id === 'string' ? (supersededTurn.id as string) : null,
+    metadata: {
+      mode,
+      targetMessageId,
+      queuedMessageId,
+      ...(options.metadata ?? {}),
+    },
+  });
+  const turnId = typeof turn.id === 'string' ? (turn.id as string) : null;
+
+  try {
+    assertAgentRunnerAvailableForQueue(agentId);
+  } catch (err) {
+    markAgentChatTurnFailed(turnId, {
+      errorMessage: err instanceof Error ? err.message : 'Agent runner unavailable',
+    });
+    throw err;
+  }
 
   const queueItem = store.insert(AGENT_CHAT_QUEUE_COLLECTION, {
     agentId,
@@ -3956,6 +4228,7 @@ export function enqueueAgentPrompt(
     status: 'queued',
     attempts: 0,
     maxAttempts: AGENT_CHAT_QUEUE_DEFAULT_MAX_ATTEMPTS,
+    turnId,
     runId: null,
     lastRunId: null,
     continuationParentId,
@@ -3964,6 +4237,10 @@ export function enqueueAgentPrompt(
     queuedMessageId,
     responseMessageId: null,
     errorMessage: null,
+    attachments:
+      mode === 'append_prompt' && appendPromptAttachments.length > 0
+        ? appendPromptAttachments
+        : null,
     nextAttemptAt: new Date().toISOString(),
     startedAt: null,
     completedAt: null,
@@ -3982,6 +4259,7 @@ export function enqueueAgentPrompt(
 
   return {
     queueItem,
+    userMessage,
     queuedCount: effectiveCount,
   };
 }
@@ -3994,7 +4272,13 @@ export interface EnqueueAgentResponseToMessageResult extends EnqueueAgentPromptR
 export function enqueueAgentResponseToMessage(
   agentId: string,
   conversationId: string,
-  options: { targetMessageId?: string | null } = {},
+  options: {
+    targetMessageId?: string | null;
+    createdById?: string | null;
+    source?: string;
+    turnType?: AgentChatTurnType;
+    metadata?: Record<string, unknown>;
+  } = {},
 ): EnqueueAgentResponseToMessageResult {
   const targetMessageId =
     options.targetMessageId ??
@@ -4019,6 +4303,10 @@ export function enqueueAgentResponseToMessage(
   const queued = enqueueAgentPrompt(agentId, conversationId, '', {
     mode: 'respond_to_message',
     targetMessageId,
+    createdById: options.createdById ?? null,
+    source: options.source,
+    turnType: options.turnType,
+    metadata: options.metadata,
   });
 
   return {
@@ -4197,6 +4485,7 @@ export function retryQueueItem(itemId: string, agentId: string, conversationId: 
     usedFallback: false,
     fallbackModel: null,
   });
+  markAgentChatTurnQueued(typeof item.turnId === 'string' ? (item.turnId as string) : null);
   scheduleQueueDrain(agentId, conversationId, 0);
   return updated;
 }
@@ -4213,6 +4502,15 @@ export function deleteQueueItem(itemId: string, agentId: string, conversationId:
     );
   }
 
+  markAgentChatTurnStopped(typeof item.turnId === 'string' ? (item.turnId as string) : null, {
+    runId:
+      typeof item.runId === 'string'
+        ? (item.runId as string)
+        : typeof item.lastRunId === 'string'
+          ? (item.lastRunId as string)
+          : null,
+    errorMessage: 'Removed from queue',
+  });
   store.delete(AGENT_CHAT_QUEUE_COLLECTION, itemId);
   return true;
 }
@@ -4220,7 +4518,16 @@ export function deleteQueueItem(itemId: string, agentId: string, conversationId:
 export function clearAgentConversationQueue(agentId: string, conversationId: string): number {
   const items = getConversationQueueItems(agentId, conversationId);
   const count = items.filter((i) => i.status === 'queued').length;
-  clearConversationQueue(conversationId);
+  for (const item of items) {
+    markAgentChatTurnStopped(typeof item.turnId === 'string' ? (item.turnId as string) : null, {
+      errorMessage: 'Removed from queue',
+    });
+  }
+  for (const item of items) {
+    if (typeof item.id === 'string') {
+      store.delete(AGENT_CHAT_QUEUE_COLLECTION, item.id);
+    }
+  }
   return count;
 }
 
@@ -4251,9 +4558,14 @@ export function reorderQueueItems(
   // Assign new createdAt timestamps to enforce ordering
   const baseTime = Date.now();
   for (let i = 0; i < orderedIds.length; i++) {
+    const item = itemMap.get(orderedIds[i]);
+    const createdAt = new Date(baseTime + i).toISOString();
     store.update(AGENT_CHAT_QUEUE_COLLECTION, orderedIds[i], {
-      createdAt: new Date(baseTime + i).toISOString(),
+      createdAt,
     });
+    if (typeof item?.turnId === 'string') {
+      updateAgentChatTurn(item.turnId, { createdAt });
+    }
   }
   return true;
 }
