@@ -4,6 +4,7 @@ import {
   listWorkspacesTouchingCollectionIds,
 } from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
+import type { Board, Card, Collection, Workspace } from '../db/types.js';
 import { createAuditLog } from './audit-log.js';
 
 const GENERAL_COLLECTION_NAMES = new Set(['general']);
@@ -39,7 +40,7 @@ export function isGeneralCollection(record: unknown): boolean {
 }
 
 export async function countGeneralCollections(): Promise<number> {
-  const all = store.getAll('collections') as any[];
+  const all = store.getAll('collections') as unknown as Collection[];
   return all.filter((collection) => isGeneralCollection(collection)).length;
 }
 
@@ -72,7 +73,7 @@ async function insertCollection(
     description: data.description ?? null,
     isGeneral,
     createdById: audit?.userId,
-  }) as any;
+  }) as unknown as Collection;
 
   if (audit) {
     await createAuditLog({
@@ -114,7 +115,7 @@ async function persistCollectionUpdate(
 }
 
 export async function consolidateGeneralCollections() {
-  const all = store.getAll('collections') as any[];
+  const all = store.getAll('collections') as unknown as Collection[];
   const generals = all.filter((collection) => isGeneralCollection(collection));
   if (generals.length === 0) return null;
 
@@ -139,18 +140,18 @@ export async function consolidateGeneralCollections() {
     .filter((id): id is string => typeof id === 'string' && id !== canonicalId);
 
   if (duplicateIds.length === 0) {
-    return (store.getById('collections', canonicalId) as any) ?? canonical;
+    return (store.getById('collections', canonicalId) as Collection | null) ?? canonical;
   }
 
   const duplicateIdSet = new Set(duplicateIds);
 
-  const cards = listCardsWithCollectionIdIn(duplicateIdSet) as any[];
+  const cards = listCardsWithCollectionIdIn(duplicateIdSet) as unknown as Card[];
   for (const card of cards) {
     if (typeof card.id !== 'string') continue;
     store.update('cards', card.id, { collectionId: canonicalId });
   }
 
-  const boards = listBoardsTouchingCollectionIds(duplicateIdSet) as any[];
+  const boards = listBoardsTouchingCollectionIds(duplicateIdSet) as unknown as Board[];
   for (const board of boards) {
     if (typeof board.id !== 'string') continue;
 
@@ -170,7 +171,7 @@ export async function consolidateGeneralCollections() {
     }
   }
 
-  const workspaces = listWorkspacesTouchingCollectionIds(duplicateIdSet) as any[];
+  const workspaces = listWorkspacesTouchingCollectionIds(duplicateIdSet) as unknown as Workspace[];
   for (const workspace of workspaces) {
     if (typeof workspace.id !== 'string') continue;
 
@@ -190,7 +191,7 @@ export async function consolidateGeneralCollections() {
     store.delete('collections', duplicateId);
   }
 
-  return (store.getById('collections', canonicalId) as any) ?? canonical;
+  return (store.getById('collections', canonicalId) as Collection | null) ?? canonical;
 }
 
 export interface CollectionListQuery {
@@ -232,19 +233,19 @@ export async function listCollections(query: CollectionListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
 
-  let all = store.getAll('collections') as any[];
+  let all = store.getAll('collections') as unknown as Collection[];
 
   if (query.ids) {
     const idSet = new Set(query.ids);
-    all = all.filter((f: any) => idSet.has(f.id));
+    all = all.filter((f) => idSet.has(f.id));
   }
 
   if (query.search) {
     const term = query.search.toLowerCase();
     all = all.filter(
-      (f: any) =>
-        f.name?.toLowerCase().includes(term) ||
-        f.description?.toLowerCase().includes(term),
+      (f) =>
+        f.name.toLowerCase().includes(term) ||
+        (f.description?.toLowerCase().includes(term) ?? false),
     );
   }
 
@@ -257,14 +258,14 @@ export async function listCollections(query: CollectionListQuery) {
   const entries = all.slice(offset, offset + limit);
 
   if (query.withCardCounts) {
-    const allCards = store.getAll('cards') as any[];
+    const allCards = store.getAll('cards') as unknown as Card[];
     const countByCollection = new Map<string, number>();
     for (const card of allCards) {
       if (typeof card.collectionId === 'string') {
         countByCollection.set(card.collectionId, (countByCollection.get(card.collectionId) ?? 0) + 1);
       }
     }
-    const entriesWithCounts = entries.map((c: any) => ({
+    const entriesWithCounts = entries.map((c) => ({
       ...c,
       cardCount: countByCollection.get(c.id) ?? 0,
     }));
@@ -302,7 +303,7 @@ export async function updateCollection(
   data: UpdateCollectionData,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const existing = store.getById('collections', id) as any;
+  const existing = store.getById('collections', id) as Collection | null;
   if (!existing) return null;
 
   const setData: Record<string, unknown> = {};
@@ -320,7 +321,7 @@ export async function updateCollection(
 
   if (nextIsGeneral) {
     return runWithGeneralCollectionLock(async () => {
-      const current = store.getById('collections', id) as any;
+      const current = store.getById('collections', id) as Collection | null;
       if (!current) return null;
 
       const currentSetData: Record<string, unknown> = {};

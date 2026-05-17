@@ -14,7 +14,9 @@ import {
   listGeneralBoardsNative,
 } from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
+import type { Board, BoardCard, BoardColumn, Card, CardTag, Tag, User } from '../db/types.js';
 import { createAuditLog } from './audit-log.js';
+import type { AgentRecord } from './agents.js';
 import { updateCard } from './cards.js';
 import { getOrCreateGeneralCollection } from './collections.js';
 
@@ -47,8 +49,8 @@ async function runWithGeneralBoardLock<T>(fn: () => Promise<T> | T): Promise<T> 
   }
 }
 
-async function findCanonicalGeneralBoard(excludeId?: string): Promise<any | null> {
-  const generals = (await listGeneralBoardsNative(isGeneralBoard, excludeId)) as any[];
+async function findCanonicalGeneralBoard(excludeId?: string): Promise<Board | null> {
+  const generals = (await listGeneralBoardsNative(isGeneralBoard, excludeId)) as unknown as Board[];
   if (generals.length === 0) return null;
 
   generals.sort((a, b) => {
@@ -80,7 +82,7 @@ async function insertBoard(
     defaultCollectionId,
     isGeneral,
     createdById: audit?.userId,
-  }) as any;
+  }) as unknown as Board;
 
   if (columns && columns.length > 0) {
     for (const col of columns) {
@@ -178,10 +180,10 @@ export async function listBoards(query: BoardListQuery) {
 }
 
 export async function getBoardById(id: string) {
-  const board = store.getById('boards', id) as any;
+  const board = store.getById('boards', id) as Board | null;
   if (!board) return null;
 
-  const columns = (await listBoardColumnsByBoardIdNative(id)) as any[];
+  const columns = (await listBoardColumnsByBoardIdNative(id)) as unknown as BoardColumn[];
 
   return { ...board, columns };
 }
@@ -190,21 +192,21 @@ export async function getBoardWithCards(id: string) {
   const board = await getBoardById(id);
   if (!board) return null;
 
-  const boardCards = (await listBoardCardsByBoardIdNative(id)) as any[];
+  const boardCards = (await listBoardCardsByBoardIdNative(id)) as unknown as BoardCard[];
 
   // Load card data for each board card, including assignee and tags
-  const cardsWithPositions = boardCards.map((bc: any) => {
-    const card = store.getById('cards', bc.cardId) as any;
+  const cardsWithPositions = boardCards.map((bc) => {
+    const card = store.getById('cards', bc.cardId) as Card | null;
     if (!card) return { ...bc, card: null };
 
     // Hydrate assignee
     let assignee = null;
     if (card.assigneeId) {
-      const user = store.getById('users', card.assigneeId) as any;
+      const user = store.getById('users', card.assigneeId) as User | null;
       if (user) {
         assignee = { id: user.id, firstName: user.firstName, lastName: user.lastName, type: 'user' as const };
       } else {
-        const agent = store.getById('agents', card.assigneeId) as any;
+        const agent = store.getById('agents', card.assigneeId) as AgentRecord | null;
         if (agent) {
           assignee = {
             id: agent.id, firstName: agent.name, lastName: '', type: 'agent' as const,
@@ -215,10 +217,10 @@ export async function getBoardWithCards(id: string) {
     }
 
     // Hydrate tags
-    const cardTags = listCardTagsByCardId(card.id) as any[];
+    const cardTags = listCardTagsByCardId(card.id) as unknown as CardTag[];
     const tags = cardTags
-      .map((ct: any) => store.getById('tags', ct.tagId))
-      .filter(Boolean);
+      .map((ct) => store.getById('tags', ct.tagId) as Tag | null)
+      .filter((tag): tag is Tag => Boolean(tag));
 
     return {
       ...bc,
@@ -265,7 +267,7 @@ export async function updateBoard(
   data: UpdateBoardData,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
 ) {
-  const existing = store.getById('boards', id) as any;
+  const existing = store.getById('boards', id) as Board | null;
   if (!existing) return null;
 
   const currentIsGeneral = isGeneralBoard(existing);
@@ -285,7 +287,7 @@ export async function updateBoard(
 
   if (nextIsGeneral && !currentIsGeneral) {
     return runWithGeneralBoardLock(async () => {
-      const refreshed = store.getById('boards', id) as any;
+      const refreshed = store.getById('boards', id) as Board | null;
       if (!refreshed) return null;
 
       const refreshedIsGeneral = isGeneralBoard(refreshed);
@@ -410,10 +412,10 @@ export async function deleteColumn(columnId: string) {
 // ── Auto-assign agent helper ──────────────────────────────────────────
 
 async function tryAutoAssignAgent(columnId: string, cardId: string) {
-  const column = store.getById('boardColumns', columnId) as any;
+  const column = store.getById('boardColumns', columnId) as BoardColumn | null;
   if (!column?.assignAgentId) return;
 
-  const card = store.getById('cards', cardId) as any;
+  const card = store.getById('cards', cardId) as Card | null;
   if (!card) return;
 
   // Skip if card is already assigned to this agent
@@ -453,7 +455,7 @@ export async function addCardToBoard(boardId: string, cardId: string, columnId: 
 }
 
 export async function moveCardOnBoard(boardId: string, cardId: string, columnId: string, position?: number) {
-  const boardCard = (await getBoardCardByBoardAndCardNative(boardId, cardId)) as any;
+  const boardCard = (await getBoardCardByBoardAndCardNative(boardId, cardId)) as BoardCard | null;
   if (!boardCard) return null;
 
   const previousColumnId = boardCard.columnId;

@@ -5,7 +5,7 @@
  *
  * Matrix rows are logged as JSON for CI / independent checker grep (`qa-non-codex-matrix-row`).
  */
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import sensible from '@fastify/sensible';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -143,7 +143,7 @@ async function buildMatrixApi() {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   await app.register(sensible);
-  app.decorate('authenticate', async (request: any) => {
+  app.decorate('authenticate', async (request: FastifyRequest) => {
     request.user = { sub: 'user-matrix' };
   });
   await app.register(agentRunRoutes);

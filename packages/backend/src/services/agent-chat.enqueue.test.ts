@@ -39,23 +39,37 @@ import { __agentChatTestUtils, enqueueAgentPrompt } from './agent-chat.js';
 
 describe('enqueueAgentPrompt runner workspace validation', () => {
   beforeEach(() => {
+    const records = new Map<string, Record<string, unknown>>();
+    const keyFor = (collection: string, id: string) => `${collection}:${id}`;
+
     mocks.store.getAll.mockReset();
     mocks.store.getById.mockReset();
     mocks.store.insert.mockReset();
     mocks.store.update.mockReset();
-    mocks.store.getById.mockReturnValue(null);
-    mocks.store.insert.mockImplementation((collection: string, data: Record<string, unknown>) => ({
-      ...data,
-      id: typeof data.id === 'string' ? data.id : `${collection}-1`,
-      createdAt: '2026-05-16T12:00:00.000Z',
-      updatedAt: '2026-05-16T12:00:00.000Z',
-    }));
-    mocks.store.update.mockImplementation(
-      (_collection: string, id: string, data: Record<string, unknown>) => ({
+    mocks.store.getById.mockImplementation((collection: string, id: string) =>
+      records.get(keyFor(collection, id)) ?? null,
+    );
+    mocks.store.insert.mockImplementation((collection: string, data: Record<string, unknown>) => {
+      const record = {
         ...data,
-        id,
-        updatedAt: '2026-05-16T12:00:01.000Z',
-      }),
+        id: typeof data.id === 'string' ? data.id : `${collection}-1`,
+        createdAt: '2026-05-16T12:00:00.000Z',
+        updatedAt: '2026-05-16T12:00:00.000Z',
+      };
+      records.set(keyFor(collection, record.id), record);
+      return record;
+    });
+    mocks.store.update.mockImplementation(
+      (collection: string, id: string, data: Record<string, unknown>) => {
+        const record = {
+          ...(records.get(keyFor(collection, id)) ?? {}),
+          ...data,
+          id,
+          updatedAt: '2026-05-16T12:00:01.000Z',
+        };
+        records.set(keyFor(collection, id), record);
+        return record;
+      },
     );
     mocks.getAgent.mockReset();
     mocks.hasConnectedRemoteAgentRunner.mockReset();

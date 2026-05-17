@@ -5,7 +5,6 @@ import { Tooltip } from '../ui';
 import styles from './AgentAvatar.module.css';
 
 /* ── Icon shapes (16×16 grids, 1 = logo, 0 = background) ── */
-/* prettier-ignore */
 const ICONS: Record<string, { label: string; pattern: number[][] }> = {
   spark: {
     label: 'Spark',
@@ -181,10 +180,6 @@ function decodePattern(icon: string): number[][] | null {
 
 function emptyGrid(): number[][] {
   return Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill(0));
-}
-
-function isCustomIcon(icon: string): boolean {
-  return icon.startsWith(CUSTOM_PREFIX);
 }
 
 /* ── Color generation ── */

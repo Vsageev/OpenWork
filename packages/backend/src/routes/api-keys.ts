@@ -7,6 +7,7 @@ import {
   getApiKeyById,
   updateApiKey,
   deleteApiKey,
+  type UpdateApiKeyParams,
 } from '../services/api-keys.js';
 import { syncAgentsForApiKey } from '../services/agents.js';
 
@@ -17,10 +18,12 @@ const API_RESOURCES = [
   'storage', 'tags', 'conversations',
 ] as const;
 
+type ApiResource = (typeof API_RESOURCES)[number];
+
 const permissionSchema = z.string().refine(
   (val) => {
     const [resource, action] = val.split(':');
-    return API_RESOURCES.includes(resource as any) && (action === 'read' || action === 'write');
+    return API_RESOURCES.includes(resource as ApiResource) && (action === 'read' || action === 'write');
   },
   { message: 'Permission must be in format resource:(read|write)' },
 );
@@ -87,7 +90,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const key = await getApiKeyById(request.params.id) as any;
+      const key = await getApiKeyById(request.params.id);
       if (!key) return reply.notFound('API key not found');
 
       const user = request.user as { sub: string };
@@ -120,7 +123,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
           expiresAt: request.body.expiresAt ? new Date(request.body.expiresAt) : undefined,
         },
         auditMeta(request),
-      ) as any;
+      );
 
       return reply.status(201).send({
         id: result.id,
@@ -150,7 +153,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const existing = await getApiKeyById(request.params.id) as any;
+      const existing = await getApiKeyById(request.params.id);
       if (!existing) return reply.notFound('API key not found');
 
       const user = request.user as { sub: string };
@@ -158,9 +161,10 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         return reply.forbidden('Access denied');
       }
 
-      const data: Record<string, unknown> = { ...request.body };
+      const { expiresAt, ...body } = request.body;
+      const data: UpdateApiKeyParams = { ...body };
       if (request.body.expiresAt !== undefined) {
-        data.expiresAt = request.body.expiresAt ? new Date(request.body.expiresAt) : null;
+        data.expiresAt = expiresAt ? new Date(expiresAt) : null;
       }
 
       const updated = await updateApiKey(request.params.id, data, auditMeta(request));
@@ -183,7 +187,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const existing = await getApiKeyById(request.params.id) as any;
+      const existing = await getApiKeyById(request.params.id);
       if (!existing) return reply.notFound('API key not found');
 
       const user = request.user as { sub: string };

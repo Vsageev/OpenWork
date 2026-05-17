@@ -8,6 +8,7 @@ import {
   listApiKeyRecords,
   updateApiKeyRecord,
 } from '../db/repositories/api-keys-repository.js';
+import type { ApiKey } from '../db/types.js';
 import { createAuditLog } from './audit-log.js';
 
 const API_KEY_BYTE_LENGTH = 32;
@@ -37,17 +38,21 @@ export interface UpdateApiKeyParams {
   expiresAt?: Date | null;
 }
 
+export type SanitizedApiKey = Omit<ApiKey, 'keyHash'>;
+export type CreatedApiKey = SanitizedApiKey & { rawKey: string };
+
 // Fields to expose (exclude keyHash)
-function sanitize(record: Record<string, unknown>) {
+function sanitize(record: Record<string, unknown>): SanitizedApiKey {
   const rest = { ...record };
   delete rest.keyHash;
-  return {
+  const sanitized = {
     ...rest,
     isActive: isActive(rest),
     expiresAt: rest.expiresAt ?? null,
     lastUsedAt: rest.lastUsedAt ?? null,
     description: rest.description ?? null,
   };
+  return sanitized as unknown as SanitizedApiKey;
 }
 
 /**
@@ -57,7 +62,7 @@ function sanitize(record: Record<string, unknown>) {
 export async function createApiKey(
   params: CreateApiKeyParams,
   audit?: { userId: string; ipAddress?: string; userAgent?: string },
-) {
+): Promise<CreatedApiKey> {
   const rawKey = API_KEY_PREFIX + randomBytes(API_KEY_BYTE_LENGTH).toString('base64url');
   const keyHash = hashKey(rawKey);
   const keyPrefix = rawKey.slice(0, 8);

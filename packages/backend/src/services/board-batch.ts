@@ -1,5 +1,6 @@
 import { listBoardCardsByBoardId } from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
+import type { Board, BoardCard, Card } from '../db/types.js';
 import { getAgent } from './agents.js';
 import {
   enqueueAgentBatchRun,
@@ -36,22 +37,20 @@ export function countBoardBatchCards(
   columnIds?: string[],
   textFilter?: string,
 ): number {
-  let boardCards = listBoardCardsByBoardId(boardId) as any[];
+  let boardCards = listBoardCardsByBoardId(boardId) as unknown as BoardCard[];
 
   if (columnIds && columnIds.length > 0) {
     const columnSet = new Set(columnIds);
-    boardCards = boardCards.filter((bc: any) => columnSet.has(bc.columnId));
+    boardCards = boardCards.filter((bc) => columnSet.has(bc.columnId));
   }
 
   let cards = boardCards
-    .map((bc: any) => store.getById('cards', bc.cardId) as any)
-    .filter(Boolean);
+    .map((bc) => store.getById('cards', bc.cardId) as Card | null)
+    .filter((card): card is Card => Boolean(card));
 
   if (textFilter && textFilter.trim()) {
     const lower = textFilter.trim().toLowerCase();
-    cards = cards.filter((card: any) =>
-      (card.name as string).toLowerCase().includes(lower),
-    );
+    cards = cards.filter((card) => card.name.toLowerCase().includes(lower));
   }
 
   return cards.length;
@@ -80,11 +79,11 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
     throw new Error('Agent not found');
   }
 
-  let cards: any[] = [];
+  let cards: Card[];
 
   if (cardIds && cardIds.length > 0) {
-    const boardCards = listBoardCardsByBoardId(boardId) as any[];
-    const boardCardMap = new Map<string, any>();
+    const boardCards = listBoardCardsByBoardId(boardId) as unknown as BoardCard[];
+    const boardCardMap = new Map<string, BoardCard>();
     for (const boardCard of boardCards) {
       boardCardMap.set(boardCard.cardId as string, boardCard);
     }
@@ -96,28 +95,26 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
         seen.add(cardId);
         return boardCardMap.has(cardId);
       })
-      .map((cardId) => store.getById('cards', cardId) as any)
-      .filter(Boolean);
+      .map((cardId) => store.getById('cards', cardId) as Card | null)
+      .filter((card): card is Card => Boolean(card));
   } else {
     // Get all board cards, optionally filtered by column
-    let boardCards = listBoardCardsByBoardId(boardId) as any[];
+    let boardCards = listBoardCardsByBoardId(boardId) as unknown as BoardCard[];
 
     if (columnIds && columnIds.length > 0) {
       const columnSet = new Set(columnIds);
-      boardCards = boardCards.filter((bc: any) => columnSet.has(bc.columnId));
+      boardCards = boardCards.filter((bc) => columnSet.has(bc.columnId));
     }
 
     // Load card data for each board card
     cards = boardCards
-      .map((bc: any) => store.getById('cards', bc.cardId) as any)
-      .filter(Boolean);
+      .map((bc) => store.getById('cards', bc.cardId) as Card | null)
+      .filter((card): card is Card => Boolean(card));
 
     // Filter by card name text
     if (textFilter && textFilter.trim()) {
       const lower = textFilter.trim().toLowerCase();
-      cards = cards.filter((card: any) =>
-        (card.name as string).toLowerCase().includes(lower),
-      );
+      cards = cards.filter((card) => card.name.toLowerCase().includes(lower));
     }
   }
 
@@ -131,7 +128,7 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
     };
   }
 
-  const board = store.getById('boards', boardId) as any;
+  const board = store.getById('boards', boardId) as Board | null;
   const result = enqueueAgentBatchRun({
     sourceType: 'board',
     sourceId: boardId,
@@ -141,14 +138,14 @@ export async function runBoardAgentBatch(options: BoardBatchOptions): Promise<Bo
     maxParallel,
     stages,
     cardDependencies,
-    cards: cards.map((card: any) => ({
-      id: card.id as string,
-      name: card.name as string,
+    cards: cards.map((card) => ({
+      id: card.id,
+      name: card.name,
       description:
         typeof card.description === 'string'
           ? card.description
           : null,
-      collectionId: card.collectionId as string,
+      collectionId: card.collectionId,
     })),
   });
 

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { listUsersDirectory } from '../db/repositories/users-repository.js';
+import type { User } from '../db/types.js';
 
 export async function userRoutes(app: FastifyInstance) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
@@ -23,7 +24,7 @@ export async function userRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { limit, offset, includeAgents } = request.query;
       const { entries, total } = await listUsersDirectory({ includeAgents, limit, offset });
-      const mapped = entries.map((u: any) => ({
+      const mapped = (entries as unknown as User[]).map((u) => ({
         id: u.id,
         firstName: u.firstName,
         lastName: u.lastName,

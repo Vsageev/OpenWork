@@ -11,6 +11,7 @@ import {
   updateTag,
 } from '../db/repositories/tags-repository.js';
 import { requirePermission } from '../middleware/rbac.js';
+import type { CardTag, Tag } from '../db/types.js';
 
 const createTagBody = z.object({
   name: z.string().min(1).max(100),
@@ -42,7 +43,7 @@ export async function tagRoutes(app: FastifyInstance) {
       },
     },
     async (_request, reply) => {
-      const entries = listTags();
+      const entries = listTags() as unknown as Tag[];
       // Sort by createdAt descending
       entries.sort((a, b) => {
         const aDate = a.createdAt as string || '';
@@ -50,12 +51,12 @@ export async function tagRoutes(app: FastifyInstance) {
         return bDate.localeCompare(aDate);
       });
       // Count card usages per tag
-      const cardTags = listCardTags() as any[];
+      const cardTags = listCardTags() as unknown as CardTag[];
       const countsByTagId = new Map<string, number>();
       for (const ct of cardTags) {
         countsByTagId.set(ct.tagId, (countsByTagId.get(ct.tagId) ?? 0) + 1);
       }
-      const enriched = entries.map((tag: any) => ({
+      const enriched = entries.map((tag) => ({
         ...tag,
         cardCount: countsByTagId.get(tag.id) ?? 0,
       }));

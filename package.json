@@ -16,9 +16,7 @@
     "build:frontend": "pnpm --filter frontend build",
     "build:landing": "pnpm --filter landing build",
     "lint": "pnpm -r run lint",
-    "lint:fix": "eslint --fix . && prettier --write .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "lint:fix": "eslint --fix .",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,7 +25,7 @@
     "qa:board-run-comments": "tsx packages/backend/src/qa/board-qa-run-comments.ts",
     "smoke:runner-split": "node scripts/qa-runner-split-smoke.mjs",
     "verify": "pnpm typecheck && pnpm test && node scripts/verify-public-pages.mjs",
-    "check": "pnpm lint && pnpm typecheck && pnpm format:check",
+    "check": "pnpm lint && pnpm typecheck",
     "clean": "pnpm -r run clean",
     "prepare": "husky",
     "certs:generate": "bash scripts/generate-certs.sh",
@@ -45,15 +43,6 @@
       "bcrypt"
     ]
   },
-  "lint-staged": {
-    "*.{ts,tsx}": [
-      "eslint --fix",
-      "prettier --write"
-    ],
-    "*.{json,md,css,yml,yaml}": [
-      "prettier --write"
-    ]
-  },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
@@ -61,14 +50,11 @@
     "@types/node": "^25.3.0",
     "@vitejs/plugin-react": "^5.1.4",
     "eslint": "^10.0.0",
-    "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.0",
     "globals": "^17.3.0",
     "husky": "^9.1.7",
     "jsdom": "^27.0.0",
-    "lint-staged": "^16.2.7",
-    "prettier": "^3.8.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.0",

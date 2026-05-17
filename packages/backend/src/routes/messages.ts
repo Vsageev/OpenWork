@@ -11,6 +11,7 @@ import {
 import { sendTelegramMessage } from '../services/telegram-outbound.js';
 import { eventBus } from '../services/event-bus.js';
 import { getConversationById } from '../services/conversations.js';
+import type { Conversation, Message } from '../db/types.js';
 
 const inlineKeyboardButtonSchema = z.object({
   text: z.string().min(1),
@@ -111,7 +112,7 @@ export async function messageRoutes(app: FastifyInstance) {
       // Store inline keyboard and parse mode in metadata if provided
       let metadata = messageData.metadata;
       if (parseMode || inlineKeyboard) {
-        const existing = metadata ? JSON.parse(metadata) : {};
+        const existing = metadata ? JSON.parse(metadata) as Record<string, unknown> : {};
         if (parseMode) existing.parseMode = parseMode;
         if (inlineKeyboard) existing.inlineKeyboard = inlineKeyboard;
         metadata = JSON.stringify(existing);
@@ -128,7 +129,7 @@ export async function messageRoutes(app: FastifyInstance) {
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
         },
-      ) as any;
+      ) as Message | null;
 
       if (!message) {
         return reply.notFound('Conversation not found');
@@ -136,7 +137,7 @@ export async function messageRoutes(app: FastifyInstance) {
 
       // Emit automation trigger for inbound messages
       if (request.body.direction === 'inbound') {
-        const conversation = await getConversationById(request.body.conversationId) as any;
+        const conversation = await getConversationById(request.body.conversationId) as Conversation | null;
         if (conversation) {
           eventBus.emit('message_received', {
             messageId: message.id,
@@ -149,7 +150,7 @@ export async function messageRoutes(app: FastifyInstance) {
 
       // For outbound messages, attempt to deliver via the appropriate channel
       if (request.body.direction === 'outbound' && message.content) {
-        const conversation = await getConversationById(request.body.conversationId) as any;
+        const conversation = await getConversationById(request.body.conversationId) as Conversation | null;
 
         if (conversation?.channelType === 'telegram') {
           sendTelegramMessage({

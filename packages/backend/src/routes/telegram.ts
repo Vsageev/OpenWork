@@ -10,7 +10,7 @@ import {
   refreshWebhook,
   updateAutoGreeting,
 } from '../services/telegram.js';
-import { handleTelegramWebhook } from '../services/telegram-webhook.js';
+import { handleTelegramWebhook, type TelegramUpdate } from '../services/telegram-webhook.js';
 
 const connectBotBody = z.object({
   token: z.string().min(1, 'Bot token is required'),
@@ -190,8 +190,7 @@ export async function telegramRoutes(app: FastifyInstance) {
         const result = await handleTelegramWebhook(
           botId,
           secretHeader,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          request.body as any,
+          request.body as TelegramUpdate,
         );
 
         if (!result.ok && result.error === 'Invalid webhook secret') {

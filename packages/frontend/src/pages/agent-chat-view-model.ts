@@ -111,7 +111,7 @@ export interface AgentConversationChatViewMessage {
   content: string | null;
   status: string | null;
   metadata?: string | Record<string, unknown> | null;
-  attachments: AgentChatAttachment[] | null;
+  attachments: unknown;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -197,6 +197,65 @@ export function toQueueCount(value: unknown): number {
   const parsed = Number(value ?? 0);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return Math.floor(parsed);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseAttachmentRecords(raw: unknown): Record<string, unknown>[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(isRecord);
+  if (typeof raw === 'string') {
+    try {
+      return parseAttachmentRecords(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  }
+  if (!isRecord(raw)) return [];
+  if (Array.isArray(raw.attachments)) return parseAttachmentRecords(raw.attachments);
+  if (typeof raw.storagePath === 'string' || typeof raw.fileName === 'string') return [raw];
+  return Object.values(raw).filter(isRecord);
+}
+
+function getAttachmentFileSize(value: unknown): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getAttachmentFileName(record: Record<string, unknown>, storagePath: string): string {
+  if (typeof record.fileName === 'string' && record.fileName.trim()) return record.fileName;
+  const pathName = storagePath.split('/').filter(Boolean).pop();
+  return pathName || 'Attachment';
+}
+
+export function normalizeAgentChatAttachments(raw: unknown): AgentChatAttachment[] | null {
+  const attachments = parseAttachmentRecords(raw)
+    .map((record): AgentChatAttachment | null => {
+      const storagePath =
+        typeof record.storagePath === 'string'
+          ? record.storagePath
+          : typeof record.path === 'string'
+            ? record.path
+            : '';
+      if (!storagePath) return null;
+      const type = record.type === 'image' ? 'image' : 'file';
+      return {
+        type,
+        fileName: getAttachmentFileName(record, storagePath),
+        mimeType:
+          typeof record.mimeType === 'string' && record.mimeType
+            ? record.mimeType
+            : type === 'image'
+              ? 'image/*'
+              : 'application/octet-stream',
+        fileSize: getAttachmentFileSize(record.fileSize),
+        storagePath,
+      };
+    })
+    .filter((attachment): attachment is AgentChatAttachment => attachment !== null);
+  return attachments.length > 0 ? attachments : null;
 }
 
 export function queueItemsLabel(count: number): string {
@@ -387,7 +446,7 @@ function mapCanonicalMessage(
     createdAt: message.createdAt ?? turn.createdAt ?? new Date(0).toISOString(),
     type: message.type,
     metadata: serializeCanonicalMessageMetadata(message.metadata),
-    attachments: message.attachments ?? null,
+    attachments: normalizeAgentChatAttachments(message.attachments),
     parentId:
       message.direction === 'inbound'
         ? (turn.userMessage?.id ?? turn.parentTurnId)
@@ -437,7 +496,7 @@ function mapCanonicalQueueItem(
         : null,
     queuedMessageId: turn.userMessage?.id ?? null,
     previousUserMessageId: null,
-    attachments: turn.userMessage?.attachments ?? null,
+    attachments: normalizeAgentChatAttachments(turn.userMessage?.attachments),
     runId: queue.runId ?? turn.execution.run?.id ?? null,
     errorMessage: queue.errorMessage ?? turn.execution.run?.errorMessage ?? null,
     turnId: turn.id,
@@ -465,7 +524,7 @@ function mapCanonicalNoticeItem(
     targetMessageId: turn.userMessage?.id ?? null,
     queuedMessageId: turn.userMessage?.id ?? null,
     previousUserMessageId: null,
-    attachments: turn.userMessage?.attachments ?? null,
+    attachments: normalizeAgentChatAttachments(turn.userMessage?.attachments),
     runId: turn.execution.run?.id ?? null,
     errorMessage: turn.execution.run?.errorMessage ?? null,
     turnId: turn.id,
@@ -750,6 +809,7 @@ function buildLegacyAgentConversationViewModel(
     if (!queuedMessageId) continue;
     if (activeBranchMessageIds.has(queuedMessageId)) continue;
     if (queuedMessageIds.has(queuedMessageId)) continue;
+    const attachments = normalizeAgentChatAttachments(item.attachments);
 
     queuedMessages.push({
       message: {
@@ -757,13 +817,13 @@ function buildLegacyAgentConversationViewModel(
         direction: 'outbound',
         content: item.prompt,
         createdAt: item.createdAt,
-        type: item.attachments?.length
-          ? item.attachments.every((attachment) => attachment.type === 'image')
+        type: attachments?.length
+          ? attachments.every((attachment) => attachment.type === 'image')
             ? 'image'
             : 'file'
           : 'text',
         metadata: null,
-        attachments: item.attachments ?? null,
+        attachments,
         parentId: null,
         previousUserMessageId: item.previousUserMessageId ?? null,
       },
@@ -911,8 +971,9 @@ export function buildAgentChatMarkdownExport(options: {
       );
     }
     lines.push('');
-    if (msg.attachments?.length) {
-      for (const att of msg.attachments) {
+    const attachments = normalizeAgentChatAttachments(msg.attachments);
+    if (attachments?.length) {
+      for (const att of attachments) {
         lines.push(`- _Attachment (${att.type}):_ \`${att.fileName}\` (${att.mimeType})`);
       }
       lines.push('');

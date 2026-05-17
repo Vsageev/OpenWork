@@ -104,7 +104,7 @@ export async function workspaceRoutes(app: FastifyInstance) {
         return reply.notFound('Workspace not found');
       }
 
-      if ((workspace as any).userId !== request.user.sub) {
+      if (workspace.userId !== request.user.sub) {
         return reply.forbidden('Not authorized to update this workspace');
       }
 
@@ -139,7 +139,7 @@ export async function workspaceRoutes(app: FastifyInstance) {
         return reply.notFound('Workspace not found');
       }
 
-      if ((workspace as any).userId !== request.user.sub) {
+      if (workspace.userId !== request.user.sub) {
         return reply.forbidden('Not authorized to delete this workspace');
       }
 

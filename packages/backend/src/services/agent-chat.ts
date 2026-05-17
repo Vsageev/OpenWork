@@ -21,7 +21,7 @@ import {
 } from '../db/repositories/messages-repository.js';
 import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import { env } from '../config/env.js';
-import { extractAgentOutputErrorText, extractFinalResponseText } from '../lib/agent-output.js';
+import { extractFinalResponseText } from '../lib/agent-output.js';
 import { allocatePort, releasePort } from '../lib/port-allocator.js';
 import type { RunnerAttachment, RunnerJobIntent, RunnerProvider } from 'shared';
 import {
@@ -249,7 +249,6 @@ export function getMaxConcurrentAgentLimit(): number {
   return getMaxConcurrentAgents();
 }
 const AGENT_CHAT_QUEUE_RETENTION_MS = 24 * 60 * 60 * 1000;
-const AGENT_CHAT_RECOVERED_QUEUE_MATCH_WINDOW_MS = 5 * 60 * 1000;
 const MAX_CHAT_MESSAGE_IMAGES = 10;
 
 interface QueueDrainTimer {
@@ -266,138 +265,6 @@ type TreePathMessage = Record<string, unknown> & {
 type QueueExecutionMode = 'append_prompt' | 'respond_to_message';
 
 const ROOT_BRANCH_KEY = '__root__';
-
-// ---------------------------------------------------------------------------
-// CLI command builders
-// ---------------------------------------------------------------------------
-
-interface CliCommand {
-  bin: string;
-  args: string[];
-  stdinData?: string;
-}
-
-interface BuildCliOptions {
-  model: string;
-  modelId?: string | null;
-  thinkingLevel?: 'low' | 'medium' | 'high' | null;
-  prompt: string;
-  imagePaths?: string[];
-  filePaths?: string[];
-}
-
-function appendAttachmentPathsToPrompt(
-  prompt: string,
-  imagePaths?: string[],
-  filePaths?: string[],
-): string {
-  const sections: string[] = [];
-
-  if (imagePaths && imagePaths.length > 0) {
-    sections.push(`Image files:\n${imagePaths.map((p) => `- ${p}`).join('\n')}`);
-  }
-  if (filePaths && filePaths.length > 0) {
-    sections.push(`Files:\n${filePaths.map((p) => `- ${p}`).join('\n')}`);
-  }
-  if (sections.length === 0) return prompt;
-
-  return `${prompt ? prompt + '\n\n' : ''}${sections.join('\n\n')}`;
-}
-
-function buildCliCommand(options: BuildCliOptions): CliCommand {
-  const { model, modelId, thinkingLevel, prompt, imagePaths, filePaths } = options;
-  const modelLower = model.trim().toLowerCase();
-  const fullPrompt = appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths);
-
-  if (modelLower.includes('claude')) {
-    const args: string[] = [];
-
-    // Stream structured events so run logs contain full model output, not only final text.
-    args.push(
-      '-p',
-      fullPrompt,
-      '--output-format',
-      'stream-json',
-      '--include-partial-messages',
-      '--verbose',
-    );
-
-    if (modelId) {
-      args.push('--model', modelId);
-    }
-    if (thinkingLevel) {
-      args.push('--effort', thinkingLevel);
-    }
-    // Always run without interactive permission prompts.
-    args.push('--dangerously-skip-permissions');
-    return { bin: 'claude', args };
-  }
-  if (modelLower.includes('codex')) {
-    // Stream structured events so run logs can render rich blocks in monitor views.
-    const args = ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox'];
-    if (imagePaths && imagePaths.length > 0) {
-      args.push('--image', ...imagePaths);
-    }
-    if (modelId) {
-      args.push('--model', modelId);
-    }
-    if (thinkingLevel) {
-      args.push('-c', `model_reasoning_effort="${thinkingLevel}"`);
-    }
-    args.push('--', appendAttachmentPathsToPrompt(prompt, imagePaths, filePaths));
-    return { bin: 'codex', args };
-  }
-  if (modelLower.includes('qwen')) {
-    // Stream structured events so run logs contain full model output, not only final text.
-    const args = ['--output-format', 'stream-json', '--include-partial-messages'];
-    // Always run without interactive approvals.
-    args.push('--approval-mode', 'yolo');
-    if (modelId) {
-      args.push('--model', modelId);
-    }
-    // Use explicit prompt flag for compatibility with CLI variants that don't
-    // accept positional prompt input in non-interactive mode.
-    args.push('--prompt', fullPrompt);
-    return { bin: 'qwen', args };
-  }
-  if (modelLower.includes('cursor')) {
-    // Stream structured events so run logs contain full model output, including thinking deltas.
-    const args = [
-      '--print',
-      '--output-format',
-      'stream-json',
-      '--stream-partial-output',
-      '--force',
-      '--trust',
-    ];
-    if (modelId) {
-      args.push('--model', modelId);
-    }
-    args.push(fullPrompt);
-    return { bin: 'cursor-agent', args };
-  }
-  if (modelLower.includes('opencode')) {
-    const args = ['run', '--format', 'json'];
-    if (modelId) {
-      args.push('--model', modelId);
-    }
-    if (thinkingLevel) {
-      args.push('--variant', thinkingLevel);
-    }
-    for (const filePath of [...(imagePaths ?? []), ...(filePaths ?? [])]) {
-      args.push('--file', filePath);
-    }
-    args.push(fullPrompt);
-    return { bin: 'opencode', args };
-  }
-
-  // Fallback: treat model name as CLI binary with claude-like flags
-  const args = ['-p', fullPrompt, '--output-format', 'text'];
-  if (modelId) {
-    args.push('--model', modelId);
-  }
-  return { bin: modelLower, args };
-}
 
 function inferRunnerProvider(model: string): RunnerProvider | null {
   const modelLower = model.trim().toLowerCase();
@@ -2349,19 +2216,6 @@ interface AgentProcessResult {
   runStartedAt: number;
 }
 
-function getAgentProcessError(
-  result: Pick<AgentProcessResult, 'code' | 'stdout' | 'stderr'>,
-): string | null {
-  const structuredStdoutError = extractAgentOutputErrorText(result.stdout);
-  if (structuredStdoutError) return structuredStdoutError;
-
-  if ((result.code ?? 1) !== 0) {
-    return result.stderr.trim() || `Process exited with code ${result.code ?? 'unknown'}`;
-  }
-
-  return null;
-}
-
 function getTerminalRunErrorMessage(runId: string | null): string | null {
   if (!runId) return null;
   const terminalRun = getAgentRun(runId);
@@ -3784,85 +3638,6 @@ function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>):
         : 'Recovered run failed after backend restart';
   retryOrFailQueueItem(queueItemId, queueItem, agentId, errorMessage, attemptsUsed);
   return true;
-}
-
-function findProcessingQueueItemForRun(
-  agentId: string,
-  conversationId: string,
-  runId: string,
-  runStartedAt: number,
-): Record<string, unknown> | null {
-  const processingItems = store
-    .getAll(AGENT_CHAT_QUEUE_COLLECTION)
-    .filter(
-      (r: Record<string, unknown>) =>
-        r.agentId === agentId && r.conversationId === conversationId && r.status === 'processing',
-    )
-    .sort(
-      (a: Record<string, unknown>, b: Record<string, unknown>) =>
-        parseIsoDateMs(a.createdAt) - parseIsoDateMs(b.createdAt),
-    );
-
-  if (processingItems.length === 0) return null;
-
-  const exactRunIdMatch = processingItems.find((item) => item.runId === runId);
-  if (exactRunIdMatch) return exactRunIdMatch;
-
-  let bestByStart: Record<string, unknown> | null = null;
-  let bestDiff = Number.POSITIVE_INFINITY;
-  for (const item of processingItems) {
-    const startedAtMs = parseIsoDateMs(item.startedAt);
-    if (!Number.isFinite(startedAtMs)) continue;
-    const diff = Math.abs(startedAtMs - runStartedAt);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      bestByStart = item;
-    }
-  }
-  if (bestByStart && bestDiff <= AGENT_CHAT_RECOVERED_QUEUE_MATCH_WINDOW_MS) {
-    return bestByStart;
-  }
-
-  return null;
-}
-
-function finalizeRecoveredQueueItemForRun(
-  agentId: string,
-  conversationId: string,
-  runId: string,
-  runStartedAt: number,
-  finalMessage: Record<string, unknown> | null,
-  fallbackErrorMessage: string,
-) {
-  const processingItem = findProcessingQueueItemForRun(
-    agentId,
-    conversationId,
-    runId,
-    runStartedAt,
-  );
-  if (!processingItem || typeof processingItem.id !== 'string') return;
-
-  if (isRunMarkedKilledByUser(runId)) {
-    markQueueItemCancelledByUser(processingItem.id);
-    scheduleQueueDrain(agentId, conversationId, 0);
-    return;
-  }
-
-  if (finalMessage) {
-    markQueueItemCompleted(processingItem.id, finalMessage);
-    scheduleQueueDrain(agentId, conversationId, 0);
-    return;
-  }
-
-  const attemptsUsed = normalizeQueueAttemptCount(processingItem.attempts);
-  retryOrFailQueueItem(
-    processingItem.id,
-    processingItem,
-    agentId,
-    fallbackErrorMessage,
-    attemptsUsed,
-  );
-  scheduleQueueDrain(agentId, conversationId, 0);
 }
 
 /**

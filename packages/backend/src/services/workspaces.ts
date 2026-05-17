@@ -60,15 +60,15 @@ export async function listWorkspaces(query: WorkspaceListQuery) {
     await ensureDefaultWorkspaceForUser(query.userId);
   }
 
-  let all = store.getAll('workspaces') as any[];
+  let all = store.getAll('workspaces').map(asWorkspace);
 
   if (query.userId) {
-    all = all.filter((w: any) => w.userId === query.userId);
+    all = all.filter((w) => w.userId === query.userId);
   }
 
   if (query.search) {
     const term = query.search.toLowerCase();
-    all = all.filter((w: any) => w.name?.toLowerCase().includes(term));
+    all = all.filter((w) => w.name.toLowerCase().includes(term));
   }
 
   all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -333,13 +333,13 @@ export async function createWorkspace(
     data.agentGroupIds && data.agentGroupIds.length > 0
       ? data.agentGroupIds
       : [await createWorkspaceAgentGroup()];
-  const workspace = store.insert('workspaces', {
+  const workspace = asWorkspace(store.insert('workspaces', {
     name: data.name,
     userId: data.userId,
     boardIds: data.boardIds ?? [],
     collectionIds: data.collectionIds ?? [],
     agentGroupIds,
-  }) as any;
+  }));
 
   if (audit) {
     await createAuditLog({
@@ -353,7 +353,7 @@ export async function createWorkspace(
     });
   }
 
-  return asWorkspace(workspace);
+  return workspace;
 }
 
 export async function updateWorkspace(

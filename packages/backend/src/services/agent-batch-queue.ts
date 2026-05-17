@@ -776,11 +776,6 @@ function dispatchBatchCardTaskFromItem(runId: string, itemId: string) {
   );
 }
 
-function startBatchItem(runId: string, item: Record<string, unknown>) {
-  if (!markBatchItemProcessing(runId, item)) return;
-  dispatchBatchCardTaskFromItem(runId, item.id as string);
-}
-
 async function drainBatchRun(runId: string): Promise<void> {
   if (runProcessors.has(runId)) return;
   runProcessors.add(runId);

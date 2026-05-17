@@ -400,6 +400,22 @@ describe('agent chat lifecycle browser matrix', () => {
     );
   });
 
+  it('ignores malformed canonical attachment payloads instead of crashing', () => {
+    const uploadTurn = turn({
+      id: 'turn-malformed-attachment',
+      messageId: 'message-malformed-attachment',
+      content: 'Attachment shape is malformed',
+      status: 'completed',
+    });
+    uploadTurn.userMessage!.attachments = { unexpected: 'value' };
+
+    const { view, root } = renderTranscript(canonicalView([uploadTurn]));
+
+    expect(view.visibleMessages[0]?.attachments).toBeNull();
+    expect(root.querySelector('[data-message-id="message-malformed-attachment"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="attachment-chip"]')).toBeNull();
+  });
+
   it('renders failed and cancelled items with retry/removal controls', () => {
     const { root } = renderTranscript(
       canonicalView([

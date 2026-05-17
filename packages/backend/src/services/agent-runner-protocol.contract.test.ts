@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import sensible from '@fastify/sensible';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -126,7 +126,7 @@ async function buildContractApi() {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   await app.register(sensible);
-  app.decorate('authenticate', async (request: any) => {
+  app.decorate('authenticate', async (request: FastifyRequest) => {
     request.user = { sub: 'user-contract' };
   });
   await app.register(agentRunRoutes);

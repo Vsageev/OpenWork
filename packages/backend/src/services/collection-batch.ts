@@ -1,4 +1,5 @@
 import { store } from '../db/index.js';
+import type { Card, Collection } from '../db/types.js';
 import { listCards } from './cards.js';
 import { getAgent } from './agents.js';
 import {
@@ -57,7 +58,7 @@ export async function runCollectionAgentBatch(
     throw new Error('Agent not found');
   }
 
-  let cards: any[] = [];
+  let cards: Card[];
 
   if (cardIds && cardIds.length > 0) {
     const seen = new Set<string>();
@@ -65,11 +66,11 @@ export async function runCollectionAgentBatch(
       .filter((cardId) => {
         if (seen.has(cardId)) return false;
         seen.add(cardId);
-        const card = store.getById('cards', cardId) as any;
+        const card = store.getById('cards', cardId) as Card | null;
         return card?.collectionId === collectionId;
       })
-      .map((cardId) => store.getById('cards', cardId) as any)
-      .filter(Boolean);
+      .map((cardId) => store.getById('cards', cardId) as Card | null)
+      .filter((card): card is Card => Boolean(card));
   } else {
     // Fetch all matching cards without pagination limit
     const result = await listCards({
@@ -78,7 +79,7 @@ export async function runCollectionAgentBatch(
       limit: 10000,
       offset: 0,
     });
-    cards = result.entries;
+    cards = result.entries as Card[];
   }
 
   if (cards.length === 0) {
@@ -91,7 +92,7 @@ export async function runCollectionAgentBatch(
     };
   }
 
-  const collection = store.getById('collections', collectionId) as any;
+  const collection = store.getById('collections', collectionId) as Collection | null;
   const result = enqueueAgentBatchRun({
     sourceType: 'collection',
     sourceId: collectionId,
@@ -101,9 +102,9 @@ export async function runCollectionAgentBatch(
     maxParallel,
     stages,
     cardDependencies,
-    cards: cards.map((card: any) => ({
-      id: card.id as string,
-      name: card.name as string,
+    cards: cards.map((card) => ({
+      id: card.id,
+      name: card.name,
       description:
         typeof card.description === 'string'
           ? card.description

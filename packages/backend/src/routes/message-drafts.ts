@@ -7,12 +7,12 @@ import {
   getDraftById,
   upsertDraft,
   deleteDraft,
-  deleteDraftByConversationId,
 } from '../services/message-drafts.js';
 import { sendMessage } from '../services/messages.js';
 import { getConversationById } from '../services/conversations.js';
 import { sendTelegramMessage } from '../services/telegram-outbound.js';
 import { ApiError } from '../utils/api-errors.js';
+import type { Conversation, Message } from '../db/types.js';
 
 const upsertDraftBody = z.object({
   conversationId: z.uuid(),
@@ -153,7 +153,7 @@ export async function messageDraftRoutes(app: FastifyInstance) {
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
         },
-      ) as any;
+      ) as Message | null;
 
       if (!message) {
         throw ApiError.notFound('conversation_not_found', `Conversation ${conversationId} not found`);
@@ -163,7 +163,7 @@ export async function messageDraftRoutes(app: FastifyInstance) {
       await deleteDraft(request.params.id);
 
       // Fire-and-forget channel delivery
-      const conversation = await getConversationById(conversationId) as any;
+      const conversation = await getConversationById(conversationId) as Conversation | null;
       if (conversation && content) {
         if (conversation.channelType === 'telegram') {
           sendTelegramMessage({

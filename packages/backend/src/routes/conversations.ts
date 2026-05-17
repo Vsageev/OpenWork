@@ -13,6 +13,7 @@ import {
 } from '../services/conversations.js';
 import { ApiError } from '../utils/api-errors.js';
 import { eventBus } from '../services/event-bus.js';
+import type { Conversation } from '../db/types.js';
 
 const createConversationBody = z.object({
   contactId: z.uuid(),
@@ -117,7 +118,7 @@ export async function conversationRoutes(app: FastifyInstance) {
         userId: request.user.sub,
         ipAddress: request.ip,
         userAgent: request.headers['user-agent'],
-      }) as any;
+      }) as unknown as Conversation;
 
       // Emit automation trigger
       eventBus.emit('conversation_created', {

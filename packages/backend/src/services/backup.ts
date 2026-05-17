@@ -46,6 +46,7 @@ async function writePostgresFullBackup(
     if (options.requirePostgresDump) {
       throw new Error(
         `Backup aborted: pg_dump did not produce postgres.dump (${err instanceof Error ? err.message : String(err)}). Install PostgreSQL client tools so pg_dump is on PATH, and ensure DATABASE_URL reaches a live Postgres server. See docs/DEVELOPMENT.md.`,
+        { cause: err },
       );
     }
     console.warn(

@@ -19,8 +19,9 @@ import {
   listCardsNative,
 } from '../db/repositories/boards-cards-repository.js';
 import { store } from '../db/index.js';
+import type { Board, BoardCard, BoardColumn, Card, CardComment, CardLink, CardTag, Tag, User } from '../db/types.js';
 import { createAuditLog } from './audit-log.js';
-import { getAgent } from './agents.js';
+import { getAgent, type AgentRecord } from './agents.js';
 import { executeCardTask } from './agent-chat.js';
 
 export interface CardListQuery {
@@ -54,20 +55,59 @@ interface UpdateCardOptions {
   assignmentPrompt?: string;
 }
 
+type CardAssignee =
+  | {
+      id: string;
+      firstName: string;
+      lastName: string;
+      type: 'user';
+    }
+  | {
+      id: string;
+      firstName: string;
+      lastName: '';
+      type: 'agent';
+      avatarIcon: string | null;
+      avatarBgColor: string | null;
+      avatarLogoColor: string | null;
+    }
+  | null;
+
+type CardTagSummary = Pick<Tag, 'id' | 'name' | 'color'>;
+
+interface CardBoardPlacement {
+  boardId: string;
+  boardName: string;
+  columnId: string;
+  columnName: string | null;
+  columnColor: string | null;
+}
+
+interface LinkedCardSummary {
+  linkId: string;
+  id: string;
+  name: string;
+  collectionId: string;
+}
+
+function asCardTagSummary(tag: Tag): CardTagSummary {
+  return { id: tag.id, name: tag.name, color: tag.color };
+}
+
 export async function listCards(query: CardListQuery) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
   const { entries, total } = await listCardsNative({ ...query, limit, offset });
 
   // Hydrate assignee and tags for list entries
-  const hydrated = (entries as any[]).map((card: any) => {
-    let assignee = null;
+  const hydrated = (entries as unknown as Card[]).map((card) => {
+    let assignee: CardAssignee = null;
     if (card.assigneeId) {
-      const user = store.getById('users', card.assigneeId) as any;
+      const user = store.getById('users', card.assigneeId) as User | null;
       if (user) {
         assignee = { id: user.id, firstName: user.firstName, lastName: user.lastName, type: 'user' as const };
       } else {
-        const agent = store.getById('agents', card.assigneeId) as any;
+        const agent = store.getById('agents', card.assigneeId) as AgentRecord | null;
         if (agent) {
           assignee = {
             id: agent.id, firstName: agent.name, lastName: '', type: 'agent' as const,
@@ -77,19 +117,19 @@ export async function listCards(query: CardListQuery) {
       }
     }
 
-    const cardTags = listCardTagsByCardId(card.id) as any[];
+    const cardTags = listCardTagsByCardId(card.id) as unknown as CardTag[];
     const tags = cardTags
-      .map((ct: any) => store.getById('tags', ct.tagId))
-      .filter(Boolean)
-      .map((t: any) => ({ id: t.id, name: t.name, color: t.color }));
+      .map((ct) => store.getById('tags', ct.tagId) as Tag | null)
+      .filter((tag): tag is Tag => Boolean(tag))
+      .map(asCardTagSummary);
 
     // Load board placements
-    const boardCards = listBoardCardsByCardId(card.id) as any[];
-    const boards: any[] = [];
+    const boardCards = listBoardCardsByCardId(card.id) as unknown as BoardCard[];
+    const boards: CardBoardPlacement[] = [];
     for (const bc of boardCards) {
-      const board = store.getById('boards', bc.boardId) as any;
+      const board = store.getById('boards', bc.boardId) as Board | null;
       if (!board) continue;
-      const column = store.getById('boardColumns', bc.columnId) as any;
+      const column = store.getById('boardColumns', bc.columnId) as BoardColumn | null;
       boards.push({
         boardId: board.id,
         boardName: board.name,
@@ -106,24 +146,24 @@ export async function listCards(query: CardListQuery) {
 }
 
 export async function getCardById(id: string) {
-  const card = store.getById('cards', id);
+  const card = store.getById('cards', id) as Card | null;
   if (!card) return null;
 
   // Load tags
-  const cardTags = listCardTagsByCardId(id) as any[];
-  const tagIds = cardTags.map((ct: any) => ct.tagId);
+  const cardTags = listCardTagsByCardId(id) as unknown as CardTag[];
+  const tagIds = cardTags.map((ct) => ct.tagId);
   const tags = tagIds
-    .map((tid: string) => store.getById('tags', tid))
-    .filter(Boolean);
+    .map((tid) => store.getById('tags', tid) as Tag | null)
+    .filter((tag): tag is Tag => Boolean(tag));
 
   // Load assignee
-  let assignee = null;
-  if ((card as any).assigneeId) {
-    const user = store.getById('users', (card as any).assigneeId) as any;
+  let assignee: CardAssignee = null;
+  if (card.assigneeId) {
+    const user = store.getById('users', card.assigneeId) as User | null;
     if (user) {
       assignee = { id: user.id, firstName: user.firstName, lastName: user.lastName, type: 'user' as const };
     } else {
-      const agentRec = store.getById('agents', (card as any).assigneeId) as any;
+      const agentRec = store.getById('agents', card.assigneeId) as AgentRecord | null;
       if (agentRec) {
         assignee = {
           id: agentRec.id, firstName: agentRec.name, lastName: '', type: 'agent' as const,
@@ -134,18 +174,18 @@ export async function getCardById(id: string) {
   }
 
   // Load linked cards
-  const outgoing = listCardLinksBySourceCard(id) as any[];
-  const incoming = listCardLinksByTargetCard(id) as any[];
+  const outgoing = listCardLinksBySourceCard(id) as unknown as CardLink[];
+  const incoming = listCardLinksByTargetCard(id) as unknown as CardLink[];
 
-  const linkedCards: any[] = [];
+  const linkedCards: LinkedCardSummary[] = [];
   for (const link of outgoing) {
-    const target = store.getById('cards', link.targetCardId) as any;
+    const target = store.getById('cards', link.targetCardId) as Card | null;
     if (target) {
       linkedCards.push({ linkId: link.id, id: target.id, name: target.name, collectionId: target.collectionId });
     }
   }
   for (const link of incoming) {
-    const source = store.getById('cards', link.sourceCardId) as any;
+    const source = store.getById('cards', link.sourceCardId) as Card | null;
     if (source) {
       // Avoid duplicates if link exists both ways
       if (!linkedCards.some((lc) => lc.id === source.id)) {
@@ -155,12 +195,12 @@ export async function getCardById(id: string) {
   }
 
   // Load board placements
-  const boardCards = listBoardCardsByCardId(id) as any[];
-  const boards: any[] = [];
+  const boardCards = listBoardCardsByCardId(id) as unknown as BoardCard[];
+  const boards: CardBoardPlacement[] = [];
   for (const bc of boardCards) {
-    const board = store.getById('boards', bc.boardId) as any;
+    const board = store.getById('boards', bc.boardId) as Board | null;
     if (!board) continue;
-    const column = store.getById('boardColumns', bc.columnId) as any;
+    const column = store.getById('boardColumns', bc.columnId) as BoardColumn | null;
     boards.push({
       boardId: board.id,
       boardName: board.name,
@@ -170,7 +210,7 @@ export async function getCardById(id: string) {
     });
   }
 
-  return { ...(card as any), tags, assignee, linkedCards, boards };
+  return { ...card, tags, assignee, linkedCards, boards };
 }
 
 export async function createCard(
@@ -191,7 +231,7 @@ export async function createCard(
     assigneeId: data.assigneeId ?? null,
     position,
     createdById: audit?.userId,
-  }) as any;
+  }) as unknown as Card;
 
   if (audit) {
     await createAuditLog({
@@ -231,9 +271,9 @@ export async function updateCard(
   options?: UpdateCardOptions,
 ) {
   // Capture current assignee before updating so we can detect changes
-  const current = store.getById('cards', id) as any;
+  const current = store.getById('cards', id) as Card | null;
   if (!current) return null;
-  const prevAssigneeId = current.assigneeId as string | null;
+  const prevAssigneeId = current.assigneeId;
 
   const setData: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
@@ -262,7 +302,7 @@ export async function updateCard(
   if (data.assigneeId !== undefined && data.assigneeId && data.assigneeId !== prevAssigneeId) {
     const agent = getAgent(data.assigneeId);
     if (agent && agent.status === 'active') {
-      const refreshed = updated as any;
+      const refreshed = updated as unknown as Card;
       executeCardTask(agent.id, {
         id,
         name: refreshed.name,
@@ -343,15 +383,15 @@ export async function listCardComments(
   limit = 50,
   offset = 0,
 ) {
-  let all = listCardCommentsByCardId(cardId) as any[];
-  all.sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt));
+  const all = listCardCommentsByCardId(cardId) as unknown as CardComment[];
+  all.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const total = all.length;
-  const entries = all.slice(offset, offset + limit).map((comment: any) => {
-    let author = null;
-    const user = store.getById('users', comment.authorId) as any;
+  const entries = all.slice(offset, offset + limit).map((comment) => {
+    let author: CardAssignee = null;
+    const user = store.getById('users', comment.authorId) as User | null;
     if (user) {
       if (user.type === 'agent') {
-        const agent = user.agentId ? (store.getById('agents', user.agentId) as any) : null;
+        const agent = user.agentId ? (store.getById('agents', user.agentId) as AgentRecord | null) : null;
         author = {
           id: agent?.id ?? user.id,
           firstName: agent?.name ?? user.firstName,
@@ -370,7 +410,7 @@ export async function listCardComments(
         };
       }
     } else {
-      const agent = store.getById('agents', comment.authorId) as any;
+      const agent = store.getById('agents', comment.authorId) as AgentRecord | null;
       if (agent) {
         author = {
           id: agent.id,
@@ -399,7 +439,9 @@ export async function createCardComment(
     authorId: audit?.userId,
     content,
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
-  }) as any;
+  }) as unknown as CardComment & {
+    attachments?: Array<{ type: string; fileName: string; mimeType: string; fileSize: number; storagePath: string }>;
+  };
 
   if (audit) {
     await createAuditLog({

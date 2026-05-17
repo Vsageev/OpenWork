@@ -189,17 +189,13 @@ function buildAgentRunCompletionPatch(
   }
   const previousResponseText =
     typeof run.responseText === 'string' ? run.responseText : null;
-  let extractionErrorMessage: string | null = null;
-  let structuredErrorMessage = '';
-  let incompleteOutputMessage = '';
-  let responseText = '';
   try {
-    structuredErrorMessage = finalStdout ? extractAgentOutputErrorText(finalStdout) : '';
-    incompleteOutputMessage = finalStdout ? extractAgentOutputIncompleteText(finalStdout) : '';
+    const structuredErrorMessage = finalStdout ? extractAgentOutputErrorText(finalStdout) : '';
+    const incompleteOutputMessage = finalStdout ? extractAgentOutputIncompleteText(finalStdout) : '';
     const displayErrorMessage = formatAgentRunErrorMessage(
       structuredErrorMessage || errorMessage || incompleteOutputMessage || null,
     );
-    responseText =
+    const responseText =
       !displayErrorMessage && finalStdout ? extractFinalResponseText(finalStdout) : '';
     const missingFinalResponseMessage =
       !displayErrorMessage && !responseText
@@ -215,18 +211,17 @@ function buildAgentRunCompletionPatch(
       responseText: responseText || previousResponseText,
     };
   } catch (err) {
-    extractionErrorMessage = `Failed to extract agent final response: ${(err as Error).message}`;
+    const extractionErrorMessage = `Failed to extract agent final response: ${(err as Error).message}`;
+    return {
+      status: 'error' as RunStatus,
+      errorMessage: formatAgentRunErrorMessage(extractionErrorMessage),
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      stdout: finalStdout,
+      stderr: finalStderr,
+      responseText: previousResponseText,
+    };
   }
-
-  return {
-    status: 'error' as RunStatus,
-    errorMessage: formatAgentRunErrorMessage(extractionErrorMessage),
-    finishedAt: new Date().toISOString(),
-    durationMs,
-    stdout: finalStdout,
-    stderr: finalStderr,
-    responseText: previousResponseText,
-  };
 }
 
 function buildCardAssignmentTerminalComment(params: {

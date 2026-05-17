@@ -181,6 +181,9 @@ export async function boardRoutes(app: FastifyInstance) {
         ipAddress: request.ip,
         userAgent: request.headers['user-agent'],
       });
+      if (!board) {
+        throw new Error('Failed to create board');
+      }
       const targetWorkspaceId =
         workspaceId ?? (await ensureDefaultWorkspaceForUser(request.user.sub)).id;
       await addWorkspaceContent(targetWorkspaceId, {

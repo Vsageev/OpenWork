@@ -184,6 +184,39 @@ describe('AgentsPage component contract', () => {
     }
   });
 
+  it('keeps backend-queued chat turns polling after the first send handoff', () => {
+    const activeState = sourceSlice(
+      'const activeMessageIds = useMemo(',
+      'const activeAgentWorkspaceIds = useMemo(',
+    );
+    for (const expected of [
+      'const activeChatSurfaceMessageIds = useMemo(() => {',
+      'for (const { message } of queuedMessages) {',
+      'activeChatSurfaceMessageIds.has(optimisticActiveTargetId)',
+      'const shouldSyncActiveConversation = streaming || queuedQueueItems.length > 0;',
+    ]) {
+      assertContains({
+        componentName: 'AgentsPage.activeConversationState',
+        stateInput: 'first sent message is temporarily backend-queued',
+        contractName: 'queued-turn-sync-handoff',
+        sourceText: activeState,
+        expected,
+      });
+    }
+
+    const syncEffect = sourceSlice(
+      '// While a run is active or queued, keep the active chat state in sync',
+      'const wasStreamingRef = useRef(false);',
+    );
+    assertContains({
+      componentName: 'AgentsPage.activeConversationSync',
+      stateInput: 'canonical view has queued row but no streaming run yet',
+      contractName: 'queued-turn-sync-loop',
+      sourceText: syncEffect,
+      expected: 'if (!shouldSyncActiveConversation || !activeAgentId || !activeConvId) {',
+    });
+  });
+
   it('detects stale AgentSidebarItem row state when active conversation or per-row pending keys change', () => {
     const memoEq = sourceSlice(
       'function areAgentSidebarItemPropsEqual(',

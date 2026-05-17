@@ -6,7 +6,7 @@ import {
   refreshWebhook,
   updateAutoGreeting,
 } from '../telegram.js';
-import type { ConnectorAdapter, ConnectorSeed, IntegrationStatus, AuditCtx } from './types.js';
+import type { ConnectorAdapter, ConnectorSeed, IntegrationStatus } from './types.js';
 
 function readStatus(integrationId: string): IntegrationStatus {
   const bot = store.getById('telegramBots', integrationId);

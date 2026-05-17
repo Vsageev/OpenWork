@@ -5,7 +5,6 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod/v4';
 import { requirePermission } from '../middleware/rbac.js';
-import { store } from '../db/index.js';
 import { getApiKeyRecord } from '../db/repositories/api-keys-repository.js';
 import cron from 'node-cron';
 import {

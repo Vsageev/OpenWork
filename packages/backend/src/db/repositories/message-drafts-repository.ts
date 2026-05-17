@@ -40,7 +40,7 @@ export async function listMessageDraftsNative(
 ): Promise<{ entries: StoreRecord[]; total: number }> {
   const db = await getFlushedNativeDb();
   if (!db) {
-    let all = store.getAll(COLLECTION).filter((draft) => {
+    const all = store.getAll(COLLECTION).filter((draft) => {
       const conversationId = draft.conversationId;
       if (typeof conversationId !== 'string') return false;
       const conversation = store.getById('conversations', conversationId);

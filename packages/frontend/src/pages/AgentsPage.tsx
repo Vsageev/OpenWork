@@ -111,6 +111,7 @@ import {
   buildAgentChatMarkdownExport,
   buildAgentConversationViewModel,
   getBranchTargetIdByOffset,
+  normalizeAgentChatAttachments,
   queueItemsLabel,
   toQueueCount,
   type AgentConversationChatView,
@@ -455,7 +456,7 @@ export function getChatMessageEditableAttachments(
   message: Pick<ChatMessage, 'attachments'>,
 ): ManagedExistingAttachment[] {
   return (
-    message.attachments?.map((attachment) => ({
+    normalizeAgentChatAttachments(message.attachments)?.map((attachment) => ({
       storagePath: attachment.storagePath,
       fileName: attachment.fileName,
       type: attachment.type === 'image' ? 'image' : 'file',
@@ -2078,6 +2079,20 @@ function buildOptimisticChatMessage(params: {
   };
 }
 
+function normalizeChatMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    attachments: normalizeAgentChatAttachments(message.attachments),
+  };
+}
+
+function normalizeQueueItem(item: QueueItem): QueueItem {
+  return {
+    ...item,
+    attachments: normalizeAgentChatAttachments(item.attachments),
+  };
+}
+
 function mergeMessagesWithOptimistic(
   persistedMessages: ChatMessage[],
   optimisticMessages: ChatMessage[],
@@ -2110,7 +2125,7 @@ function flattenCanonicalChatViewMessages(view: AgentConversationChatView): Chat
             : message.metadata
               ? JSON.stringify(message.metadata)
               : null,
-        attachments: message.attachments ?? null,
+        attachments: normalizeAgentChatAttachments(message.attachments),
         parentId:
           message.direction === 'inbound'
             ? (turn.userMessage?.id ?? turn.parentTurnId)
@@ -2910,16 +2925,23 @@ export function AgentsPage() {
     () => new Set(visibleMessages.map((message) => message.id)),
     [visibleMessages],
   );
+  const activeChatSurfaceMessageIds = useMemo(() => {
+    const ids = new Set(activeMessageIds);
+    for (const { message } of queuedMessages) {
+      ids.add(message.id);
+    }
+    return ids;
+  }, [activeMessageIds, queuedMessages]);
   const optimisticActiveTargetId = activeConversationKey
     ? (optimisticResponseParentIds[activeConversationKey] ?? null)
     : null;
   const activeConversationPending = activeConversationKey
     ? pendingConversationKeys.has(activeConversationKey) &&
-      (!optimisticActiveTargetId || activeMessageIds.has(optimisticActiveTargetId))
+      (!optimisticActiveTargetId || activeChatSurfaceMessageIds.has(optimisticActiveTargetId))
     : false;
   const activeConversationHandoff = activeConversationKey
     ? runHandoffKeys.has(activeConversationKey) &&
-      (!optimisticActiveTargetId || activeMessageIds.has(optimisticActiveTargetId))
+      (!optimisticActiveTargetId || activeChatSurfaceMessageIds.has(optimisticActiveTargetId))
     : false;
   const streaming =
     activeConversationPending ||
@@ -2927,6 +2949,7 @@ export function AgentsPage() {
     showStreamingBubble ||
     activeConversationRun !== null ||
     effectivePendingBranchExecutionsByMessageId.size > 0;
+  const shouldSyncActiveConversation = streaming || queuedQueueItems.length > 0;
   const activeAgentWorkspaceIds = useMemo(() => {
     if (!activeAgent?.groupId) return [];
     return workspaces
@@ -3255,9 +3278,10 @@ export function AgentsPage() {
       activeMessagesRequestTokenRef.current += 1;
       const resolvedMessages =
         typeof nextMessages === 'function' ? nextMessages(messagesRef2.current) : nextMessages;
-      messagesRef2.current = resolvedMessages;
-      setMessages(resolvedMessages);
-      isFirstMessageRef.current = resolvedMessages.length === 0;
+      const normalizedMessages = resolvedMessages.map(normalizeChatMessage);
+      messagesRef2.current = normalizedMessages;
+      setMessages(normalizedMessages);
+      isFirstMessageRef.current = normalizedMessages.length === 0;
     },
     [isActiveConversation],
   );
@@ -3274,8 +3298,9 @@ export function AgentsPage() {
         typeof nextQueueItems === 'function'
           ? nextQueueItems(queueItemsRef.current)
           : nextQueueItems;
-      queueItemsRef.current = resolvedQueueItems;
-      setQueueItems(resolvedQueueItems);
+      const normalizedQueueItems = resolvedQueueItems.map(normalizeQueueItem);
+      queueItemsRef.current = normalizedQueueItems;
+      setQueueItems(normalizedQueueItems);
     },
     [isActiveConversation],
   );
@@ -3744,7 +3769,7 @@ export function AgentsPage() {
   // While a run is active or queued, keep the active chat state in sync so the
   // reply, queue badge, and processing indicator settle together.
   useEffect(() => {
-    if (!streaming || !activeAgentId || !activeConvId) {
+    if (!shouldSyncActiveConversation || !activeAgentId || !activeConvId) {
       return;
     }
 
@@ -3759,7 +3784,7 @@ export function AgentsPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [activeAgentId, activeConvId, streaming, syncActiveConversation]);
+  }, [activeAgentId, activeConvId, shouldSyncActiveConversation, syncActiveConversation]);
 
   const wasStreamingRef = useRef(false);
   useEffect(() => {
