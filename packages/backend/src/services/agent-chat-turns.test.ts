@@ -110,6 +110,135 @@ describe('agent chat turns', () => {
     });
   });
 
+  it('keeps repeated root edits grouped as root replacement turns', () => {
+    mocks.store.insert('messages', {
+      id: 'message-original',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: null,
+    });
+    mocks.store.insert('messages', {
+      id: 'message-edit-1',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: 'message-original',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-edit-2',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: 'message-original',
+    });
+
+    const original = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-original',
+      status: 'completed',
+    });
+    const firstEdit = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-edit-1',
+      turnType: 'edit',
+      supersedesTurnId: String(original.id),
+      status: 'completed',
+    });
+    const secondEdit = createAgentChatTurn({
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-edit-2',
+      turnType: 'edit',
+      supersedesTurnId: String(firstEdit.id),
+    });
+
+    expect(firstEdit).toMatchObject({ parentTurnId: null });
+    expect(secondEdit).toMatchObject({
+      parentTurnId: null,
+      supersedesTurnId: firstEdit.id,
+      turnType: 'edit',
+    });
+  });
+
+  it('repairs repeated root edit turns that were previously parented under the original turn', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({
+        agentId: 'agent-1',
+        activeBranches: {
+          'user:__root__': 'message-original',
+        },
+      }),
+      lastMessageAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-original',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: null,
+    });
+    mocks.store.insert('messages', {
+      id: 'message-edit-1',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: 'message-original',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-edit-2',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      parentId: 'message-original',
+    });
+    createAgentChatTurn({
+      id: 'turn-original',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-original',
+      status: 'superseded',
+    });
+    createAgentChatTurn({
+      id: 'turn-edit-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-edit-1',
+      turnType: 'edit',
+      supersedesTurnId: 'turn-original',
+      status: 'superseded',
+    });
+    mocks.store.insert('agentChatTurns', {
+      id: 'turn-edit-2',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      parentTurnId: 'turn-original',
+      userMessageId: 'message-edit-2',
+      assistantMessageId: null,
+      status: 'queued',
+      runId: null,
+      source: 'user',
+      createdById: null,
+      turnType: 'edit',
+      supersedesTurnId: 'turn-edit-1',
+      metadata: {},
+      startedAt: null,
+      completedAt: null,
+    });
+
+    const result = backfillLegacyAgentChatTurns();
+
+    expect(result).toMatchObject({ repairedParentLinks: 1, updatedActiveBranches: 1 });
+    expect(mocks.store.getById('agentChatTurns', 'turn-edit-2')).toMatchObject({
+      parentTurnId: null,
+    });
+    const metadata = mocks.store.getById('conversations', 'conversation-1')?.metadata;
+    const parsedMetadata =
+      typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
+    expect(parsedMetadata.activeBranches).toMatchObject({
+      'turn:__root__': 'turn-edit-2',
+      'user:__root__': 'message-edit-2',
+    });
+  });
+
   it('marks stopped turns separately from failed turns', () => {
     const turn = createAgentChatTurn({
       agentId: 'agent-1',

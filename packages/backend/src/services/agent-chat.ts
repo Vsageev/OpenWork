@@ -50,6 +50,7 @@ import {
   createAgentChatTurn,
   ensureLegacyAgentChatTurnForUserMessage,
   findAgentChatTurnForUserMessage,
+  listAgentChatTurns,
   markAgentChatTurnCompleted,
   markAgentChatTurnFailed,
   markAgentChatTurnQueued,
@@ -1228,7 +1229,7 @@ function getMessagePathToLeaf(conversationId: string, leafMessageId: string): Tr
   const userMessages = allMessages.filter((message) => message.direction === 'outbound');
   const userVariantsByPreviousMessageId = new Map<string | null, Record<string, unknown>[]>();
   for (const message of userMessages) {
-    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+    const previousUserMessageId = getPreviousUserMessageIdForPromptPath(
       conversationId,
       message,
     );
@@ -1249,7 +1250,7 @@ function getMessagePathToLeaf(conversationId: string, leafMessageId: string): Tr
   let currentUser: Record<string, unknown> | null = targetUser;
   while (currentUser) {
     userLineage.push(currentUser);
-    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+    const previousUserMessageId = getPreviousUserMessageIdForPromptPath(
       conversationId,
       currentUser,
     );
@@ -1258,7 +1259,7 @@ function getMessagePathToLeaf(conversationId: string, leafMessageId: string): Tr
 
   const path: TreePathMessage[] = [];
   for (const userMessage of userLineage.reverse()) {
-    const previousUserMessageId = getPreviousUserMessageIdForConversationMessage(
+    const previousUserMessageId = getPreviousUserMessageIdForPromptPath(
       conversationId,
       userMessage,
     );
@@ -1318,10 +1319,46 @@ function findPreviousOutboundAncestor(
   return null;
 }
 
+function getPreviousUserMessageIdForPromptPath(
+  conversationId: string,
+  message: Record<string, unknown>,
+): string | null {
+  const stored =
+    typeof message.previousUserMessageId === 'string'
+      ? (message.previousUserMessageId as string)
+      : null;
+  if (stored) return stored;
+
+  const turnParent = resolvePreviousUserMessageIdFromTurnParent(conversationId, message);
+  if (turnParent.found) return turnParent.previousUserMessageId;
+
+  if (message.direction === 'outbound' && typeof message.parentId === 'string') {
+    const parentMessage = store.getById('messages', message.parentId as string);
+    if (
+      parentMessage &&
+      parentMessage.conversationId === conversationId &&
+      parentMessage.direction === 'outbound'
+    ) {
+      return getPreviousUserMessageIdForPromptPath(conversationId, parentMessage);
+    }
+  }
+
+  return findPreviousOutboundAncestor(conversationId, (message.parentId as string | null) ?? null);
+}
+
 export function getPreviousUserMessageIdForConversationMessage(
   conversationId: string,
   message: Record<string, unknown>,
 ): string | null {
+  const stored =
+    typeof message.previousUserMessageId === 'string'
+      ? (message.previousUserMessageId as string)
+      : null;
+  if (stored) return stored;
+
+  const turnParent = resolvePreviousUserMessageIdFromTurnParent(conversationId, message);
+  if (turnParent.found) return turnParent.previousUserMessageId;
+
   if (message.direction === 'outbound' && typeof message.parentId === 'string') {
     const parentMessage = store.getById('messages', message.parentId as string);
     if (
@@ -1333,12 +1370,80 @@ export function getPreviousUserMessageIdForConversationMessage(
     }
   }
 
-  const stored =
-    typeof message.previousUserMessageId === 'string'
-      ? (message.previousUserMessageId as string)
-      : null;
-  if (stored) return stored;
   return findPreviousOutboundAncestor(conversationId, (message.parentId as string | null) ?? null);
+}
+
+function resolvePreviousUserMessageIdFromTurnParent(
+  conversationId: string,
+  message: Record<string, unknown>,
+): { found: boolean; previousUserMessageId: string | null } {
+  const messageId = typeof message.id === 'string' ? message.id : null;
+  if (!messageId) return { found: false, previousUserMessageId: null };
+  const turn = findLatestTurnForConversationMessage(conversationId, messageId);
+  if (!turn) return { found: false, previousUserMessageId: null };
+  const parentTurnId = typeof turn.parentTurnId === 'string' ? turn.parentTurnId : null;
+  const supersedesTurnId =
+    typeof turn.supersedesTurnId === 'string' ? turn.supersedesTurnId : null;
+  if (!parentTurnId && !supersedesTurnId) {
+    return { found: false, previousUserMessageId: null };
+  }
+  if (!parentTurnId) return { found: true, previousUserMessageId: null };
+  const parentTurn = store.getById('agentChatTurns', parentTurnId);
+  return {
+    found: true,
+    previousUserMessageId:
+      typeof parentTurn?.userMessageId === 'string' ? parentTurn.userMessageId : null,
+  };
+}
+
+function findLatestTurnForConversationMessage(
+  conversationId: string,
+  messageId: string,
+): Record<string, unknown> | null {
+  const matches = store
+    .getAll('agentChatTurns')
+    .filter((turn) => turn.conversationId === conversationId && turn.userMessageId === messageId)
+    .sort((a, b) => {
+      const aTime = typeof a.createdAt === 'string' ? new Date(a.createdAt).getTime() : 0;
+      const bTime = typeof b.createdAt === 'string' ? new Date(b.createdAt).getTime() : 0;
+      return aTime - bTime;
+    });
+  return matches[matches.length - 1] ?? null;
+}
+
+function resolveEditedMessageParentId(
+  conversationId: string,
+  original: Record<string, unknown>,
+): string | null {
+  const originalMessageId = typeof original.id === 'string' ? original.id : null;
+  let turn = originalMessageId
+    ? findLatestTurnForConversationMessage(conversationId, originalMessageId)
+    : null;
+  const visitedTurnIds = new Set<string>();
+  let baseMessage: Record<string, unknown> | null = null;
+
+  while (turn && typeof turn.supersedesTurnId === 'string') {
+    if (visitedTurnIds.has(turn.supersedesTurnId)) break;
+    visitedTurnIds.add(turn.supersedesTurnId);
+
+    const superseded = store.getById('agentChatTurns', turn.supersedesTurnId);
+    const supersededMessageId =
+      typeof superseded?.userMessageId === 'string' ? superseded.userMessageId : null;
+    const supersededMessage = supersededMessageId
+      ? store.getById('messages', supersededMessageId)
+      : null;
+    if (
+      supersededMessage &&
+      supersededMessage.conversationId === conversationId &&
+      supersededMessage.direction === 'outbound'
+    ) {
+      baseMessage = supersededMessage;
+    }
+    turn = superseded ?? null;
+  }
+
+  const parentSource = baseMessage ?? original;
+  return typeof parentSource.parentId === 'string' ? parentSource.parentId : null;
 }
 
 function resolvePreviousUserMessageId(
@@ -1483,6 +1588,56 @@ function activateMessagePath(conversationId: string, leafMessageId: string): voi
   }
 }
 
+function getConversationAgentId(conversationId: string): string | null {
+  const conversation = store.getById('conversations', conversationId);
+  const metadata = parseMetadata(conversation?.metadata);
+  return typeof metadata?.agentId === 'string' ? metadata.agentId : null;
+}
+
+function activateTurnPathForMessage(conversationId: string, messageId: string): boolean {
+  const agentId = getConversationAgentId(conversationId);
+  if (!agentId) return false;
+  const turn = findLatestTurnForConversationMessage(conversationId, messageId);
+  const turnId = typeof turn?.id === 'string' ? turn.id : null;
+  if (!turn || !turnId) return false;
+
+  const turns = listAgentChatTurns(agentId, conversationId);
+  const turnsById = new Map(turns.map((record) => [String(record.id), record]));
+  if (!turnsById.has(turnId)) return false;
+
+  const lineage: Record<string, unknown>[] = [];
+  const visited = new Set<string>();
+  let current: Record<string, unknown> | null = turn;
+  while (current) {
+    const currentId = typeof current.id === 'string' ? current.id : null;
+    if (!currentId || visited.has(currentId)) break;
+    visited.add(currentId);
+    lineage.push(current);
+    const parentTurnId: string | null =
+      typeof current.parentTurnId === 'string' ? (current.parentTurnId as string) : null;
+    current = parentTurnId ? (turnsById.get(parentTurnId) ?? null) : null;
+  }
+
+  const activeBranches = getActiveBranches(conversationId);
+  for (const branchTurn of lineage.reverse()) {
+    const branchTurnId = typeof branchTurn.id === 'string' ? branchTurn.id : null;
+    if (!branchTurnId) continue;
+    const parentTurnId: string | null =
+      typeof branchTurn.parentTurnId === 'string' ? (branchTurn.parentTurnId as string) : null;
+    const parentUserMessageId: string | null = parentTurnId
+      ? typeof turnsById.get(parentTurnId)?.userMessageId === 'string'
+        ? (turnsById.get(parentTurnId)?.userMessageId as string)
+        : null
+      : null;
+    activeBranches[`turn:${parentTurnId ?? ROOT_BRANCH_KEY}`] = branchTurnId;
+    if (typeof branchTurn.userMessageId === 'string') {
+      activeBranches[getUserBranchSelectionKey(parentUserMessageId)] = branchTurn.userMessageId;
+    }
+  }
+  setActiveBranches(conversationId, activeBranches);
+  return true;
+}
+
 export function activateMessagePathForSearchResult(
   conversationId: string,
   messageId: string,
@@ -1539,7 +1694,7 @@ export function editMessageAndBranch(
     conversationId,
     derivedPreviousUserMessageId,
   );
-  const parentId = (original.parentId as string | null | undefined) ?? null;
+  const parentId = resolveEditedMessageParentId(conversationId, original);
   const originalAttachments =
     original.type === 'image' || original.type === 'file'
       ? cloneAttachmentRecords(parseAttachments(original.attachments))
@@ -1618,6 +1773,27 @@ export function switchBranch(conversationId: string, messageId: string): void {
   }
 
   const allMessages = listConversationMessages(conversationId);
+  const turn = findLatestTurnForConversationMessage(conversationId, messageId);
+  if (turn) {
+    const agentId = getConversationAgentId(conversationId);
+    const parentTurnId = typeof turn.parentTurnId === 'string' ? turn.parentTurnId : null;
+    const siblings = agentId
+      ? listAgentChatTurns(agentId, conversationId)
+          .filter(
+            (candidate) =>
+              ((candidate.parentTurnId as string | null) ?? null) === parentTurnId,
+          )
+          .filter((candidate) => typeof candidate.userMessageId === 'string')
+      : [];
+    if (
+      siblings.length > 1 &&
+      siblings.some((candidate) => candidate.userMessageId === messageId)
+    ) {
+      activateTurnPathForMessage(conversationId, messageId);
+      return;
+    }
+  }
+
   const siblings =
     msg.direction === 'outbound'
       ? allMessages.filter(
@@ -1856,6 +2032,18 @@ function resolveQueuedPromptParentId(
   return parentId ?? getCurrentConversationLeafId(conversationId);
 }
 
+/** When the client omits previousUserMessageId but parentId is another user message (e.g. queued behind an in-flight turn), persist that link so prompt history can follow the chain. */
+function previousUserMessageIdForOutboundParentLink(
+  parentId: string | null,
+  previousUserMessageId: string | null,
+): string | null {
+  if (previousUserMessageId != null) return previousUserMessageId;
+  if (!parentId) return null;
+  const parentMsg = store.getById('messages', parentId);
+  if (!parentMsg || parentMsg.direction !== 'outbound') return null;
+  return parentMsg.id as string;
+}
+
 function ensureQueuedPromptMessage(
   queueItemId: string,
   queueItem: Record<string, unknown>,
@@ -1892,6 +2080,10 @@ function ensureQueuedPromptMessage(
   }
 
   const queuedAttachments = parseAttachments(queueItem.attachments);
+  const effectivePreviousUserMessageId = previousUserMessageIdForOutboundParentLink(
+    parentId,
+    previousUserMessageId,
+  );
   const userMessage = saveAgentConversationMessage({
     id:
       typeof queueItem.queuedMessageId === 'string'
@@ -1904,7 +2096,7 @@ function ensureQueuedPromptMessage(
     metadata: null,
     attachments: queuedAttachments.length > 0 ? queuedAttachments : null,
     parentId,
-    previousUserMessageId,
+    previousUserMessageId: effectivePreviousUserMessageId,
   });
   store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
     queuedMessageId: userMessage.id,
@@ -2096,6 +2288,7 @@ function buildPromptWithHistory(
   conversationId: string,
   currentPrompt?: string,
   leafMessageId?: string,
+  options: { turnId?: string | null } = {},
 ): string {
   const history = leafMessageId
     ? getMessagePathToLeaf(conversationId, leafMessageId)
@@ -2106,11 +2299,9 @@ function buildPromptWithHistory(
   const triggerContext = buildTriggerContext('chat', {
     agentId,
     conversationId,
+    chatTurnId: options.turnId ?? undefined,
+    latestUserMessageId: leafMessageId,
   });
-
-  if (history.length === 0 && currentPrompt) {
-    return `${triggerContext}User: ${currentPrompt}`;
-  }
 
   const lines: string[] = [];
   for (const msg of history) {
@@ -2125,7 +2316,24 @@ function buildPromptWithHistory(
     lines.push(`User: ${currentPrompt}`);
   }
 
-  return `${triggerContext}\nContinue the conversation below. Only respond to the latest User message.\n\n${lines.join('\n\n')}`;
+  const latestUserMessage = currentPrompt
+    ? `User: ${currentPrompt}`
+    : formatLatestUserMessageForPrompt(history);
+  const latestUserSection = latestUserMessage
+    ? `Latest User Message\n${latestUserMessage}\n\n`
+    : '';
+
+  return `${triggerContext}${latestUserSection}Continue the conversation below. Only respond to the latest User message.\n\n${lines.join('\n\n')}`;
+}
+
+function formatLatestUserMessageForPrompt(history: Record<string, unknown>[]): string | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const msg = history[index];
+    if (msg?.direction === 'outbound') {
+      return formatMessageForPrompt(msg);
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -3178,7 +3386,9 @@ function spawnChatProcess(
 }
 
 export const __agentChatTestUtils = {
+  buildPromptWithHistory,
   shouldAttemptFallbackRetry,
+  getPreviousUserMessageIdForPromptPath,
 };
 
 /**
@@ -3225,7 +3435,9 @@ export function executePrompt(
     }
 
     // Build prompt with conversation history BEFORE saving, so current message isn't duplicated
-    const fullPrompt = buildPromptWithHistory(agentId, conversationId, prompt);
+    const fullPrompt = buildPromptWithHistory(agentId, conversationId, prompt, undefined, {
+      turnId: options.turnId ?? null,
+    });
 
     // Save user message
     const userMessage = saveMessage(conversationId, 'outbound', prompt);
@@ -3282,7 +3494,9 @@ function executeRespondToMessage(
       return;
     }
 
-    const fullPrompt = buildPromptWithHistory(agentId, conversationId, undefined, parentMessageId);
+    const fullPrompt = buildPromptWithHistory(agentId, conversationId, undefined, parentMessageId, {
+      turnId: options.turnId ?? null,
+    });
     const attachmentPaths = getConversationAttachmentDiskPaths(conversationId, parentMessageId);
 
     spawnChatProcess(
@@ -4166,6 +4380,10 @@ export function enqueueAgentPrompt(
       if (parentId) {
         activateMessagePath(conversationId, parentId);
       }
+      const effectivePreviousUserMessageId = previousUserMessageIdForOutboundParentLink(
+        parentId,
+        previousUserMessageId,
+      );
       userMessage = saveAgentConversationMessage({
         id: queuedMessageId ?? undefined,
         conversationId,
@@ -4175,7 +4393,7 @@ export function enqueueAgentPrompt(
         metadata: null,
         attachments: appendPromptAttachments.length > 0 ? appendPromptAttachments : null,
         parentId,
-        previousUserMessageId,
+        previousUserMessageId: effectivePreviousUserMessageId,
       });
     }
     queuedMessageId =

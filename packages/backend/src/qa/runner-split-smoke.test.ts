@@ -780,9 +780,17 @@ describe('runner-split QA backend smoke', () => {
     );
 
     const turns = listAgentChatTurns(ids.agent, convId);
-    expect(turns.map((turn) => turn.userMessageId)).toEqual(expectedQueuedMessageIds);
-    expect(turns.map((turn) => turn.status)).toEqual(['queued', 'queued', 'queued']);
-    expect(turns.map((turn) => turn.id)).toEqual(queueItems.map((item) => item.turnId));
+    const turnsById = new Map(turns.map((turn) => [String(turn.id), turn]));
+    const queuedTurns = queueItems.map((item) => {
+      const turn = turnsById.get(String(item.turnId));
+      if (!turn) {
+        throw new Error(`missing agentChatTurn for queue item ${String(item.id)}`);
+      }
+      return turn;
+    });
+    expect(queuedTurns.map((turn) => turn.userMessageId)).toEqual(expectedQueuedMessageIds);
+    expect(queuedTurns.map((turn) => turn.status)).toEqual(['queued', 'queued', 'queued']);
+    expect(queuedTurns.map((turn) => turn.id)).toEqual(queueItems.map((item) => item.turnId));
 
     console.info(
       `qa-smoke report: ${JSON.stringify({

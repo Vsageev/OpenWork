@@ -7,6 +7,7 @@ import { AgentAvatar } from '../components/AgentAvatar';
 import { toast } from '../stores/toast';
 import styles from './AgentMonitorPage.module.css';
 import { MarkdownContent } from '../ui/MarkdownContent';
+import { Tooltip } from '../ui/Tooltip';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { formatAgentOutputForDisplay, formatAgentRunErrorMessage, parseAgentOutputBlocks } from 'shared';
 import type { OutputBlock } from 'shared';
@@ -28,6 +29,8 @@ interface AgentRun {
   conversationId: string | null;
   cardId: string | null;
   cronJobId: string | null;
+  turnId?: string | null;
+  responseParentId?: string | null;
   errorMessage: string | null;
   responseText?: string | null;
   startedAt: string;
@@ -99,6 +102,7 @@ interface AgentBatchItem {
   status: string;
   errorMessage: string | null;
   blockedReason?: string | null;
+  agentRunId?: string | null;
   attempts: number;
   maxAttempts: number;
 }
@@ -137,6 +141,90 @@ function formatTime(iso: string): string {
   if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
 
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatShortId(id: string): string {
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 8)}...`;
+}
+
+function copyIdentity(e: React.MouseEvent, label: string, value: string) {
+  e.stopPropagation();
+  const clipboard = navigator.clipboard;
+  if (!clipboard) {
+    toast.error('Clipboard is unavailable');
+    return;
+  }
+  clipboard.writeText(value)
+    .then(() => toast.success(`${label} copied`))
+    .catch(() => toast.error(`Failed to copy ${label.toLowerCase()}`));
+}
+
+function IdentityChip({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null;
+
+  return (
+    <Tooltip label={`${label}: ${value}`}>
+      <button
+        type="button"
+        className={styles.identityChip}
+        onClick={(e) => copyIdentity(e, label, value)}
+        aria-label={`Copy ${label}: ${value}`}
+      >
+        <Hash size={11} />
+        <span>{label}</span>
+        <code>{formatShortId(value)}</code>
+      </button>
+    </Tooltip>
+  );
+}
+
+function IdentityCopyButton({ label, value }: { label: string; value: string }) {
+  return (
+    <Tooltip label={`Copy ${label}`}>
+      <button
+        type="button"
+        className={styles.identityCopyButton}
+        onClick={(e) => copyIdentity(e, label, value)}
+        aria-label={`Copy ${label}: ${value}`}
+      >
+        <Copy size={12} />
+      </button>
+    </Tooltip>
+  );
+}
+
+function RunIdentityColumn({ run }: { run: AgentRun }) {
+  return (
+    <div className={styles.runIdentityColumn}>
+      <IdentityChip label="Run" value={run.id} />
+      {run.turnId ? <IdentityChip label="Turn" value={run.turnId} /> : null}
+    </div>
+  );
+}
+
+function RunIdentityDetails({ detail }: { detail: AgentRunDetail }) {
+  const entries = [
+    { label: 'Agent run ID', value: detail.id },
+    { label: 'Chat turn ID', value: detail.turnId ?? null },
+    { label: 'Conversation ID', value: detail.conversationId },
+    { label: 'Card ID', value: detail.cardId },
+    { label: 'Cron job ID', value: detail.cronJobId },
+  ].filter((entry): entry is { label: string; value: string } => Boolean(entry.value));
+
+  if (entries.length === 0) return null;
+
+  return (
+    <div className={styles.identityDetails}>
+      {entries.map((entry) => (
+        <div key={entry.label} className={styles.identityDetailRow}>
+          <span className={styles.identityDetailLabel}>{entry.label}</span>
+          <code className={styles.identityDetailValue}>{entry.value}</code>
+          <IdentityCopyButton label={entry.label} value={entry.value} />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 let elapsedNow = Date.now();
@@ -710,6 +798,7 @@ function RunLogPanel({ runId, runStatus }: { runId: string; runStatus: AgentRun[
 
   return (
     <div className={styles.logPanel}>
+      <RunIdentityDetails detail={detail} />
       {modelLabel && (
         <div className={styles.modelInfo}>
           <Cpu size={13} />
@@ -884,6 +973,10 @@ function BatchErrorPanel({ batch }: { batch: AgentBatchRun }) {
       {items.map((item) => (
         <div key={item.id} className={styles.batchErrorItem}>
           <span className={styles.batchErrorName}>{item.cardName || item.cardId.slice(0, 8)}</span>
+          <div className={styles.batchErrorIdentityRow}>
+            <IdentityChip label="Item" value={item.id} />
+            <IdentityChip label="Agent run" value={item.agentRunId} />
+          </div>
           {(item.errorMessage || item.blockedReason) && (
             <pre className={styles.batchErrorMessage}>{item.errorMessage || item.blockedReason}</pre>
           )}
@@ -1480,6 +1573,7 @@ export function AgentMonitorPage() {
                   </div>
                   <TriggerBadge type={run.triggerType} />
                   <StatusBadge status={run.status} />
+                  <RunIdentityColumn run={run} />
                   <span className={styles.runTime}>{formatTime(run.startedAt)}</span>
                   <span className={styles.runDuration}>
                     <ElapsedTimer startedAt={run.startedAt} />
@@ -1556,6 +1650,7 @@ export function AgentMonitorPage() {
                         {batch.status === 'running' && <span className={styles.pulsingDot} />}
                         {batch.status === 'queued' ? 'Queued' : 'Running'}
                       </span>
+                      <IdentityChip label="Batch" value={batch.id} />
                     </div>
                     <button
                       className={styles.killButton}
@@ -1693,6 +1788,7 @@ export function AgentMonitorPage() {
                       <ExternalLink size={10} />
                     </button>
                     <span className={`${styles.statusBadge} ${sc.cls}`}>{sc.label}</span>
+                    <IdentityChip label="Batch" value={batch.id} />
                     <span className={styles.batchStatTotal}>
                       {batch.completed}/{batch.total} done
                       {batch.failed > 0 ? `, ${batch.failed} failed` : ''}
@@ -1831,6 +1927,7 @@ export function AgentMonitorPage() {
               <span>Agent</span>
               <span>Trigger</span>
               <span>Status</span>
+              <span>IDs</span>
               <span>Started</span>
               <span>Duration</span>
               <span></span>
@@ -1868,6 +1965,7 @@ export function AgentMonitorPage() {
                   </div>
                   <TriggerBadge type={run.triggerType} />
                   <StatusBadge status={run.status} />
+                  <RunIdentityColumn run={run} />
                   <span className={styles.runTime}>{formatTime(run.startedAt)}</span>
                   <span className={styles.runDuration}>
                     {run.status === 'running' ? (

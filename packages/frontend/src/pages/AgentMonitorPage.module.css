@@ -277,7 +277,7 @@
 
 .runRow {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) 80px 90px 100px 120px 60px;
+  grid-template-columns: minmax(140px, 1fr) 80px 90px 128px 100px 120px 60px;
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-3) var(--space-4);
@@ -286,7 +286,7 @@
 }
 
 .activeRunRow {
-  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px 32px;
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 128px 100px 120px 60px 32px;
 }
 
 .runRow:last-child {
@@ -452,7 +452,7 @@
 /* Table header */
 .tableHeader {
   display: grid;
-  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px;
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 128px 100px 120px 60px;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   background: var(--color-surface);
@@ -474,12 +474,20 @@
 }
 
 /* History rows have an extra expand column */
+.runIdentityColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
 .runEntry .runRow {
-  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px;
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 128px 100px 120px 60px;
 }
 
 .runEntry .activeRunRow {
-  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 100px 120px 60px 32px;
+  grid-template-columns: 24px minmax(140px, 1fr) 80px 90px 128px 100px 120px 60px 32px;
 }
 
 .runEntry {
@@ -530,6 +538,99 @@
   color: var(--color-text-secondary);
   background: var(--color-bg-tertiary, rgba(128, 128, 128, 0.08));
   border: 1px solid var(--color-border-subtle);
+}
+
+.identityChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.identityChip:hover {
+  color: var(--color-text-secondary);
+  border-color: var(--color-text-tertiary);
+  background: var(--color-surface);
+}
+
+.identityChip > svg {
+  flex-shrink: 0;
+}
+
+.identityChip code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.identityDetails {
+  display: grid;
+  gap: 4px;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+
+.identityDetailRow {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.identityDetailLabel {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.identityDetailValue {
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.identityCopyButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.identityCopyButton:hover {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+  background: var(--color-surface);
 }
 
 .logSection {
@@ -1407,6 +1508,13 @@
   color: var(--color-text);
 }
 
+.batchErrorIdentityRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
 .batchErrorMessage {
   margin: var(--space-1) 0 0;
   font-size: 12px;
@@ -1457,11 +1565,11 @@
   }
 
   .activeRunRow {
-    grid-template-columns: 20px 1fr auto auto auto;
+    grid-template-columns: 20px 1fr auto auto auto auto;
   }
 
   .runEntry .activeRunRow {
-    grid-template-columns: 20px 1fr auto auto auto;
+    grid-template-columns: 20px 1fr auto auto auto auto;
   }
 
   /* Hide time, duration, trigger-link on active runs */
@@ -1473,21 +1581,21 @@
 
   /* History table header */
   .tableHeader {
-    grid-template-columns: 20px 1fr auto auto;
+    grid-template-columns: 20px 1fr auto auto auto;
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
   }
 
   /* Hide time, duration, trigger-link columns in header */
-  .tableHeader > :nth-child(5),
   .tableHeader > :nth-child(6),
-  .tableHeader > :nth-child(7) {
+  .tableHeader > :nth-child(7),
+  .tableHeader > :nth-child(8) {
     display: none;
   }
 
   /* History rows */
   .runEntry .runRow {
-    grid-template-columns: 20px 1fr auto auto;
+    grid-template-columns: 20px 1fr auto auto auto;
     gap: var(--space-2);
     padding: var(--space-3);
   }
@@ -1503,6 +1611,14 @@
   .logPanel {
     padding-left: var(--space-3);
     padding-right: var(--space-3);
+  }
+
+  .identityDetailRow {
+    grid-template-columns: 1fr 24px;
+  }
+
+  .identityDetailLabel {
+    grid-column: 1 / -1;
   }
 
   /* Batch card adjustments */
@@ -1532,11 +1648,11 @@
   }
 
   .activeRunRow {
-    grid-template-columns: 20px 1fr auto auto;
+    grid-template-columns: 20px 1fr auto auto auto;
   }
 
   .runEntry .activeRunRow {
-    grid-template-columns: 20px 1fr auto auto;
+    grid-template-columns: 20px 1fr auto auto auto;
   }
 
   /* Hide trigger badge on very small screens */
@@ -1545,11 +1661,11 @@
   }
 
   .runEntry .runRow {
-    grid-template-columns: 20px 1fr auto;
+    grid-template-columns: 20px 1fr auto auto;
   }
 
   .tableHeader {
-    grid-template-columns: 20px 1fr auto;
+    grid-template-columns: 20px 1fr auto auto;
   }
 
   /* Hide trigger column in header too */

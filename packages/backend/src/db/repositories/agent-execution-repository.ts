@@ -156,6 +156,16 @@ export async function clearAgentRunConversationReferences(conversationId: string
   await Promise.all(updates);
 }
 
+export async function clearAgentRunCardReferences(cardId: string): Promise<void> {
+  const updates = store
+    .getAll(AGENT_RUNS_COLLECTION)
+    .filter((r) => r.cardId === cardId)
+    .map((r) => store.update(AGENT_RUNS_COLLECTION, String(r.id), { cardId: null }))
+    .filter(Boolean);
+
+  await Promise.all(updates);
+}
+
 export function listConversationChatQueueItems(
   agentId: string,
   conversationId: string,
@@ -233,6 +243,19 @@ export function deleteBatchRunItemsForRun(runId: string): StoreRecord[] {
   const ids = store
     .getAll(AGENT_BATCH_RUN_ITEMS_COLLECTION)
     .filter((item) => item.runId === runId)
+    .map((item) => String(item.id));
+  for (const id of ids) {
+    const del = store.delete(AGENT_BATCH_RUN_ITEMS_COLLECTION, id);
+    if (del) removed.push(del);
+  }
+  return removed;
+}
+
+export function deleteBatchRunItemsForCard(cardId: string): StoreRecord[] {
+  const removed: StoreRecord[] = [];
+  const ids = store
+    .getAll(AGENT_BATCH_RUN_ITEMS_COLLECTION)
+    .filter((item) => item.cardId === cardId)
     .map((item) => String(item.id));
   for (const id of ids) {
     const del = store.delete(AGENT_BATCH_RUN_ITEMS_COLLECTION, id);

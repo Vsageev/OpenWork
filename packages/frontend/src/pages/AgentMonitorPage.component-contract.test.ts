@@ -107,4 +107,37 @@ describe('AgentMonitorPage component contract', () => {
       '.batchStatDetail .batchStatProcessing {\n  color: #7c3aed;\n}',
     );
   });
+
+  it('surfaces run, batch, chat turn, and batch item ids in monitor UI', () => {
+    assertContains(
+      'run-row-identity-column',
+      source,
+      '<RunIdentityColumn run={run} />',
+    );
+    assertContains(
+      'run-row-turn-chip',
+      source,
+      '<IdentityChip label="Turn" value={run.turnId} />',
+    );
+    assertContains(
+      'batch-card-id-chip',
+      source,
+      '<IdentityChip label="Batch" value={batch.id} />',
+    );
+    assertContains(
+      'chat-turn-id-detail',
+      source,
+      "{ label: 'Chat turn ID', value: detail.turnId ?? null },",
+    );
+    assertContains(
+      'batch-item-agent-run-id-chip',
+      source,
+      '<IdentityChip label="Agent run" value={item.agentRunId} />',
+    );
+    assertContains(
+      'identity-column-header',
+      source,
+      '<span>IDs</span>',
+    );
+  });
 });

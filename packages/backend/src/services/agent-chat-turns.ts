@@ -52,8 +52,8 @@ export function createAgentChatTurn(params: CreateAgentChatTurnParams): StoreRec
     : null;
   const parentTurnId =
     params.parentTurnId ??
-    (superseded && typeof superseded.parentTurnId === 'string'
-      ? (superseded.parentTurnId as string)
+    (superseded
+      ? asString(superseded.parentTurnId)
       : resolveParentTurnId({
           agentId: params.agentId,
           conversationId: params.conversationId,
@@ -105,6 +105,20 @@ export function updateAgentChatTurn(
       : {}),
   });
   return updateAgentChatTurnRecord(turnId, normalized);
+}
+
+function updateAgentChatTurnLifecycle(
+  turnId: string | null | undefined,
+  patch: Partial<CreateAgentChatTurnParams>,
+): StoreRecord | null {
+  if (!turnId) return null;
+  const existing = getAgentChatTurnRecord(turnId);
+  if (!existing) return null;
+  const nextPatch = { ...patch };
+  if (existing.status === 'superseded' && nextPatch.status !== 'superseded') {
+    delete nextPatch.status;
+  }
+  return updateAgentChatTurn(turnId, nextPatch);
 }
 
 export function getAgentChatTurn(turnId: string): StoreRecord | null {
@@ -171,7 +185,7 @@ export function markAgentChatTurnRunning(
   turnId: string | null | undefined,
   params: { runId?: string | null; userMessageId?: string | null } = {},
 ): StoreRecord | null {
-  return updateAgentChatTurn(turnId, {
+  return updateAgentChatTurnLifecycle(turnId, {
     status: 'running',
     runId: params.runId ?? undefined,
     userMessageId: params.userMessageId ?? undefined,
@@ -184,7 +198,7 @@ export function markAgentChatTurnCompleted(
   turnId: string | null | undefined,
   params: { assistantMessageId?: string | null; runId?: string | null } = {},
 ): StoreRecord | null {
-  return updateAgentChatTurn(turnId, {
+  return updateAgentChatTurnLifecycle(turnId, {
     status: 'completed',
     assistantMessageId: params.assistantMessageId ?? undefined,
     runId: params.runId ?? undefined,
@@ -196,7 +210,7 @@ export function markAgentChatTurnFailed(
   turnId: string | null | undefined,
   params: { runId?: string | null; errorMessage?: string | null } = {},
 ): StoreRecord | null {
-  return updateAgentChatTurn(turnId, {
+  return updateAgentChatTurnLifecycle(turnId, {
     status: 'failed',
     runId: params.runId ?? undefined,
     completedAt: new Date().toISOString(),
@@ -205,7 +219,7 @@ export function markAgentChatTurnFailed(
 }
 
 export function markAgentChatTurnQueued(turnId: string | null | undefined): StoreRecord | null {
-  return updateAgentChatTurn(turnId, {
+  return updateAgentChatTurnLifecycle(turnId, {
     status: 'queued',
     completedAt: null,
   });
@@ -215,7 +229,7 @@ export function markAgentChatTurnStopped(
   turnId: string | null | undefined,
   params: { runId?: string | null; errorMessage?: string | null } = {},
 ): StoreRecord | null {
-  return updateAgentChatTurn(turnId, {
+  return updateAgentChatTurnLifecycle(turnId, {
     status: 'stopped',
     runId: params.runId ?? undefined,
     completedAt: new Date().toISOString(),
@@ -380,7 +394,7 @@ export function backfillLegacyAgentChatTurns(
   const repairedConversationIds = repairExistingTurnParentLinks();
   result.repairedParentLinks = repairedConversationIds.repairedParentLinks;
   for (const conversationId of repairedConversationIds.conversationIds) {
-    if (selectLatestConversationPath(conversationId)) {
+    if (selectLatestTurnPath(conversationId) || selectLatestConversationPath(conversationId)) {
       result.updatedActiveBranches++;
     }
   }
@@ -412,8 +426,11 @@ function repairExistingTurnParentLinks(): {
       conversationId,
       userMessageId,
     });
-    if (!expectedParentTurnId || expectedParentTurnId === turn.parentTurnId) continue;
-    if (expectedParentTurnId === turnId || wouldCreateTurnCycle(turnId, expectedParentTurnId)) {
+    if (expectedParentTurnId === turn.parentTurnId) continue;
+    if (
+      expectedParentTurnId &&
+      (expectedParentTurnId === turnId || wouldCreateTurnCycle(turnId, expectedParentTurnId))
+    ) {
       continue;
     }
 
@@ -501,6 +518,63 @@ function selectLatestConversationPath(conversationId: string): boolean {
   }
   if (latest.direction === 'inbound') {
     nextBranches[`reply:${targetUserId}`] = latestId;
+  }
+
+  if (shallowEqualRecord(previousBranches, nextBranches)) return false;
+  store.update('conversations', conversationId, {
+    metadata: { ...metadata, activeBranches: nextBranches },
+  });
+  return true;
+}
+
+function selectLatestTurnPath(conversationId: string): boolean {
+  const conversation = store.getById('conversations', conversationId);
+  if (!conversation) return false;
+  const metadata = parseConversationMetadata(conversation.metadata);
+  const agentId = asString(metadata.agentId);
+  if (!agentId) return false;
+
+  const turns = listAgentChatTurnRecordsForConversation(agentId, conversationId);
+  const latest =
+    [...turns].reverse().find((turn) => turn.status !== 'superseded') ??
+    turns[turns.length - 1] ??
+    null;
+  const latestTurnId = asString(latest?.id);
+  if (!latest || !latestTurnId) return false;
+
+  const turnsById = new Map(turns.map((turn) => [String(turn.id), turn]));
+  const turnLineage: StoreRecord[] = [];
+  let current: StoreRecord | null = latest;
+  const visited = new Set<string>();
+  while (current) {
+    const currentId = asString(current.id);
+    if (!currentId || visited.has(currentId)) break;
+    visited.add(currentId);
+    turnLineage.push(current);
+    const parentTurnId = asString(current.parentTurnId);
+    current = parentTurnId ? (turnsById.get(parentTurnId) ?? null) : null;
+  }
+
+  const previousBranches =
+    metadata.activeBranches &&
+    typeof metadata.activeBranches === 'object' &&
+    !Array.isArray(metadata.activeBranches)
+      ? (metadata.activeBranches as Record<string, string>)
+      : {};
+  const nextBranches = { ...previousBranches };
+
+  for (const turn of turnLineage.reverse()) {
+    const turnId = asString(turn.id);
+    const userMessageId = asString(turn.userMessageId);
+    if (!turnId) continue;
+    const parentTurnId = asString(turn.parentTurnId);
+    const parentUserMessageId = parentTurnId
+      ? asString(turnsById.get(parentTurnId)?.userMessageId)
+      : null;
+    nextBranches[`turn:${parentTurnId ?? '__root__'}`] = turnId;
+    if (userMessageId) {
+      nextBranches[`user:${parentUserMessageId ?? '__root__'}`] = userMessageId;
+    }
   }
 
   if (shallowEqualRecord(previousBranches, nextBranches)) return false;

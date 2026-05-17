@@ -130,8 +130,11 @@ import {
   enqueueAgentPrompt,
   reorderQueueItems,
   retryQueueItem,
+  switchBranch,
+  __agentChatTestUtils,
 } from './agent-chat.js';
 import { getAgentConversationChatView } from './agent-chat-view.js';
+import { markAgentChatTurnCompleted } from './agent-chat-turns.js';
 
 function seedConversation(metadata: Record<string, unknown> = {}) {
   mocks.store.insert('conversations', {
@@ -197,6 +200,214 @@ describe('agent chat turn write paths', () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  it('resolves prompt-path previous user when parent is outbound (prefers stored id over outbound-parent recursion)', () => {
+    seedMessage('message-1', { content: 'First' });
+    seedMessage('message-2', {
+      content: 'Second',
+      parentId: 'message-1',
+      previousUserMessageId: 'message-1',
+    });
+    const message2 = mocks.store.getById('messages', 'message-2');
+    expect(message2).toBeTruthy();
+    expect(
+      __agentChatTestUtils.getPreviousUserMessageIdForPromptPath('conversation-1', message2!),
+    ).toBe('message-1');
+  });
+
+  it('puts the exact latest chat turn and user message at the top of queued-run prompts', () => {
+    seedMessage('message-1', { content: 'First user message' });
+    seedMessage('assistant-1', {
+      direction: 'inbound',
+      content: 'First assistant response',
+      parentId: 'message-1',
+    });
+    seedMessage('message-2', {
+      content: 'Latest queued message',
+      parentId: 'assistant-1',
+      previousUserMessageId: 'message-1',
+    });
+
+    const prompt = __agentChatTestUtils.buildPromptWithHistory(
+      'agent-1',
+      'conversation-1',
+      undefined,
+      'message-2',
+      { turnId: 'turn-2' },
+    );
+
+    expect(prompt).toContain('chatTurnId: turn-2');
+    expect(prompt).toContain('latestUserMessageId: message-2');
+    expect(prompt.indexOf('Latest User Message')).toBeLessThan(
+      prompt.indexOf('Continue the conversation below'),
+    );
+    expect(prompt.indexOf('User: Latest queued message')).toBeLessThan(
+      prompt.indexOf('User: First user message'),
+    );
+  });
+
+  it('keeps branch switching working after editing a message that was initially queued', () => {
+    seedMessage('message-1', {
+      content: 'First',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    seedTurn('turn-1', {
+      userMessageId: 'message-1',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:01.000Z',
+    });
+    seedMessage('message-2', {
+      content: 'Queued follow-up, later completed',
+      parentId: 'message-1',
+      previousUserMessageId: 'message-1',
+      createdAt: '2026-05-16T12:00:02.000Z',
+    });
+    seedTurn('turn-2', {
+      parentTurnId: 'turn-1',
+      userMessageId: 'message-2',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:03.000Z',
+    });
+
+    const editedMessage = editMessageAndBranch(
+      'conversation-1',
+      'message-2',
+      'Edited queued follow-up',
+      {
+        newMessageId: 'message-2-edit',
+      },
+    );
+    const edit = enqueueAgentPrompt('agent-1', 'conversation-1', 'Edited queued follow-up', {
+      mode: 'respond_to_message',
+      targetMessageId: String(editedMessage.id),
+      createdById: 'test-user',
+      turnType: 'edit',
+      supersedesMessageId: 'message-2',
+    });
+
+    expect(editedMessage).toMatchObject({
+      id: 'message-2-edit',
+      parentId: 'message-1',
+      previousUserMessageId: 'message-1',
+    });
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-1', String(edit.queueItem.turnId)]);
+
+    switchBranch('conversation-1', 'message-2');
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-1', 'turn-2']);
+
+    switchBranch('conversation-1', 'message-2-edit');
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-1', String(edit.queueItem.turnId)]);
+  });
+
+  it('switches a legacy edited follow-up by turn lineage when message previous user metadata is missing', () => {
+    seedConversation({
+      activeBranches: {
+        'user:__root__': 'message-1-edit',
+        'turn:__root__': 'turn-1-edit',
+      },
+    });
+    seedMessage('message-1', {
+      content: 'First',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    seedTurn('turn-1', {
+      userMessageId: 'message-1',
+      status: 'superseded',
+      createdAt: '2026-05-16T12:00:01.000Z',
+    });
+    seedMessage('message-2', {
+      content: 'Second',
+      parentId: 'message-1',
+      previousUserMessageId: 'message-1',
+      createdAt: '2026-05-16T12:00:02.000Z',
+    });
+    seedTurn('turn-2', {
+      parentTurnId: 'turn-1',
+      userMessageId: 'message-2',
+      status: 'superseded',
+      createdAt: '2026-05-16T12:00:03.000Z',
+    });
+    seedMessage('message-2-edit', {
+      content: 'Edited second',
+      parentId: 'message-1',
+      previousUserMessageId: null,
+      createdAt: '2026-05-16T12:00:04.000Z',
+    });
+    seedTurn('turn-2-edit', {
+      parentTurnId: 'turn-1',
+      userMessageId: 'message-2-edit',
+      status: 'completed',
+      turnType: 'edit',
+      supersedesTurnId: 'turn-2',
+      createdAt: '2026-05-16T12:00:05.000Z',
+    });
+    seedMessage('message-1-edit', {
+      content: 'Edited first',
+      parentId: 'message-1',
+      previousUserMessageId: null,
+      createdAt: '2026-05-16T12:00:06.000Z',
+    });
+    seedTurn('turn-1-edit', {
+      parentTurnId: null,
+      userMessageId: 'message-1-edit',
+      status: 'completed',
+      turnType: 'edit',
+      supersedesTurnId: 'turn-1',
+      createdAt: '2026-05-16T12:00:07.000Z',
+    });
+
+    switchBranch('conversation-1', 'message-2-edit');
+
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-1', 'turn-2-edit']);
+    const metadata = mocks.store.getById('conversations', 'conversation-1')?.metadata;
+    const parsedMetadata =
+      typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
+    expect(parsedMetadata.activeBranches).toMatchObject({
+      'user:__root__': 'message-1',
+      'turn:__root__': 'turn-1',
+      'user:message-1': 'message-2-edit',
+      'turn:turn-1': 'turn-2-edit',
+    });
+  });
+
+  it('persists outbound parent as previous user id when client omits previousUserMessageId on a queued follow-up', () => {
+    mocks.store.insert('agent_runs', {
+      id: 'active-run',
+      agentId: 'agent-1',
+      agentName: 'Test Agent',
+      triggerType: 'chat',
+      status: 'running',
+      conversationId: 'conversation-1',
+      responseParentId: 'message-1',
+      startedAt: '2026-05-16T11:59:00.000Z',
+    });
+
+    enqueueAgentPrompt('agent-1', 'conversation-1', 'First queued prompt', {
+      queuedMessageId: 'message-1',
+      createdById: 'test-user',
+    });
+    enqueueAgentPrompt('agent-1', 'conversation-1', 'Second queued prompt', {
+      queuedMessageId: 'message-2',
+      createdById: 'test-user',
+    });
+
+    const message2 = mocks.store.getById('messages', 'message-2');
+    expect(message2).toMatchObject({
+      parentId: 'message-1',
+      previousUserMessageId: 'message-1',
+    });
+    expect(
+      __agentChatTestUtils.getPreviousUserMessageIdForPromptPath('conversation-1', message2!),
+    ).toBe('message-1');
   });
 
   it('persists queued text prompts as messages and turns before execution drains', () => {
@@ -346,6 +557,146 @@ describe('agent chat turn write paths', () => {
       parentTurnId: edit.queueItem.turnId,
       userMessageId: 'message-follow-up',
     });
+  });
+
+  it('does not cancel pending execution for a superseded message when queuing its edit', () => {
+    seedMessage('message-original', {
+      content: 'Original prompt',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    seedTurn('turn-original', {
+      userMessageId: 'message-original',
+      status: 'running',
+      runId: 'run-original',
+      createdAt: '2026-05-16T12:00:01.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-original',
+      agentId: 'agent-1',
+      agentName: 'Test Agent',
+      triggerType: 'chat',
+      status: 'running',
+      executor: 'remote',
+      conversationId: 'conversation-1',
+      responseParentId: 'message-original',
+      turnId: 'turn-original',
+      startedAt: '2026-05-16T12:00:02.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-original',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'processing',
+      turnId: 'turn-original',
+      runId: 'run-original',
+      queuedMessageId: 'message-original',
+      attempts: 1,
+      maxAttempts: 4,
+      createdAt: '2026-05-16T12:00:03.000Z',
+    });
+
+    const editedMessage = editMessageAndBranch(
+      'conversation-1',
+      'message-original',
+      'Edited prompt',
+      {
+        newMessageId: 'message-edited',
+      },
+    );
+    const edit = enqueueAgentPrompt('agent-1', 'conversation-1', 'Edited prompt', {
+      mode: 'respond_to_message',
+      targetMessageId: String(editedMessage.id),
+      createdById: 'test-user',
+      turnType: 'edit',
+      supersedesMessageId: 'message-original',
+    });
+
+    expect(mocks.cancelRemoteAgentRun).not.toHaveBeenCalled();
+    expect(mocks.store.getById('agentChatQueue', 'queue-original')).toMatchObject({
+      status: 'processing',
+      runId: 'run-original',
+    });
+    expect(mocks.store.getById('agent_runs', 'run-original')).toMatchObject({
+      status: 'running',
+    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-original')).toMatchObject({
+      status: 'superseded',
+    });
+    expect(mocks.store.getById('agentChatTurns', String(edit.queueItem.turnId))).toMatchObject({
+      userMessageId: 'message-edited',
+      supersedesTurnId: 'turn-original',
+      status: 'queued',
+    });
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual([String(edit.queueItem.turnId)]);
+
+    markAgentChatTurnCompleted('turn-original', {
+      assistantMessageId: 'assistant-original',
+      runId: 'run-original',
+    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-original')).toMatchObject({
+      status: 'superseded',
+      assistantMessageId: 'assistant-original',
+      runId: 'run-original',
+    });
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual([String(edit.queueItem.turnId)]);
+  });
+
+  it('keeps a repeated edit on the original branch instead of appending after the previous edit', () => {
+    seedMessage('message-original', {
+      content: 'Original root prompt',
+      parentId: null,
+    });
+    seedMessage('message-edit-1', {
+      content: 'First edited root prompt',
+      parentId: 'message-original',
+    });
+    seedTurn('turn-original', {
+      userMessageId: 'message-original',
+      status: 'superseded',
+      turnType: 'follow_up',
+    });
+    seedTurn('turn-edit-1', {
+      userMessageId: 'message-edit-1',
+      status: 'completed',
+      turnType: 'edit',
+      supersedesTurnId: 'turn-original',
+    });
+
+    const editedMessage = editMessageAndBranch(
+      'conversation-1',
+      'message-edit-1',
+      'Second edited root prompt',
+      {
+        newMessageId: 'message-edit-2',
+      },
+    );
+    const edit = enqueueAgentPrompt('agent-1', 'conversation-1', 'Second edited root prompt', {
+      mode: 'respond_to_message',
+      targetMessageId: String(editedMessage.id),
+      createdById: 'test-user',
+      turnType: 'edit',
+      supersedesMessageId: 'message-edit-1',
+    });
+
+    expect(editedMessage).toMatchObject({
+      id: 'message-edit-2',
+      parentId: null,
+      previousUserMessageId: null,
+    });
+    expect(mocks.store.getById('agentChatTurns', String(edit.queueItem.turnId))).toMatchObject({
+      parentTurnId: null,
+      userMessageId: 'message-edit-2',
+      supersedesTurnId: 'turn-edit-1',
+      turnType: 'edit',
+    });
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual([String(edit.queueItem.turnId)]);
   });
 
   it('selects a newly sent follow-up even when branch metadata points at an older sibling', () => {

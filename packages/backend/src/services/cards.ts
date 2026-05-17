@@ -1,4 +1,8 @@
 import {
+  clearAgentRunCardReferences,
+  deleteBatchRunItemsForCard,
+} from '../db/repositories/agent-execution-repository.js';
+import {
   deleteCardCommentsByCardId,
   deleteCardLinksForCard,
   deleteCardTagPair,
@@ -287,6 +291,10 @@ export async function deleteCard(
     deleteBoardCardsByCardId(id);
     // Remove card links
     deleteCardLinksForCard(id);
+    // Preserve run history while removing foreign key references to this card.
+    await clearAgentRunCardReferences(id);
+    // Batch items require a card_id, so remove them before the card row.
+    deleteBatchRunItemsForCard(id);
     return store.delete('cards', id);
   });
 
