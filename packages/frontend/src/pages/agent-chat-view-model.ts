@@ -19,6 +19,7 @@ export interface AgentChatMessage {
   siblingIndex?: number;
   siblingCount?: number;
   siblingIds?: string[];
+  siblingTurnIds?: string[];
   turnId?: string | null;
   turnStatus?: AgentConversationChatTurn['status'];
   turnType?: AgentConversationChatTurn['turnType'];
@@ -423,12 +424,14 @@ function mapCanonicalMessage(
   turn: AgentConversationChatTurn,
 ): AgentChatMessage | null {
   if (!message) return null;
-  const siblingUserMessageIds = turn.branch.siblings
-    .map((sibling) => sibling.userMessageId)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const navigableSiblings = turn.branch.siblings.filter(
+    (sibling) => typeof sibling.userMessageId === 'string' && sibling.userMessageId.length > 0,
+  );
+  const siblingUserMessageIds = navigableSiblings.map((sibling) => sibling.userMessageId!);
+  const siblingTurnIds = navigableSiblings.map((sibling) => sibling.turnId);
   const siblingIndex = Math.max(
     0,
-    turn.branch.siblings.findIndex((sibling) => sibling.turnId === turn.id),
+    navigableSiblings.findIndex((sibling) => sibling.turnId === turn.id),
   );
   const branchFields =
     message.direction === 'outbound' && siblingUserMessageIds.length > 1
@@ -436,6 +439,7 @@ function mapCanonicalMessage(
           siblingIndex,
           siblingCount: siblingUserMessageIds.length,
           siblingIds: siblingUserMessageIds,
+          siblingTurnIds,
         }
       : {};
 

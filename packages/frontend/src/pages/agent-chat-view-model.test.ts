@@ -1067,4 +1067,85 @@ describe('buildAgentConversationViewModel', () => {
     expect(view.queuedMessages).toEqual([]);
     expect(view.showStreamingBubble).toBe(false);
   });
+
+  it('uses canonical turn ids as branch targets when sibling turns share a user message', () => {
+    const siblings: AgentConversationChatTurn['branch']['siblings'] = [
+      {
+        turnId: 'turn-1',
+        userMessageId: 'message-shared',
+        status: 'completed',
+        turnType: 'follow_up',
+        supersedesTurnId: null,
+        isSelected: false,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        turnId: 'turn-2',
+        userMessageId: 'message-shared',
+        status: 'completed',
+        turnType: 'follow_up',
+        supersedesTurnId: null,
+        isSelected: false,
+        createdAt: '2026-01-01T00:01:00.000Z',
+      },
+      {
+        turnId: 'turn-3',
+        userMessageId: 'message-third',
+        status: 'completed',
+        turnType: 'follow_up',
+        supersedesTurnId: null,
+        isSelected: true,
+        createdAt: '2026-01-01T00:02:00.000Z',
+      },
+    ];
+    const canonicalView: AgentConversationChatView = {
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      total: 1,
+      branches: [],
+      entries: [
+        canonicalTurn({
+          id: 'turn-3',
+          userMessage: {
+            id: 'message-third',
+            direction: 'outbound',
+            type: 'text',
+            content: 'third branch',
+            status: 'sent',
+            metadata: null,
+            attachments: null,
+            createdAt: '2026-01-01T00:02:00.000Z',
+            updatedAt: null,
+          },
+          branch: {
+            parentTurnId: null,
+            isSelected: true,
+            siblingIndex: 2,
+            siblingCount: 3,
+            siblingIds: ['turn-1', 'turn-2', 'turn-3'],
+            siblings,
+          },
+        }),
+      ],
+    };
+
+    const view = buildAgentConversationViewModel({
+      canonicalView,
+      messages: [],
+      queueItems: [],
+      activeConversationRuns: [],
+      activeAgentId: 'agent-1',
+      activeConvId: 'conversation-1',
+      activeConversationKey: 'agent-1:conversation-1',
+      optimisticResponseParentIds: {},
+    });
+
+    expect(view.visibleMessages[0]).toMatchObject({
+      id: 'message-third',
+      siblingIndex: 2,
+      siblingCount: 3,
+      siblingIds: ['message-shared', 'message-shared', 'message-third'],
+      siblingTurnIds: ['turn-1', 'turn-2', 'turn-3'],
+    });
+  });
 });

@@ -1466,11 +1466,16 @@ function activateTurnPathForMessage(conversationId: string, messageId: string): 
   if (!agentId) return false;
   const turn = findLatestTurnForConversationMessage(conversationId, messageId);
   const turnId = typeof turn?.id === 'string' ? turn.id : null;
-  if (!turn || !turnId) return false;
+  return activateTurnPath(conversationId, agentId, turnId);
+}
+
+function activateTurnPath(conversationId: string, agentId: string, turnId: string | null): boolean {
+  if (!turnId) return false;
 
   const turns = listAgentChatTurns(agentId, conversationId);
   const turnsById = new Map(turns.map((record) => [String(record.id), record]));
-  if (!turnsById.has(turnId)) return false;
+  const turn = turnId ? (turnsById.get(turnId) ?? null) : null;
+  if (!turn) return false;
 
   const lineage: Record<string, unknown>[] = [];
   const visited = new Set<string>();
@@ -1632,6 +1637,30 @@ export function editMessageAndBranch(
 /**
  * Switch the active branch at a given message (select a different sibling).
  */
+export function switchBranchTurn(conversationId: string, turnId: string): void {
+  const agentId = getConversationAgentId(conversationId);
+  if (!agentId) throw AgentChatError.notFound('turn_not_found', 'Turn not found');
+  const turn = listAgentChatTurns(agentId, conversationId).find(
+    (candidate) => candidate.id === turnId,
+  );
+  if (!turn) throw AgentChatError.notFound('turn_not_found', 'Turn not found');
+  const parentTurnId = typeof turn.parentTurnId === 'string' ? turn.parentTurnId : null;
+  const siblings = listAgentChatTurns(agentId, conversationId)
+    .filter(
+      (candidate) => ((candidate.parentTurnId as string | null) ?? null) === parentTurnId,
+    )
+    .filter((candidate) => typeof candidate.userMessageId === 'string');
+
+  if (siblings.length <= 1 || !siblings.some((candidate) => candidate.id === turnId)) {
+    throw AgentChatError.badRequest(
+      'invalid_branch_choice',
+      'Turn is not a valid branch choice',
+    );
+  }
+
+  activateTurnPath(conversationId, agentId, turnId);
+}
+
 export function switchBranch(conversationId: string, messageId: string): void {
   const msg = store.getById('messages', messageId);
   if (!msg) throw AgentChatError.notFound('message_not_found', 'Message not found');

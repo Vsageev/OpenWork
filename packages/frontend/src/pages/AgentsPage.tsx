@@ -311,6 +311,7 @@ interface ChatMessage {
   siblingIndex?: number;
   siblingCount?: number;
   siblingIds?: string[];
+  siblingTurnIds?: string[];
   queueItemId?: string | null;
   queueStatus?: 'queued' | 'processing' | null;
   turnId?: string | null;
@@ -4576,14 +4577,16 @@ export function AgentsPage() {
     ],
   );
 
-  async function handleSwitchBranch(messageId: string) {
+  async function handleSwitchBranch(targetId: string, targetKind: 'message' | 'turn' = 'message') {
     if (!activeAgentId || !activeConvId) return;
     try {
       const data = await api<{ entries: ChatMessage[] }>(
         `/agents/${activeAgentId}/chat/conversations/${activeConvId}/switch-branch`,
         {
           method: 'POST',
-          body: JSON.stringify({ messageId }),
+          body: JSON.stringify(
+            targetKind === 'turn' ? { turnId: targetId } : { messageId: targetId },
+          ),
         },
       );
       cancelEditingMessage();
@@ -4802,12 +4805,18 @@ export function AgentsPage() {
   }
 
   async function handleSwitchBranchByOffset(
-    ids: string[] | undefined,
+    messageIds: string[] | undefined,
+    turnIds: string[] | undefined,
     index: number | undefined,
     offset: number,
   ) {
-    const targetId = getBranchTargetIdByOffset(ids, index, offset);
-    if (targetId) void handleSwitchBranch(targetId);
+    const targetTurnId = getBranchTargetIdByOffset(turnIds, index, offset);
+    if (targetTurnId) {
+      void handleSwitchBranch(targetTurnId, 'turn');
+      return;
+    }
+    const targetMessageId = getBranchTargetIdByOffset(messageIds, index, offset);
+    if (targetMessageId) void handleSwitchBranch(targetMessageId);
   }
 
   /* ── Image paste/upload ── */
@@ -6321,6 +6330,7 @@ export function AgentsPage() {
                                       onClick={() =>
                                         void handleSwitchBranchByOffset(
                                           msg.siblingIds,
+                                          msg.siblingTurnIds,
                                           msg.siblingIndex,
                                           -1,
                                         )
@@ -6340,6 +6350,7 @@ export function AgentsPage() {
                                       onClick={() =>
                                         void handleSwitchBranchByOffset(
                                           msg.siblingIds,
+                                          msg.siblingTurnIds,
                                           msg.siblingIndex,
                                           1,
                                         )

@@ -36,6 +36,7 @@ import {
   getActiveMessagePath,
   editMessageAndBranch,
   switchBranch,
+  switchBranchTurn,
   activateMessagePathForSearchResult,
   getPreviousUserMessageIdForConversationMessage,
   serializeAllConversationMessageEntries,
@@ -1026,9 +1027,14 @@ export async function agentChatRoutes(app: FastifyInstance) {
         tags: ['Agent Chat'],
         summary: 'Switch the active branch to a different sibling message',
         params: z.object({ id: z.string(), cid: z.string() }),
-        body: z.object({
-          messageId: z.string(),
-        }),
+        body: z
+          .object({
+            messageId: z.string().optional(),
+            turnId: z.string().optional(),
+          })
+          .refine((body) => Boolean(body.messageId || body.turnId), {
+            message: 'messageId or turnId is required',
+          }),
       },
     },
     async (request, reply) => {
@@ -1036,7 +1042,11 @@ export async function agentChatRoutes(app: FastifyInstance) {
       requireConversationExists(request.params.cid, request.params.id);
 
       try {
-        switchBranch(request.params.cid, request.body.messageId);
+        if (request.body.turnId) {
+          switchBranchTurn(request.params.cid, request.body.turnId);
+        } else {
+          switchBranch(request.params.cid, request.body.messageId!);
+        }
         const entries = serializeActivePathEntries(request.params.cid);
         return reply.send({ entries });
       } catch (err) {

@@ -72,6 +72,28 @@ function isCanceledNativePicker(result: CommandResult): boolean {
   return /cancel/i.test(combined) || /-128/.test(combined);
 }
 
+function revealPathInFileManager(diskPath: string) {
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    const stat = fs.statSync(diskPath);
+    if (stat.isDirectory()) {
+      spawn('open', [diskPath], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('open', ['-R', diskPath], { detached: true, stdio: 'ignore' }).unref();
+    }
+    return;
+  }
+
+  if (platform === 'win32') {
+    spawn('explorer', [`/select,${diskPath}`], { detached: true, stdio: 'ignore' }).unref();
+    return;
+  }
+
+  const stat = fs.statSync(diskPath);
+  const dir = stat.isDirectory() ? diskPath : path.dirname(diskPath);
+  spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+}
+
 async function pickDirectoryOnMac(startPath?: string): Promise<string | null> {
   const scriptArgs = [
     '-e',
@@ -478,24 +500,39 @@ export async function storageRoutes(app: FastifyInstance) {
           return reply.notFound('Path not found');
         }
 
-        const platform = process.platform;
-        if (platform === 'darwin') {
-          const stat = fs.statSync(diskPath);
-          // -R selects the item in Finder; for folders open the folder itself
-          if (stat.isDirectory()) {
-            spawn('open', [diskPath], { detached: true, stdio: 'ignore' }).unref();
-          } else {
-            spawn('open', ['-R', diskPath], { detached: true, stdio: 'ignore' }).unref();
-          }
-        } else if (platform === 'win32') {
-          spawn('explorer', [`/select,${diskPath}`], { detached: true, stdio: 'ignore' }).unref();
-        } else {
-          // Linux: open the containing directory
-          const stat = fs.statSync(diskPath);
-          const dir = stat.isDirectory() ? diskPath : path.dirname(diskPath);
-          spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+        revealPathInFileManager(diskPath);
+
+        return reply.status(204).send();
+      } catch (err) {
+        return reply.badRequest((err as Error).message);
+      }
+    },
+  );
+
+  // Reveal an absolute host path linked from markdown/chat output
+  typedApp.post(
+    '/api/storage/reveal-local',
+    {
+      onRequest: [app.authenticate, requirePermission('settings:read')],
+      schema: {
+        tags: ['Storage'],
+        summary: 'Open an absolute host path in the OS file manager',
+        body: z.object({
+          path: z.string().min(1),
+        }),
+      },
+    },
+    async (request, reply) => {
+      try {
+        const diskPath = path.resolve(request.body.path);
+        if (!path.isAbsolute(request.body.path)) {
+          return reply.badRequest('Path must be absolute');
+        }
+        if (!fs.existsSync(diskPath)) {
+          return reply.notFound('Path not found');
         }
 
+        revealPathInFileManager(diskPath);
         return reply.status(204).send();
       } catch (err) {
         return reply.badRequest((err as Error).message);

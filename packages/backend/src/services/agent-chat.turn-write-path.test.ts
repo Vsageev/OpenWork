@@ -131,6 +131,7 @@ import {
   reorderQueueItems,
   retryQueueItem,
   switchBranch,
+  switchBranchTurn,
   __agentChatTestUtils,
 } from './agent-chat.js';
 import { getAgentConversationChatView } from './agent-chat-view.js';
@@ -304,6 +305,41 @@ describe('agent chat turn write paths', () => {
     expect(
       getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
     ).toEqual(['turn-1', String(edit.queueItem.turnId)]);
+  });
+
+  it('switches by exact turn when branch siblings share a user message id', () => {
+    seedMessage('message-1', {
+      content: 'First',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    seedTurn('turn-1', {
+      userMessageId: 'message-1',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:01.000Z',
+    });
+    seedTurn('turn-2', {
+      userMessageId: 'message-1',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:02.000Z',
+    });
+    seedTurn('turn-3', {
+      userMessageId: 'message-1',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:03.000Z',
+    });
+
+    switchBranchTurn('conversation-1', 'turn-2');
+
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-2']);
+    const metadata = mocks.store.getById('conversations', 'conversation-1')?.metadata;
+    const parsedMetadata =
+      typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
+    expect(parsedMetadata.activeBranches).toMatchObject({
+      'turn:__root__': 'turn-2',
+      'user:__root__': 'message-1',
+    });
   });
 
   it('switches a legacy edited follow-up by turn lineage when message previous user metadata is missing', () => {
