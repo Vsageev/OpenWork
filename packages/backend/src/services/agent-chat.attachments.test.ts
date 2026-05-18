@@ -277,11 +277,10 @@ describe('getConversationAttachmentDiskPaths', () => {
       {
         id: CONV_ID,
         metadata: JSON.stringify({
+          agentId: 'agent-1',
           activeBranches: {
-            'user:root': 'u1',
-            'reply:u1': 'a1',
-            'user:u1': 'u2b',
-            'reply:u2b': 'r2b',
+            'turn:__root__': 'turn-u1',
+            'turn:turn-u1': 'turn-u2b',
           },
         }),
       },
@@ -333,21 +332,48 @@ describe('getConversationAttachmentDiskPaths', () => {
         createdAt: '2026-05-07T10:05:00.000Z',
       },
     ];
+    recordsByCollection.agentChatTurns = [
+      {
+        id: 'turn-u1',
+        agentId: 'agent-1',
+        conversationId: CONV_ID,
+        parentTurnId: null,
+        userMessageId: 'u1',
+        assistantMessageId: 'a1',
+        status: 'completed',
+        turnType: 'follow_up',
+        createdAt: '2026-05-07T10:00:00.000Z',
+      },
+      {
+        id: 'turn-u2a',
+        agentId: 'agent-1',
+        conversationId: CONV_ID,
+        parentTurnId: 'turn-u1',
+        userMessageId: 'u2a',
+        assistantMessageId: 'r2a',
+        status: 'completed',
+        turnType: 'follow_up',
+        createdAt: '2026-05-07T10:02:00.000Z',
+      },
+      {
+        id: 'turn-u2b',
+        agentId: 'agent-1',
+        conversationId: CONV_ID,
+        parentTurnId: 'turn-u1',
+        userMessageId: 'u2b',
+        assistantMessageId: 'r2b',
+        status: 'completed',
+        turnType: 'follow_up',
+        createdAt: '2026-05-07T10:04:00.000Z',
+      },
+    ];
 
     activateMessagePathForSearchResult(CONV_ID, 'r2a');
 
-    expect(getActiveMessagePath(CONV_ID).map((message) => message.id)).toEqual([
-      'u1',
-      'a1',
-      'u2a',
-      'r2a',
-    ]);
     const metadata = JSON.parse(String(recordsByCollection.conversations[0].metadata));
     expect(metadata.activeBranches).toMatchObject({
-      'user:root': 'u1',
-      'reply:u1': 'a1',
-      'user:u1': 'u2a',
-      'reply:u2a': 'r2a',
+      'turn:__root__': 'turn-u1',
+      'turn:turn-u1': 'turn-u2a',
     });
   });
 

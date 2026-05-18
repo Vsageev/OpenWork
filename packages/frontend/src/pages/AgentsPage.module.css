@@ -1897,7 +1897,7 @@ button.messageMonitorBtn,
   background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
-/* ── Inline queued messages (same bubbles as user messages; light queue hints in meta) ── */
+/* ── Bottom queued messages (same bubbles as user messages; light queue hints in meta) ── */
 .inlineQueueSummary {
   display: flex;
   align-items: center;
@@ -1920,28 +1920,6 @@ button.messageMonitorBtn,
   display: inline;
   vertical-align: -0.15em;
   margin-right: 4px;
-}
-
-.inlineQueueClearAllBtn {
-  flex-shrink: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  padding: 2px 6px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-text-tertiary);
-  transition: color var(--transition-fast);
-}
-
-.inlineQueueClearAllBtn:hover:not(:disabled) {
-  color: var(--color-text-secondary);
-}
-
-.inlineQueueClearAllBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .queuedMessageRow .editMsgBtn:not(:disabled),

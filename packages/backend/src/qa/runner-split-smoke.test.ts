@@ -97,7 +97,7 @@ import {
   getConversationExecutionItems,
   saveAgentConversationMessage,
 } from '../services/agent-chat.js';
-import { listAgentChatTurns } from '../services/agent-chat-turns.js';
+import { createAgentChatTurn, listAgentChatTurns } from '../services/agent-chat-turns.js';
 import { agentRunRoutes } from '../routes/agent-runs.js';
 import { cardRoutes } from '../routes/cards.js';
 import {
@@ -696,6 +696,15 @@ describe('runner-split QA backend smoke', () => {
       content: 'root prompt being answered',
       previousUserMessageId: null,
     });
+    createAgentChatTurn({
+      id: 'qa-turn-root',
+      agentId: ids.agent,
+      conversationId: convId,
+      userMessageId: 'qa-msg-root',
+      status: 'running',
+      source: 'qa_smoke',
+      runId: ids.chatRun,
+    });
     createAgentRun({
       id: ids.chatRun,
       agentId: ids.agent,
@@ -705,6 +714,7 @@ describe('runner-split QA backend smoke', () => {
       triggerType: 'chat',
       conversationId: convId,
       responseParentId: 'qa-msg-root',
+      turnId: 'qa-turn-root',
       executor: 'remote',
       status: 'running',
     } as Parameters<typeof createAgentRun>[0]);

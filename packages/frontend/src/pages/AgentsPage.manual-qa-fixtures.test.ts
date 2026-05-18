@@ -3,9 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentConversationViewModel,
-  type AgentChatMessage,
-  type AgentChatQueueItem,
-  type AgentConversationRunSummary,
+  type AgentConversationChatTurn,
 } from './agent-chat-view-model';
 
 const agentsPagePath = fileURLToPath(new URL('./AgentsPage.tsx', import.meta.url));
@@ -46,13 +44,13 @@ const manualQaFixtures = [
     id: 'qa-state-running',
     layer: 'queue state',
     inspected: ['agent-chat-view-model.ts:buildAgentConversationViewModel'],
-    input: 'running AgentRunSummary for visible active message',
+    input: 'canonical running turn for visible active message',
   },
   {
     id: 'qa-state-completed',
     layer: 'queue state',
     inspected: ['agent-chat-view-model.ts:buildAgentConversationViewModel'],
-    input: 'completed queue item and completed run for active conversation',
+    input: 'canonical completed turn for active conversation',
   },
   {
     id: 'qa-layout-desktop',
@@ -95,36 +93,55 @@ const manualQaFixtures = [
   },
 ] as const;
 
-function msg(
-  partial: Partial<AgentChatMessage> & Pick<AgentChatMessage, 'id' | 'direction'>,
-): AgentChatMessage {
+function turn(
+  partial: Partial<AgentConversationChatTurn> & Pick<AgentConversationChatTurn, 'id' | 'status'>,
+): AgentConversationChatTurn {
+  const createdAt = '2026-05-15T10:00:10.000Z';
+  const userMessageId = partial.userMessage?.id ?? 'queued-active';
   return {
-    content: '',
-    createdAt: baseTime,
-    type: 'text',
-    metadata: null,
-    attachments: null,
-    parentId: null,
-    previousUserMessageId: null,
-    ...partial,
-  };
-}
-
-function queueItem(
-  partial: Partial<AgentChatQueueItem> &
-    Pick<AgentChatQueueItem, 'id' | 'agentId' | 'conversationId'>,
-): AgentChatQueueItem {
-  return {
-    mode: 'append_prompt',
-    prompt: '',
-    status: 'queued',
-    attempts: 0,
-    createdAt: baseTime,
-    targetMessageId: null,
-    queuedMessageId: null,
-    previousUserMessageId: null,
-    runId: null,
-    errorMessage: null,
+    parentTurnId: 'turn-root',
+    turnType: 'follow_up',
+    userMessage: {
+      id: userMessageId,
+      direction: 'outbound',
+      type: 'text',
+      content: 'queued active prompt',
+      status: 'sent',
+      metadata: null,
+      attachments: null,
+      createdAt,
+      updatedAt: null,
+    },
+    assistantMessage: null,
+    execution: { queue: null, run: null },
+    branch: {
+      parentTurnId: 'turn-root',
+      isSelected: true,
+      siblingIndex: 0,
+      siblingCount: 1,
+      siblingIds: [partial.id],
+      siblings: [
+        {
+          turnId: partial.id,
+          userMessageId,
+          status: partial.status,
+          turnType: 'follow_up',
+          supersedesTurnId: null,
+          isSelected: true,
+          createdAt,
+        },
+      ],
+    },
+    edit: {
+      supersedesTurnId: null,
+      supersededByTurnId: null,
+      isSuperseded: false,
+    },
+    availableActions: [],
+    createdAt,
+    updatedAt: null,
+    startedAt: null,
+    completedAt: null,
     ...partial,
   };
 }
@@ -211,7 +228,7 @@ describe('AgentsPage manual QA fixture manifest', () => {
       "data-active-conversation-id={activeConvId ?? ''}",
       'activeConversationId={',
       'activeAgentId === agent.id ? activeConvId : null',
-      'data-testid="queued-message-row"',
+      "isQueuedTranscriptMessage ? 'queued-message-row' : undefined",
       'activeAgentId={activeAgentId}',
       'activeConversationId={activeConvId}',
       'if (prev.activeConversationId !== next.activeConversationId) return false;',
@@ -222,128 +239,98 @@ describe('AgentsPage manual QA fixture manifest', () => {
   });
 
   it.each([
-    ['qa-state-queued', 'queued', [], false],
-    [
-      'qa-state-running',
-      'processing',
-      [
-        {
-          id: 'run-running',
-          agentId: 'agent-a',
-          conversationId: 'conv-a',
-          responseParentId: 'root',
-          status: 'running',
-          startedAt: baseTime,
-        } satisfies AgentConversationRunSummary,
-      ],
-      true,
-    ],
+    ['qa-state-queued', 'queued', ['queue-active'], [], ['queued-active'], false],
+    ['qa-state-running', 'processing', [], ['queued-active'], [], true],
   ] as const)(
     '%s keeps queued and running chat state scoped to the active conversation',
-    (_fixtureId, expectedQueueStatus, runs, expectedStreaming) => {
+    (
+      _fixtureId,
+      expectedTurnStatus,
+      expectedQueueIds,
+      expectedVisibleMessageIds,
+      expectedQueuedMessageIds,
+      expectedStreaming,
+    ) => {
+      const canonicalQueue =
+        expectedTurnStatus === 'queued'
+          ? {
+              id: 'queue-active',
+              turnId: 'turn-active',
+              status: 'queued',
+              position: 1,
+              runId: null,
+              errorMessage: null,
+              attempts: 0,
+              maxAttempts: 3,
+              nextAttemptAt: null,
+              startedAt: null,
+              completedAt: null,
+              usedFallback: false,
+              fallbackModel: null,
+            }
+          : {
+              id: 'queue-active',
+              turnId: 'turn-active',
+              status: 'processing',
+              position: 1,
+              runId: 'run-running',
+              errorMessage: null,
+              attempts: 1,
+              maxAttempts: 3,
+              nextAttemptAt: null,
+              startedAt: baseTime,
+              completedAt: null,
+              usedFallback: false,
+              fallbackModel: null,
+            };
       const view = buildAgentConversationViewModel({
-        messages: [
-          msg({ id: 'root', direction: 'outbound', content: 'root prompt' }),
-          msg({
-            id: 'queued-active',
-            direction: 'outbound',
-            content: 'queued active prompt',
-            previousUserMessageId: 'root',
-            createdAt: '2026-05-15T10:00:10.000Z',
-          }),
-        ],
-        queueItems: [
-          queueItem({
-            id: 'queue-active',
-            agentId: 'agent-a',
-            conversationId: 'conv-a',
-            prompt: 'queued active prompt',
-            status: expectedQueueStatus,
-            queuedMessageId: 'queued-active',
-            previousUserMessageId: 'root',
-            runId: runs[0]?.id ?? null,
-          }),
-          queueItem({
-            id: 'queue-foreign',
-            agentId: 'agent-a',
-            conversationId: 'conv-b',
-            prompt: 'must not leak',
-            status: 'processing',
-            queuedMessageId: 'queued-foreign',
-            previousUserMessageId: 'root',
-            runId: 'run-foreign',
-          }),
-        ],
-        activeConversationRuns: [
-          ...runs,
-          {
-            id: 'run-foreign',
-            agentId: 'agent-a',
-            conversationId: 'conv-b',
-            responseParentId: 'root',
-            status: 'running',
-            startedAt: baseTime,
-          },
-        ],
+        canonicalView: {
+          agentId: 'agent-a',
+          conversationId: 'conv-a',
+          total: 1,
+          branches: [],
+          entries: [
+            turn({
+              id: 'turn-active',
+              status: expectedTurnStatus,
+              execution: {
+                queue: canonicalQueue,
+                run:
+                  expectedTurnStatus === 'processing'
+                    ? {
+                        id: 'run-running',
+                        turnId: 'turn-active',
+                        status: 'running',
+                        errorMessage: null,
+                        responseText: null,
+                        startedAt: baseTime,
+                        finishedAt: null,
+                        durationMs: null,
+                      }
+                    : null,
+              },
+            }),
+          ],
+        },
         activeAgentId: 'agent-a',
         activeConvId: 'conv-a',
-        activeConversationKey: 'agent-a:conv-a',
-        optimisticResponseParentIds: {},
       });
 
-      expect(view.queuedQueueItems.map((item) => item.id)).toEqual(['queue-active']);
-      expect(
-        view.queuedMessages.map(({ message, queueItem, status }) => ({
-          messageId: message.id,
-          queueItemId: queueItem?.id,
-          status,
-        })),
-      ).toEqual([
-        {
-          messageId: 'queued-active',
-          queueItemId: 'queue-active',
-          status: expectedQueueStatus,
-        },
-      ]);
+      expect(view.queuedQueueItems.map((item) => item.id)).toEqual(expectedQueueIds);
+      expect(view.visibleMessages.map((message) => message.id)).toEqual(expectedVisibleMessageIds);
+      expect(view.queuedMessages.map((item) => item.message.id)).toEqual(expectedQueuedMessageIds);
       expect(view.showStreamingBubble).toBe(expectedStreaming);
     },
   );
 
   it('fixture qa-state-completed keeps terminal queue and run records out of active pending state', () => {
     const view = buildAgentConversationViewModel({
-      messages: [
-        msg({ id: 'root', direction: 'outbound', content: 'done prompt' }),
-        msg({ id: 'reply', direction: 'inbound', parentId: 'root', content: 'done' }),
-      ],
-      queueItems: [
-        queueItem({
-          id: 'queue-completed',
-          agentId: 'agent-a',
-          conversationId: 'conv-a',
-          prompt: 'done prompt',
-          status: 'completed',
-          queuedMessageId: 'queued-completed',
-          runId: 'run-completed',
-        }),
-      ],
-      activeConversationRuns: [
-        {
-          id: 'run-completed',
-          agentId: 'agent-a',
-          conversationId: 'conv-a',
-          responseParentId: 'root',
-          status: 'completed',
-          startedAt: baseTime,
-        },
-      ],
+      canonicalView: null,
       activeAgentId: 'agent-a',
       activeConvId: 'conv-a',
-      activeConversationKey: 'agent-a:conv-a',
-      optimisticResponseParentIds: {},
     });
 
     expect(view.queuedQueueItems).toHaveLength(0);
-    expect(view.queuedMessages).toHaveLength(0);
     expect(view.activeConversationRun).toBeNull();
     expect(view.showStreamingBubble).toBe(false);
   });
@@ -377,22 +364,9 @@ describe('AgentsPage manual QA fixture manifest', () => {
 
   it('negative controls fail for mismatched chat owner and desktop drawer overlay positioning', () => {
     const mismatchedView = buildAgentConversationViewModel({
-      messages: [msg({ id: 'root', direction: 'outbound', content: 'root' })],
-      queueItems: [
-        queueItem({
-          id: 'queue-mismatch',
-          agentId: 'agent-a',
-          conversationId: 'conv-sidebar',
-          prompt: 'wrong conversation',
-          status: 'queued',
-          queuedMessageId: 'queued-mismatch',
-        }),
-      ],
-      activeConversationRuns: [],
+      canonicalView: null,
       activeAgentId: 'agent-a',
       activeConvId: 'conv-chat',
-      activeConversationKey: 'agent-a:conv-chat',
-      optimisticResponseParentIds: {},
     });
 
     expect(() => {

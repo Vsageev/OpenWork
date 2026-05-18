@@ -120,7 +120,9 @@ export async function buildApp() {
     chatTurnReferenceBackfill.updatedQueueItems > 0 ||
     chatTurnReferenceBackfill.updatedRuns > 0 ||
     chatTurnReferenceBackfill.repairedParentLinks > 0 ||
-    chatTurnReferenceBackfill.updatedActiveBranches > 0;
+    chatTurnReferenceBackfill.updatedActiveBranches > 0 ||
+    chatTurnBackfill.invalid > 0 ||
+    chatTurnReferenceBackfill.invalid > 0;
   if (chatTurnBackfillChanged) {
     app.log.info(
       { chatTurnBackfill, chatTurnReferenceBackfill },

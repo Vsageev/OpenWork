@@ -119,8 +119,8 @@ describe('AgentsPage component contract', () => {
     });
 
     const queuedRow = sourceSlice(
-      'data-testid="queued-message-row"',
-      'className={`${styles.messageRow}',
+      'const transcriptExecutionItem =',
+      '<div className={styles.messageContent}>',
     );
     assertContains({
       componentName: 'QueuedMessageRow',
@@ -315,7 +315,7 @@ describe('AgentsPage component contract', () => {
   it('routes queued branch-response edits through the queue editor without blocking active edits', () => {
     const messageRender = sourceSlice(
       'const pendingBranchExecutions =',
-      '{queuedMessages.length > 0 && (',
+      "{msg.direction === 'inbound' && (",
     );
     for (const expected of [
       'effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? []',
@@ -349,33 +349,33 @@ describe('AgentsPage component contract', () => {
     }
   });
 
-  it('opens normal message editing for processing queued-message rows', () => {
+  it('opens normal message editing for processing transcript execution rows', () => {
     const queuedEditButton = sourceSlice(
-      '{(queueItem || isProcessingQueuedItem) && (',
-      '{queueItem && (',
+      'const isProcessingTranscriptMessage =',
+      "{msg.direction === 'inbound' && (",
     );
     for (const expected of [
-      "isProcessingQueuedItem\n                                              ? 'Edit message'",
-      'if (isProcessingQueuedItem) {',
-      'startEditingMessage(message)',
-      'startEditingQueuedMessage(message, queueItem)',
-      'isQueuedItemBusy || editingMessage?.isSubmitting',
+      "isProcessingTranscriptMessage\n                                          ? styles.messageExecutionStateProcessing",
+      'if (editableBranchQueueItem) {',
+      'startEditingMessage(msg)',
+      'startEditingQueuedMessage(msg, editableBranchQueueItem)',
+      'disabled={editingMessage?.isSubmitting}',
     ]) {
       assertContains({
         componentName: 'AgentsPage.queuedMessageRow',
-        stateInput: 'queued message row has status=processing',
-        contractName: 'processing-queued-row-edit-message',
+        stateInput: 'transcript message row has status=processing',
+        contractName: 'processing-transcript-row-edit-message',
         sourceText: queuedEditButton,
         expected,
       });
     }
     assertNotContains({
       componentName: 'AgentsPage.queuedMessageRow',
-      stateInput: 'queued message row has status=processing',
-      contractName: 'processing-queued-row-edit-message',
+      stateInput: 'transcript message row has status=processing',
+      contractName: 'processing-transcript-row-edit-message',
       sourceText: queuedEditButton,
       unexpected:
-        'disabled={\n                                                isProcessingQueuedItem ||',
+        'disabled={\n                                                isProcessingTranscriptMessage ||',
     });
   });
 });

@@ -48,8 +48,8 @@ import {
 } from './agent-runs.js';
 import {
   createAgentChatTurn,
-  ensureLegacyAgentChatTurnForUserMessage,
   findAgentChatTurnForUserMessage,
+  getAgentChatTurn,
   listAgentChatTurns,
   markAgentChatTurnCompleted,
   markAgentChatTurnFailed,
@@ -163,6 +163,8 @@ const PERMANENT_QUEUE_ERROR_PATTERNS = [
   /CLI is not installed or not available on the server PATH/i,
   /Command ".+" is not installed or not available on the server PATH/i,
   /spawn .+ ENOENT/i,
+  /Queued execution item is missing its durable turn/i,
+  /Queued execution item references a terminal or superseded turn/i,
 ];
 
 function isPermanentQueueError(errorMessage: string): boolean {
@@ -1269,7 +1271,11 @@ function findLatestTurnForConversationMessage(
 ): Record<string, unknown> | null {
   const matches = store
     .getAll('agentChatTurns')
-    .filter((turn) => turn.conversationId === conversationId && turn.userMessageId === messageId)
+    .filter(
+      (turn) =>
+        turn.conversationId === conversationId &&
+        (turn.userMessageId === messageId || turn.assistantMessageId === messageId),
+    )
     .sort((a, b) => {
       const aTime = typeof a.createdAt === 'string' ? new Date(a.createdAt).getTime() : 0;
       const bTime = typeof b.createdAt === 'string' ? new Date(b.createdAt).getTime() : 0;
@@ -1496,15 +1502,7 @@ function activateTurnPath(conversationId: string, agentId: string, turnId: strin
     if (!branchTurnId) continue;
     const parentTurnId: string | null =
       typeof branchTurn.parentTurnId === 'string' ? (branchTurn.parentTurnId as string) : null;
-    const parentUserMessageId: string | null = parentTurnId
-      ? typeof turnsById.get(parentTurnId)?.userMessageId === 'string'
-        ? (turnsById.get(parentTurnId)?.userMessageId as string)
-        : null
-      : null;
     activeBranches[`turn:${parentTurnId ?? ROOT_BRANCH_KEY}`] = branchTurnId;
-    if (typeof branchTurn.userMessageId === 'string') {
-      activeBranches[getUserBranchSelectionKey(parentUserMessageId)] = branchTurn.userMessageId;
-    }
   }
   setActiveBranches(conversationId, activeBranches);
   return true;
@@ -1519,7 +1517,9 @@ export function activateMessagePathForSearchResult(
     throw AgentChatError.notFound('message_not_found', 'Message not found');
   }
 
-  activateMessagePath(conversationId, messageId);
+  if (!activateTurnPathForMessage(conversationId, messageId)) {
+    throw AgentChatError.notFound('turn_not_found', 'Message has no durable chat turn');
+  }
 }
 
 /**
@@ -1668,51 +1668,28 @@ export function switchBranch(conversationId: string, messageId: string): void {
     throw AgentChatError.notFound('message_not_found', 'Message not found');
   }
 
-  const allMessages = listConversationMessages(conversationId);
   const turn = findLatestTurnForConversationMessage(conversationId, messageId);
-  if (turn) {
-    const agentId = getConversationAgentId(conversationId);
-    const parentTurnId = typeof turn.parentTurnId === 'string' ? turn.parentTurnId : null;
-    const siblings = agentId
-      ? listAgentChatTurns(agentId, conversationId)
-          .filter(
-            (candidate) =>
-              ((candidate.parentTurnId as string | null) ?? null) === parentTurnId,
-          )
-          .filter((candidate) => typeof candidate.userMessageId === 'string')
-      : [];
-    if (
-      siblings.length > 1 &&
-      siblings.some((candidate) => candidate.userMessageId === messageId)
-    ) {
-      activateTurnPathForMessage(conversationId, messageId);
-      return;
-    }
-  }
-
-  const siblings =
-    msg.direction === 'outbound'
-      ? allMessages.filter(
-          (candidate) =>
-            candidate.direction === 'outbound' &&
-            getPreviousUserMessageIdForConversationMessage(conversationId, candidate) ===
-              getPreviousUserMessageIdForConversationMessage(conversationId, msg),
+  const agentId = getConversationAgentId(conversationId);
+  const parentTurnId = typeof turn?.parentTurnId === 'string' ? turn.parentTurnId : null;
+  const siblings = agentId
+    ? listAgentChatTurns(agentId, conversationId)
+        .filter(
+          (candidate) => ((candidate.parentTurnId as string | null) ?? null) === parentTurnId,
         )
-      : allMessages
-          .filter(
-            (candidate) =>
-              ((candidate.parentId as string | null) ?? null) ===
-                ((msg.parentId as string | null) ?? null) && candidate.direction !== 'outbound',
-          )
-          .filter((candidate) => !isNonFinalAgentUpdateMessage(candidate));
-  if (siblings.length <= 1 || !siblings.some((candidate) => candidate.id === messageId)) {
+        .filter((candidate) => typeof candidate.userMessageId === 'string')
+    : [];
+  if (
+    !turn ||
+    siblings.length <= 1 ||
+    !siblings.some((candidate) => candidate.userMessageId === messageId)
+  ) {
     throw AgentChatError.badRequest(
       'invalid_branch_choice',
       'Message is not a valid branch choice',
     );
   }
 
-  activateMessagePath(conversationId, messageId);
+  activateTurnPathForMessage(conversationId, messageId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1928,16 +1905,15 @@ function resolveQueuedPromptParentId(
   return parentId ?? getCurrentConversationLeafId(conversationId);
 }
 
-/** When the client omits previousUserMessageId but parentId is another user message (e.g. queued behind an in-flight turn), persist that link so prompt history can follow the chain. */
-function previousUserMessageIdForOutboundParentLink(
+/** When the client omits previousUserMessageId, infer it from the resolved append parent so message and turn lineage stay aligned. */
+function previousUserMessageIdForAppendParent(
+  conversationId: string,
   parentId: string | null,
   previousUserMessageId: string | null,
 ): string | null {
   if (previousUserMessageId != null) return previousUserMessageId;
   if (!parentId) return null;
-  const parentMsg = store.getById('messages', parentId);
-  if (!parentMsg || parentMsg.direction !== 'outbound') return null;
-  return parentMsg.id as string;
+  return findPreviousOutboundAncestor(conversationId, parentId);
 }
 
 function ensureQueuedPromptMessage(
@@ -1976,7 +1952,8 @@ function ensureQueuedPromptMessage(
   }
 
   const queuedAttachments = parseAttachments(queueItem.attachments);
-  const effectivePreviousUserMessageId = previousUserMessageIdForOutboundParentLink(
+  const effectivePreviousUserMessageId = previousUserMessageIdForAppendParent(
+    conversationId,
     parentId,
     previousUserMessageId,
   );
@@ -2589,6 +2566,32 @@ function parseIsoDateMs(value: unknown): number {
   return Number.isFinite(timestamp) ? timestamp : Number.NaN;
 }
 
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function getQueueItemRunId(item: Record<string, unknown> | null | undefined): string | null {
+  return nonEmptyString(item?.runId) ?? nonEmptyString(item?.lastRunId);
+}
+
+function getQueueItemTurnId(item: Record<string, unknown> | null | undefined): string | null {
+  return nonEmptyString(item?.turnId);
+}
+
+function getTurnUserMessageId(turn: Record<string, unknown> | null | undefined): string | null {
+  return nonEmptyString(turn?.userMessageId);
+}
+
+function runStatusToRecoveredTurnStatus(
+  run: Record<string, unknown>,
+): 'queued' | 'running' | 'completed' | 'failed' | 'stopped' {
+  if (run.killedByUser === true || run.errorMessage === 'Killed by user') return 'stopped';
+  if (run.status === 'queued') return 'queued';
+  if (run.status === 'running') return 'running';
+  if (run.status === 'completed') return 'completed';
+  return 'failed';
+}
+
 function isRunMarkedKilledByUser(runId: string | null): boolean {
   if (!runId) return false;
   const run = store.getById('agent_runs', runId);
@@ -2617,22 +2620,52 @@ function listConversationQueueItems(
   return listConversationChatQueueItems(agentId, conversationId) as Record<string, unknown>[];
 }
 
-function sanitizeQueueItemForChat(item: Record<string, unknown>): Record<string, unknown> {
+function sanitizeQueueItemForChat(
+  item: Record<string, unknown>,
+  queuePosition: number | null = null,
+): Record<string, unknown> {
+  const turnId = getQueueItemTurnId(item);
+  const turn = turnId ? getAgentChatTurn(turnId) : null;
+  const runId = getQueueItemRunId(item);
+  const base = {
+    ...item,
+    turnId,
+    turnStatus: nonEmptyString(turn?.status),
+    queuePosition,
+    execution: {
+      turnId,
+      queue: {
+        id: nonEmptyString(item.id),
+        status: nonEmptyString(item.status) ?? 'queued',
+        position: queuePosition,
+        runId,
+        attempts: typeof item.attempts === 'number' ? item.attempts : null,
+        maxAttempts: typeof item.maxAttempts === 'number' ? item.maxAttempts : null,
+        nextAttemptAt: nonEmptyString(item.nextAttemptAt),
+        startedAt: nonEmptyString(item.startedAt),
+        completedAt: nonEmptyString(item.completedAt),
+        usedFallback: item.usedFallback === true,
+        fallbackModel: nonEmptyString(item.fallbackModel),
+      },
+      run: runId ? { id: runId, turnId } : null,
+    },
+  };
+
   if (typeof item.errorMessage !== 'string' || !item.errorMessage) {
-    return item;
+    return base;
   }
 
   if (item.status !== 'failed' && item.status !== 'queued') {
-    return item;
+    return base;
   }
 
   const summarizedError = summarizeQueueErrorForChat(item.errorMessage);
   if (summarizedError === item.errorMessage) {
-    return item;
+    return base;
   }
 
   return {
-    ...item,
+    ...base,
     errorMessage: summarizedError,
   };
 }
@@ -2831,6 +2864,22 @@ async function runAgentProcess(options: AgentProcessOptions): Promise<string> {
   let allocatedPort: number | null = null;
 
   try {
+    if (options.triggerType === 'chat') {
+      const turnId = options.turnId ?? null;
+      const conversationId = options.triggerRef?.conversationId ?? null;
+      const turn = turnId ? getAgentChatTurn(turnId) : null;
+      if (
+        !turn ||
+        turn.agentId !== options.agentId ||
+        turn.conversationId !== conversationId
+      ) {
+        throw new Error('Chat execution requires a durable turn linked to this conversation');
+      }
+      if (turn.status === 'stopped' || turn.status === 'failed' || turn.status === 'superseded') {
+        throw new Error('Chat execution cannot start for a terminal or superseded turn');
+      }
+    }
+
     const routingScope = resolveRemoteRunnerRoutingScope(options.agent);
     const remoteWorkspaceId = routingScope?.workspaceId ?? null;
     const remoteRunnerUserId = routingScope?.userId ?? null;
@@ -3324,6 +3373,18 @@ export function executePrompt(
 
     // Save user message
     const userMessage = saveMessage(conversationId, 'outbound', prompt);
+    const existingTurnId = options.turnId ?? null;
+    const executionTurn =
+      existingTurnId && getAgentChatTurn(existingTurnId)
+        ? getAgentChatTurn(existingTurnId)
+        : createAgentChatTurn({
+            agentId,
+            conversationId,
+            userMessageId: userMessage.id as string,
+            source: 'direct_prompt',
+            metadata: { mode: 'direct_prompt' },
+          });
+    const turnId = nonEmptyString(executionTurn?.id);
 
     spawnChatProcess(
       agentId,
@@ -3338,7 +3399,7 @@ export function executePrompt(
       }),
       {
         responseParentId: userMessage.id as string,
-        turnId: options.turnId ?? null,
+        turnId,
       },
     );
   });
@@ -3376,9 +3437,25 @@ function executeRespondToMessage(
       reject(AgentChatError.notFound('message_not_found', 'Message not found'));
       return;
     }
+    const existingTurnId = options.turnId ?? null;
+    const existingTurn =
+      existingTurnId && getAgentChatTurn(existingTurnId)
+        ? getAgentChatTurn(existingTurnId)
+        : findAgentChatTurnForUserMessage(agentId, conversationId, parentMessageId);
+    const executionTurn =
+      existingTurn ??
+      createAgentChatTurn({
+        agentId,
+        conversationId,
+        userMessageId: parentMessageId,
+        source: 'direct_response',
+        turnType: 'response',
+        metadata: { mode: 'direct_response' },
+      });
+    const turnId = nonEmptyString(executionTurn?.id);
 
     const fullPrompt = buildPromptWithHistory(agentId, conversationId, undefined, parentMessageId, {
-      turnId: options.turnId ?? null,
+      turnId,
     });
     const attachmentPaths = getConversationAttachmentDiskPaths(conversationId, parentMessageId);
 
@@ -3396,7 +3473,7 @@ function executeRespondToMessage(
       {
         responseParentId: parentMessageId,
         targetMessageId: parentMessageId,
-        turnId: options.turnId ?? null,
+        turnId,
       },
     );
   });
@@ -3619,6 +3696,8 @@ function retryOrFailQueueItem(
 }
 
 function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>): boolean {
+  // Startup recovery guard only. Remove this legacy queue/run-to-turn repair
+  // after 2026-08-01 once deployed databases have validated durable turns.
   const queueItemId = typeof queueItem.id === 'string' ? queueItem.id : null;
   const agentId = typeof queueItem.agentId === 'string' ? queueItem.agentId : null;
   const conversationId =
@@ -3630,6 +3709,41 @@ function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>):
   if (!run) return false;
   if (run.triggerType !== 'chat') return false;
   if (run.agentId !== agentId || run.conversationId !== conversationId) return false;
+  const runTurnId = nonEmptyString(run.turnId);
+  const queueTurnId = getQueueItemTurnId(queueItem);
+  const userMessageId =
+    nonEmptyString(queueItem.queuedMessageId) ??
+    nonEmptyString(queueItem.targetMessageId) ??
+    nonEmptyString(run.responseParentId);
+  const linkedTurn =
+    (queueTurnId ? getAgentChatTurn(queueTurnId) : null) ??
+    (runTurnId ? getAgentChatTurn(runTurnId) : null) ??
+    (userMessageId ? findAgentChatTurnForUserMessage(agentId, conversationId, userMessageId) : null);
+  const turn =
+    linkedTurn ??
+    createAgentChatTurn({
+      agentId,
+      conversationId,
+      userMessageId,
+      status: runStatusToRecoveredTurnStatus(run),
+      runId,
+      source: 'legacy_recovery',
+      turnType: getQueueItemMode(queueItem) === 'respond_to_message' ? 'response' : 'follow_up',
+      metadata: { recoveredFrom: 'processing_queue_item', queueItemId },
+      startedAt: nonEmptyString(run.startedAt),
+      completedAt: nonEmptyString(run.finishedAt),
+      createdAt: nonEmptyString(queueItem.createdAt) ?? nonEmptyString(run.startedAt) ?? undefined,
+    });
+  const turnId = nonEmptyString(turn.id);
+  if (!turnId || turn.agentId !== agentId || turn.conversationId !== conversationId) return false;
+  if (runTurnId && runTurnId !== turnId) return false;
+  if (queueTurnId && queueTurnId !== turnId) return false;
+  if (queueItem.turnId !== turnId) {
+    store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, { turnId });
+  }
+  if (run.turnId !== turnId) {
+    store.update('agent_runs', runId, { turnId });
+  }
   if (isRunMarkedKilledByUser(runId)) {
     markQueueItemCancelledByUser(queueItemId);
     return true;
@@ -3637,6 +3751,27 @@ function recoverInterruptedQueueItemFromRun(queueItem: Record<string, unknown>):
 
   const runStatus = run.status;
   if (runStatus === 'running') return false;
+  if (turn.status === 'stopped' || turn.status === 'failed' || turn.status === 'superseded') {
+    const errorMessage =
+      turn.status === 'stopped'
+        ? 'Cancelled by user'
+        : turn.status === 'superseded'
+          ? 'Skipped superseded queued turn during recovery'
+          : nonEmptyString(run.errorMessage) ?? 'Recovered run failed after backend restart';
+    if (turn.status === 'stopped') {
+      markQueueItemCancelledByUser(queueItemId, errorMessage);
+    } else {
+      store.update(AGENT_CHAT_QUEUE_COLLECTION, queueItemId, {
+        status: 'failed',
+        completedAt: new Date().toISOString(),
+        nextAttemptAt: null,
+        runId: null,
+        errorMessage,
+      });
+      markAgentChatTurnFailed(turnId, { runId, errorMessage });
+    }
+    return true;
+  }
 
   if (runStatus === 'completed') {
     const runStartedAtMs = parseIsoDateMs(run.startedAt);
@@ -3685,6 +3820,19 @@ async function processQueueItem(
   let spawnedRunId: string | null = null;
   try {
     const turnId = typeof readyItem.turnId === 'string' ? (readyItem.turnId as string) : null;
+    const turn = turnId ? getAgentChatTurn(turnId) : null;
+    if (!turn || turn.agentId !== agentId || turn.conversationId !== conversationId) {
+      throw AgentChatError.notFound(
+        'queue_turn_missing',
+        'Queued execution item is missing its durable turn',
+      );
+    }
+    if (turn.status === 'stopped' || turn.status === 'failed' || turn.status === 'superseded') {
+      throw AgentChatError.conflict(
+        'queue_turn_not_startable',
+        'Queued execution item references a terminal or superseded turn',
+      );
+    }
     let effectiveTargetId = targetMessageId;
     if (mode === 'append_prompt') {
       const promptMessage = ensureQueuedPromptMessage(
@@ -4033,6 +4181,32 @@ export async function initializeAgentChatQueue(options: InitializeAgentChatQueue
     const recoveredFromRun = recoverInterruptedQueueItemFromRun(item);
     if (recoveredFromRun) continue;
 
+    const turnId = getQueueItemTurnId(item);
+    const turn = turnId ? getAgentChatTurn(turnId) : null;
+    if (
+      !turn ||
+      turn.agentId !== item.agentId ||
+      turn.conversationId !== item.conversationId ||
+      turn.status === 'stopped' ||
+      turn.status === 'failed' ||
+      turn.status === 'superseded'
+    ) {
+      store.update(AGENT_CHAT_QUEUE_COLLECTION, item.id as string, {
+        status: turn?.status === 'stopped' ? 'cancelled' : 'failed',
+        nextAttemptAt: null,
+        completedAt: nowIso,
+        runId: null,
+        errorMessage: !turn
+          ? 'Recovered queue item is missing its durable turn'
+          : turn.status === 'superseded'
+            ? 'Recovered queue item references a superseded turn'
+            : turn.status === 'stopped'
+              ? 'Cancelled by user'
+              : 'Recovered queue item references a failed turn',
+      });
+      continue;
+    }
+
     store.update(AGENT_CHAT_QUEUE_COLLECTION, item.id as string, {
       status: 'queued',
       nextAttemptAt: nowIso,
@@ -4133,6 +4307,7 @@ export function enqueueAgentPrompt(
     conversationId,
     options.previousUserMessageId ?? null,
   );
+  let turnParentUserMessageId = previousUserMessageId;
   if (mode === 'respond_to_message') {
     if (!targetMessageId) {
       throw AgentChatError.badRequest('target_message_required', 'Target message is required');
@@ -4140,6 +4315,15 @@ export function enqueueAgentPrompt(
     const targetMessage = store.getById('messages', targetMessageId);
     if (!targetMessage || targetMessage.conversationId !== conversationId) {
       throw AgentChatError.notFound('target_message_not_found', 'Target message not found');
+    }
+  }
+  if (previousUserMessageId) {
+    const parentTurn = findAgentChatTurnForUserMessage(agentId, conversationId, previousUserMessageId);
+    if (!parentTurn) {
+      throw AgentChatError.conflict(
+        'parent_turn_missing',
+        'The parent chat turn is missing. Run the agent chat turn migration before appending to this conversation.',
+      );
     }
   }
 
@@ -4175,6 +4359,13 @@ export function enqueueAgentPrompt(
         );
       }
       userMessage = existingQueuedMessage;
+      turnParentUserMessageId = previousUserMessageIdForAppendParent(
+        conversationId,
+        typeof existingQueuedMessage.parentId === 'string'
+          ? (existingQueuedMessage.parentId as string)
+          : null,
+        previousUserMessageId,
+      );
     } else {
       const parentId = resolveQueuedPromptParentId(conversationId, {
         previousUserMessageId,
@@ -4184,10 +4375,12 @@ export function enqueueAgentPrompt(
       if (parentId) {
         activateMessagePath(conversationId, parentId);
       }
-      const effectivePreviousUserMessageId = previousUserMessageIdForOutboundParentLink(
+      const effectivePreviousUserMessageId = previousUserMessageIdForAppendParent(
+        conversationId,
         parentId,
         previousUserMessageId,
       );
+      turnParentUserMessageId = effectivePreviousUserMessageId;
       userMessage = saveAgentConversationMessage({
         id: queuedMessageId ?? undefined,
         conversationId,
@@ -4208,16 +4401,21 @@ export function enqueueAgentPrompt(
 
   const turnUserMessageId = mode === 'respond_to_message' ? targetMessageId : queuedMessageId;
   const supersededTurn = options.supersedesMessageId
-    ? (findAgentChatTurnForUserMessage(agentId, conversationId, options.supersedesMessageId) ??
-      ensureLegacyAgentChatTurnForUserMessage(agentId, conversationId, options.supersedesMessageId))
+    ? findAgentChatTurnForUserMessage(agentId, conversationId, options.supersedesMessageId)
     : null;
+  if (options.supersedesMessageId && !supersededTurn) {
+    throw AgentChatError.conflict(
+      'superseded_turn_missing',
+      'The edited chat turn is missing. Run the agent chat turn migration before editing this conversation.',
+    );
+  }
   const turnType =
     options.turnType ??
     (supersededTurn ? 'edit' : mode === 'respond_to_message' ? 'response' : 'follow_up');
   const turn = createAgentChatTurn({
     agentId,
     conversationId,
-    parentUserMessageId: previousUserMessageId,
+    parentUserMessageId: turnParentUserMessageId,
     userMessageId: turnUserMessageId,
     source: options.source ?? 'user',
     createdById: options.createdById ?? null,
@@ -4231,6 +4429,7 @@ export function enqueueAgentPrompt(
     },
   });
   const turnId = typeof turn.id === 'string' ? (turn.id as string) : null;
+  activateTurnPath(conversationId, agentId, turnId);
 
   try {
     assertAgentRunnerAvailableForQueue(agentId);
@@ -4255,7 +4454,7 @@ export function enqueueAgentPrompt(
     lastRunId: null,
     continuationParentId,
     dependsOnQueueItemId,
-    previousUserMessageId,
+    previousUserMessageId: turnParentUserMessageId,
     queuedMessageId,
     responseMessageId: null,
     errorMessage: null,
@@ -4351,7 +4550,12 @@ export function getConversationQueueItems(agentId: string, conversationId: strin
 export function getConversationExecutionItems(agentId: string, conversationId: string) {
   reconcileTerminalProcessingExecutionItems(agentId, conversationId);
 
-  return listConversationQueueItems(agentId, conversationId).map(sanitizeQueueItemForChat);
+  let position = 0;
+  return listConversationQueueItems(agentId, conversationId).map((item) => {
+    const isLive = item.status === 'queued' || item.status === 'processing';
+    const queuePosition = isLive ? ++position : null;
+    return sanitizeQueueItemForChat(item, queuePosition);
+  });
 }
 
 export function updateQueueItem(
@@ -4512,6 +4716,108 @@ export function retryQueueItem(itemId: string, agentId: string, conversationId: 
   return updated;
 }
 
+function removeActiveBranchReferences(
+  conversationId: string,
+  ids: { turnId?: string | null; userMessageId?: string | null },
+) {
+  const conversation = store.getById('conversations', conversationId);
+  if (!conversation) return;
+  const metadata = parseMetadata(conversation.metadata) ?? {};
+  const activeBranches = metadata.activeBranches;
+  if (!activeBranches || typeof activeBranches !== 'object' || Array.isArray(activeBranches)) {
+    return;
+  }
+
+  const nextBranches: Record<string, string> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(activeBranches as Record<string, unknown>)) {
+    if (typeof value !== 'string') continue;
+    const referencesDeletedTurn =
+      ids.turnId && (value === ids.turnId || key === `turn:${ids.turnId}`);
+    const referencesDeletedMessage =
+      ids.userMessageId && (value === ids.userMessageId || key === `user:${ids.userMessageId}`);
+    if (referencesDeletedTurn || referencesDeletedMessage) {
+      changed = true;
+      continue;
+    }
+    nextBranches[key] = value;
+  }
+
+  if (!changed) return;
+  store.update('conversations', conversationId, {
+    metadata: { ...metadata, activeBranches: nextBranches },
+  });
+}
+
+function deleteNotStartedQueuedTurn(
+  itemId: string,
+  item: Record<string, unknown>,
+  agentId: string,
+  conversationId: string,
+): boolean {
+  if (item.status !== 'queued') return false;
+  if (getQueueItemRunId(item)) return false;
+
+  const turnId = getQueueItemTurnId(item);
+  const turn = turnId ? getAgentChatTurn(turnId) : null;
+  if (!turnId) return false;
+  if (!turn || turn.agentId !== agentId || turn.conversationId !== conversationId) return false;
+  if (turn.status !== 'queued') return false;
+  if (nonEmptyString(turn.runId) || nonEmptyString(turn.assistantMessageId)) return false;
+
+  const parentTurnId = nonEmptyString(turn.parentTurnId);
+  const parentTurn = parentTurnId ? getAgentChatTurn(parentTurnId) : null;
+  const parentUserMessageId = getTurnUserMessageId(parentTurn);
+  const userMessageId = getTurnUserMessageId(turn);
+
+  for (const childTurn of store.getAll('agentChatTurns')) {
+    if (childTurn.parentTurnId !== turnId || typeof childTurn.id !== 'string') continue;
+    store.update('agentChatTurns', childTurn.id, { parentTurnId });
+  }
+
+  if (userMessageId) {
+    for (const message of store.getAll('messages')) {
+      if (typeof message.id !== 'string' || message.conversationId !== conversationId) continue;
+      const patch: Record<string, unknown> = {};
+      if (message.previousUserMessageId === userMessageId) {
+        patch.previousUserMessageId = parentUserMessageId;
+      }
+      if (message.parentId === userMessageId) {
+        patch.parentId = parentUserMessageId;
+      }
+      if (Object.keys(patch).length > 0) {
+        store.update('messages', message.id, patch);
+      }
+    }
+  }
+
+  for (const queue of store.getAll(AGENT_CHAT_QUEUE_COLLECTION)) {
+    if (typeof queue.id !== 'string' || queue.conversationId !== conversationId) continue;
+    const patch: Record<string, unknown> = {};
+    if (queue.dependsOnQueueItemId === itemId) patch.dependsOnQueueItemId = null;
+    if (userMessageId && queue.previousUserMessageId === userMessageId) {
+      patch.previousUserMessageId = parentUserMessageId;
+    }
+    if (userMessageId && queue.continuationParentId === userMessageId) {
+      patch.continuationParentId = parentUserMessageId;
+    }
+    if (Object.keys(patch).length > 0) {
+      store.update(AGENT_CHAT_QUEUE_COLLECTION, queue.id, patch);
+    }
+  }
+
+  store.delete(AGENT_CHAT_QUEUE_COLLECTION, itemId);
+  store.delete('agentChatTurns', turnId);
+  if (userMessageId) {
+    const message = store.getById('messages', userMessageId);
+    if (message?.conversationId === conversationId && message.direction === 'outbound') {
+      store.delete('messages', userMessageId);
+    }
+  }
+  removeActiveBranchReferences(conversationId, { turnId, userMessageId });
+  return true;
+}
+
 export function deleteQueueItem(itemId: string, agentId: string, conversationId: string) {
   const item = store.getById(AGENT_CHAT_QUEUE_COLLECTION, itemId);
   if (!item || item.agentId !== agentId || item.conversationId !== conversationId) {
@@ -4522,6 +4828,10 @@ export function deleteQueueItem(itemId: string, agentId: string, conversationId:
       'queue_item_not_deletable',
       'Only queued, failed, or cancelled execution items can be removed',
     );
+  }
+
+  if (deleteNotStartedQueuedTurn(itemId, item, agentId, conversationId)) {
+    return true;
   }
 
   markAgentChatTurnStopped(typeof item.turnId === 'string' ? (item.turnId as string) : null, {
@@ -4541,6 +4851,9 @@ export function clearAgentConversationQueue(agentId: string, conversationId: str
   const items = getConversationQueueItems(agentId, conversationId);
   const count = items.filter((i) => i.status === 'queued').length;
   for (const item of items) {
+    if (typeof item.id === 'string' && deleteNotStartedQueuedTurn(item.id, item, agentId, conversationId)) {
+      continue;
+    }
     markAgentChatTurnStopped(typeof item.turnId === 'string' ? (item.turnId as string) : null, {
       errorMessage: 'Removed from queue',
     });

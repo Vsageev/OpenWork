@@ -128,6 +128,7 @@ import {
   deleteQueueItem,
   editMessageAndBranch,
   enqueueAgentPrompt,
+  initializeAgentChatQueue,
   reorderQueueItems,
   retryQueueItem,
   switchBranch,
@@ -338,8 +339,8 @@ describe('agent chat turn write paths', () => {
       typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
     expect(parsedMetadata.activeBranches).toMatchObject({
       'turn:__root__': 'turn-2',
-      'user:__root__': 'message-1',
     });
+    expect(parsedMetadata.activeBranches).not.toHaveProperty('user:__root__');
   });
 
   it('switches a legacy edited follow-up by turn lineage when message previous user metadata is missing', () => {
@@ -408,11 +409,10 @@ describe('agent chat turn write paths', () => {
     const parsedMetadata =
       typeof metadata === 'string' ? JSON.parse(metadata) : (metadata as Record<string, unknown>);
     expect(parsedMetadata.activeBranches).toMatchObject({
-      'user:__root__': 'message-1',
       'turn:__root__': 'turn-1',
-      'user:message-1': 'message-2-edit',
       'turn:turn-1': 'turn-2-edit',
     });
+    expect(parsedMetadata.activeBranches).not.toHaveProperty('user:message-1');
   });
 
   it('persists outbound parent as previous user id when client omits previousUserMessageId on a queued follow-up', () => {
@@ -431,7 +431,7 @@ describe('agent chat turn write paths', () => {
       queuedMessageId: 'message-1',
       createdById: 'test-user',
     });
-    enqueueAgentPrompt('agent-1', 'conversation-1', 'Second queued prompt', {
+    const second = enqueueAgentPrompt('agent-1', 'conversation-1', 'Second queued prompt', {
       queuedMessageId: 'message-2',
       createdById: 'test-user',
     });
@@ -444,6 +444,45 @@ describe('agent chat turn write paths', () => {
     expect(
       __agentChatTestUtils.getPreviousUserMessageIdForPromptPath('conversation-1', message2!),
     ).toBe('message-1');
+    const firstTurn = mocks.store.find(
+      'agentChatTurns',
+      (turn) => turn.userMessageId === 'message-1',
+    )[0];
+    expect(mocks.store.getById('agentChatTurns', String(second.queueItem.turnId))).toMatchObject({
+      parentTurnId: firstTurn?.id,
+      userMessageId: 'message-2',
+    });
+  });
+
+  it('infers turn parent from the active assistant leaf when previousUserMessageId is omitted', () => {
+    seedMessage('message-1', { content: 'Completed prompt' });
+    seedMessage('assistant-1', {
+      direction: 'inbound',
+      content: 'Completed response',
+      parentId: 'message-1',
+    });
+    seedTurn('turn-1', {
+      userMessageId: 'message-1',
+      assistantMessageId: 'assistant-1',
+      status: 'completed',
+    });
+
+    const followUp = enqueueAgentPrompt('agent-1', 'conversation-1', 'Follow-up after response', {
+      queuedMessageId: 'message-2',
+      createdById: 'test-user',
+    });
+
+    expect(mocks.store.getById('messages', 'message-2')).toMatchObject({
+      parentId: 'assistant-1',
+      previousUserMessageId: 'message-1',
+    });
+    expect(mocks.store.getById('agentChatTurns', String(followUp.queueItem.turnId))).toMatchObject({
+      parentTurnId: 'turn-1',
+      userMessageId: 'message-2',
+    });
+    expect(
+      getAgentConversationChatView('agent-1', 'conversation-1').entries.map((entry) => entry.id),
+    ).toEqual(['turn-1', String(followUp.queueItem.turnId)]);
   });
 
   it('persists queued text prompts as messages and turns before execution drains', () => {
@@ -545,7 +584,9 @@ describe('agent chat turn write paths', () => {
     const conversationMetadata = JSON.parse(
       String(mocks.store.getById('conversations', 'conversation-1')?.metadata),
     );
-    expect(conversationMetadata.activeBranches ?? {}).not.toHaveProperty('turn:turn-1');
+    expect(conversationMetadata.activeBranches ?? {}).toMatchObject({
+      'turn:turn-1': String(followUp.queueItem.turnId),
+    });
   });
 
   it('creates an explicit edit replacement turn and chains follow-ups from it', () => {
@@ -790,11 +831,12 @@ describe('agent chat turn write paths', () => {
       JSON.parse(String(mocks.store.getById('conversations', 'conversation-1')?.metadata))
         .activeBranches,
     ).toMatchObject({
+      'turn:turn-root': String(followUp.queueItem.turnId),
       'user:message-root': 'message-latest-child',
     });
   });
 
-  it('materializes legacy message-only turns before continuing an old chat', () => {
+  it('rejects continuing a legacy message-only chat until migration creates durable turns', () => {
     seedMessage('legacy-user-1', {
       content: 'Old prompt',
       createdAt: '2026-05-16T11:00:00.000Z',
@@ -831,45 +873,16 @@ describe('agent chat turn write paths', () => {
     });
 
     const before = getAgentConversationChatView('agent-1', 'conversation-1');
-    expect(before.entries.map((turn) => turn.userMessage?.id)).toEqual([
-      'legacy-user-1',
-      'legacy-user-2',
-    ]);
+    expect(before.entries.map((turn) => turn.userMessage?.id)).toEqual([]);
 
-    const followUp = enqueueAgentPrompt('agent-1', 'conversation-1', 'Continue old chat', {
-      queuedMessageId: 'legacy-follow-up',
-      previousUserMessageId: 'legacy-user-2',
-      createdById: 'test-user',
-    });
-    const legacyTurn1 = mocks.store
-      .getAll('agentChatTurns')
-      .find((turn) => turn.userMessageId === 'legacy-user-1');
-    const legacyTurn2 = mocks.store
-      .getAll('agentChatTurns')
-      .find((turn) => turn.userMessageId === 'legacy-user-2');
-
-    expect(legacyTurn1).toMatchObject({
-      source: 'legacy_message',
-      userMessageId: 'legacy-user-1',
-      assistantMessageId: 'legacy-assistant-1',
-    });
-    expect(legacyTurn2).toMatchObject({
-      source: 'legacy_message',
-      parentTurnId: legacyTurn1?.id,
-      userMessageId: 'legacy-user-2',
-      assistantMessageId: 'legacy-assistant-2',
-    });
-    expect(mocks.store.getById('agentChatTurns', String(followUp.queueItem.turnId))).toMatchObject({
-      parentTurnId: legacyTurn2?.id,
-      userMessageId: 'legacy-follow-up',
-    });
-
-    const after = getAgentConversationChatView('agent-1', 'conversation-1');
-    expect(after.entries.map((turn) => turn.userMessage?.id)).toEqual([
-      'legacy-user-1',
-      'legacy-user-2',
-      'legacy-follow-up',
-    ]);
+    expect(() =>
+      enqueueAgentPrompt('agent-1', 'conversation-1', 'Continue old chat', {
+        queuedMessageId: 'legacy-follow-up',
+        previousUserMessageId: 'legacy-user-2',
+        createdById: 'test-user',
+      }),
+    ).toThrow(/parent chat turn is missing/);
+    expect(mocks.store.getAll('agentChatTurns')).toEqual([]);
   });
 
   it('marks failed prompt turns when queue insertion cannot proceed', () => {
@@ -935,6 +948,75 @@ describe('agent chat turn write paths', () => {
           storagePath: '/chat-uploads/spec.txt',
         },
       ],
+    });
+  });
+
+  it('removes a not-started queued prompt without leaving a visible ghost turn', () => {
+    const queued = enqueueAgentPrompt('agent-1', 'conversation-1', 'Remove me', {
+      queuedMessageId: 'message-remove',
+      createdById: 'test-user',
+    });
+    const turnId = String(queued.queueItem.turnId);
+
+    expect(getAgentConversationChatView('agent-1', 'conversation-1').entries).toEqual([
+      expect.objectContaining({
+        id: turnId,
+        userMessage: expect.objectContaining({ id: 'message-remove' }),
+        status: 'queued',
+      }),
+    ]);
+
+    deleteQueueItem(String(queued.queueItem.id), 'agent-1', 'conversation-1');
+
+    expect(mocks.store.getById('agentChatQueue', String(queued.queueItem.id))).toBeNull();
+    expect(mocks.store.getById('agentChatTurns', turnId)).toBeNull();
+    expect(mocks.store.getById('messages', 'message-remove')).toBeNull();
+    expect(getAgentConversationChatView('agent-1', 'conversation-1').entries).toEqual([]);
+  });
+
+  it('does not restart a terminal turn during backend queue recovery', async () => {
+    seedMessage('message-failed', { content: 'Failed prompt' });
+    seedTurn('turn-failed', {
+      userMessageId: 'message-failed',
+      status: 'failed',
+      runId: 'run-failed',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-failed',
+      agentId: 'agent-1',
+      agentName: 'Test Agent',
+      triggerType: 'chat',
+      status: 'error',
+      conversationId: 'conversation-1',
+      responseParentId: 'message-failed',
+      turnId: 'turn-failed',
+      errorMessage: 'Model failed',
+      startedAt: '2026-05-16T12:00:00.000Z',
+      finishedAt: '2026-05-16T12:01:00.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-failed',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'processing',
+      turnId: 'turn-failed',
+      runId: 'run-failed',
+      queuedMessageId: 'message-failed',
+      attempts: 1,
+      maxAttempts: 4,
+    });
+
+    await initializeAgentChatQueue();
+
+    expect(mocks.store.getById('agentChatQueue', 'queue-failed')).toMatchObject({
+      status: 'failed',
+      runId: null,
+      errorMessage: 'Model failed',
+    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-failed')).toMatchObject({
+      status: 'failed',
+      runId: 'run-failed',
     });
   });
 
@@ -1024,9 +1106,10 @@ describe('agent chat turn write paths', () => {
 
     deleteQueueItem('queue-1', 'agent-1', 'conversation-1');
     expect(mocks.store.getById('agentChatQueue', 'queue-1')).toBeNull();
-    expect(mocks.store.getById('agentChatTurns', 'turn-1')).toMatchObject({
-      status: 'stopped',
-      metadata: { errorMessage: 'Removed from queue' },
-    });
+    expect(mocks.store.getById('agentChatTurns', 'turn-1')).toBeNull();
+    expect(mocks.store.getById('messages', 'message-1')).toBeNull();
+    expect(
+      mocks.store.getAll('agentChatTurns').map((turn) => turn.id),
+    ).not.toContain('turn-1');
   });
 });

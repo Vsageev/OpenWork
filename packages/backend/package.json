@@ -18,6 +18,7 @@
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config drizzle.config.ts",
     "db:studio": "drizzle-kit studio --config drizzle.config.ts",
+    "chat-turns:migrate": "node --import tsx src/scripts/migrate-agent-chat-turns.ts",
     "agents:sync": "node scripts/sync-agent-workspaces.mjs",
     "agents:validate": "node scripts/validate-agent-workspaces.mjs"
   },

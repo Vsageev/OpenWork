@@ -48,6 +48,7 @@ export interface AgentChatQueueItem {
   turnId?: string | null;
   turnStatus?: AgentConversationChatTurn['status'];
   availableActions?: AgentConversationChatTurn['availableActions'];
+  queuePosition?: number | null;
 }
 
 export interface AgentConversationRunSummary {
@@ -63,13 +64,8 @@ export type QueueExecutionMode = NonNullable<AgentChatQueueItem['mode']>;
 
 export interface BuildAgentConversationViewModelOptions {
   canonicalView?: AgentConversationChatView | null;
-  messages: AgentChatMessage[];
-  queueItems: AgentChatQueueItem[];
-  activeConversationRuns: AgentConversationRunSummary[];
   activeAgentId: string | null;
   activeConvId: string | null;
-  activeConversationKey: string | null;
-  optimisticResponseParentIds: Record<string, string | null | undefined>;
 }
 
 export interface AgentConversationViewModel {
@@ -119,7 +115,9 @@ export interface AgentConversationChatViewMessage {
 
 export interface AgentConversationChatViewQueue {
   id: string;
+  turnId?: string;
   status: string;
+  position?: number | null;
   runId: string | null;
   errorMessage: string | null;
   attempts: number | null;
@@ -133,6 +131,7 @@ export interface AgentConversationChatViewQueue {
 
 export interface AgentConversationChatViewRun {
   id: string;
+  turnId?: string | null;
   status: string;
   errorMessage: string | null;
   responseText: string | null;
@@ -279,8 +278,6 @@ export function getBranchTargetIdByOffset(
   return branchIds[targetIdx] ?? null;
 }
 
-const ROOT_PREVIOUS_USER_MESSAGE_KEY = '__root__';
-
 function compareByCreatedAt(
   a: Pick<AgentChatMessage, 'createdAt' | 'id'>,
   b: Pick<AgentChatMessage, 'createdAt' | 'id'>,
@@ -293,18 +290,14 @@ function compareByCreatedAt(
 export function buildAgentConversationViewModel(
   options: BuildAgentConversationViewModelOptions,
 ): AgentConversationViewModel {
-  if (options.canonicalView) {
-    return buildCanonicalAgentConversationViewModel(options);
-  }
-
-  return buildLegacyAgentConversationViewModel(options);
+  return buildCanonicalAgentConversationViewModel(options);
 }
 
 function buildCanonicalAgentConversationViewModel(
   options: BuildAgentConversationViewModelOptions,
 ): AgentConversationViewModel {
   const { canonicalView } = options;
-  if (!canonicalView) return buildLegacyAgentConversationViewModel(options);
+  if (!canonicalView) return emptyAgentConversationViewModel();
   if (
     (options.activeAgentId && canonicalView.agentId !== options.activeAgentId) ||
     (options.activeConvId && canonicalView.conversationId !== options.activeConvId)
@@ -319,7 +312,6 @@ function buildCanonicalAgentConversationViewModel(
   const errorsByMessageId = new Map<string, AgentChatQueueItem[]>();
   const orphanErrorItems: AgentChatQueueItem[] = [];
   const effectivePendingBranchExecutionsByMessageId = new Map<string, AgentChatQueueItem[]>();
-  const canonicalMessageIds = new Set<string>();
   let activeConversationRun: AgentConversationRunSummary | null = null;
   let activeProcessingTargetMessageId: string | null = null;
 
@@ -328,14 +320,11 @@ function buildCanonicalAgentConversationViewModel(
     const userMessage = mapCanonicalMessage(turn.userMessage, turn);
     const assistantMessage = mapCanonicalMessage(turn.assistantMessage, turn);
 
-    if (userMessage) canonicalMessageIds.add(userMessage.id);
-    if (assistantMessage) canonicalMessageIds.add(assistantMessage.id);
-
     if (turn.status === 'queued' && userMessage) {
       if (queueItem) queuedQueueItems.push(queueItem);
       queuedMessages.push({
         message: userMessage,
-        status: 'queued',
+        status: queueItem?.status === 'processing' ? 'processing' : 'queued',
         queueItem,
       });
       continue;
@@ -373,16 +362,6 @@ function buildCanonicalAgentConversationViewModel(
         orphanErrorItems.push(noticeItem);
       }
     }
-  }
-
-  const optimisticQueuedMessages = mapPendingNetworkOptimisticMessages({
-    messages: options.messages,
-    queueItems: options.queueItems,
-    canonicalMessageIds,
-  });
-  for (const row of optimisticQueuedMessages) {
-    queuedMessages.push(row);
-    if (row.queueItem) queuedQueueItems.push(row.queueItem);
   }
 
   queuedQueueItems.sort((a, b) =>
@@ -506,6 +485,7 @@ function mapCanonicalQueueItem(
     turnId: turn.id,
     turnStatus: turn.status,
     availableActions: turn.availableActions,
+    queuePosition: queue.position ?? null,
   };
 }
 
@@ -566,374 +546,10 @@ function canonicalStatusToQueueStatus(
   return 'queued';
 }
 
-function mapPendingNetworkOptimisticMessages(options: {
-  messages: AgentChatMessage[];
-  queueItems: AgentChatQueueItem[];
-  canonicalMessageIds: Set<string>;
-}): AgentConversationViewModel['queuedMessages'] {
-  const queueByMessageId = new Map<string, AgentChatQueueItem>();
-  for (const item of options.queueItems) {
-    if (!item.id.startsWith('temp-')) continue;
-    const messageId = item.queuedMessageId ?? item.targetMessageId ?? null;
-    if (messageId) queueByMessageId.set(messageId, item);
-  }
-
-  return options.messages
-    .filter(
-      (message) =>
-        message.direction === 'outbound' &&
-        !options.canonicalMessageIds.has(message.id) &&
-        queueByMessageId.has(message.id),
-    )
-    .map((message) => ({
-      message,
-      status: queueByMessageId.get(message.id)?.status === 'processing' ? 'processing' : 'queued',
-      queueItem: queueByMessageId.get(message.id) ?? null,
-    }));
-}
-
 function queueItemToComparable(
   item: AgentChatQueueItem,
 ): Pick<AgentChatMessage, 'createdAt' | 'id'> {
   return { id: item.id, createdAt: item.createdAt };
-}
-
-// Compatibility fallback for callers still passing legacy messages, queue rows,
-// active runs, and branch metadata. Scheduled for removal after all chat UI reads
-// come exclusively from the canonical turn view endpoint.
-function buildLegacyAgentConversationViewModel(
-  options: BuildAgentConversationViewModelOptions,
-): AgentConversationViewModel {
-  const {
-    messages,
-    activeAgentId,
-    activeConvId,
-    activeConversationKey,
-    optimisticResponseParentIds,
-  } = options;
-  const queueItems = options.queueItems.filter((item) => {
-    if (!activeAgentId || !activeConvId) return false;
-    return item.agentId === activeAgentId && item.conversationId === activeConvId;
-  });
-  const activeConversationRuns = options.activeConversationRuns.filter((run) => {
-    if (run.status !== 'running') return false;
-    if (activeAgentId && run.agentId && run.agentId !== activeAgentId) return false;
-    if (activeConvId && run.conversationId && run.conversationId !== activeConvId) return false;
-    return true;
-  });
-
-  const activeBranchMessages = [...messages].sort(compareByCreatedAt);
-  const activeBranchMessageIds = new Set(activeBranchMessages.map((message) => message.id));
-  const activeBranchUserMessages = activeBranchMessages.filter(
-    (message) => message.direction === 'outbound',
-  );
-  const activeBranchUserMessageIds = new Set(activeBranchUserMessages.map((message) => message.id));
-  const agentResponseParentIds = new Set(
-    activeBranchMessages
-      .filter((message) => message.direction === 'inbound')
-      .map((message) => message.parentId ?? null)
-      .filter((parentId): parentId is string => Boolean(parentId)),
-  );
-  const terminalAppendQueueMessageIds = new Set(
-    queueItems
-      .filter((item) => {
-        if (getQueueItemMode(item) !== 'append_prompt') return false;
-        return (
-          item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled'
-        );
-      })
-      .map((item) => item.queuedMessageId ?? null)
-      .filter((messageId): messageId is string => Boolean(messageId)),
-  );
-  const settledUserMessageIds = new Set([
-    ...agentResponseParentIds,
-    ...terminalAppendQueueMessageIds,
-  ]);
-  const queuedStyleUserMessageIds = new Set(
-    activeBranchUserMessages
-      .filter((message) => {
-        const previousUserMessageId = message.previousUserMessageId ?? null;
-        if (!previousUserMessageId) return false;
-        if (!activeBranchUserMessageIds.has(previousUserMessageId)) return false;
-        return !settledUserMessageIds.has(previousUserMessageId);
-      })
-      .map((message) => message.id),
-  );
-  const visibleMessages = activeBranchMessages.filter((message) => {
-    if (message.direction !== 'outbound') return true;
-    return !queuedStyleUserMessageIds.has(message.id);
-  });
-  const activeMessageIds = new Set(visibleMessages.map((message) => message.id));
-  const hiddenPendingMessageIds = new Set(
-    queueItems
-      .filter(
-        (item) =>
-          getQueueItemMode(item) === 'append_prompt' &&
-          (item.status === 'queued' || item.status === 'processing') &&
-          Boolean(item.queuedMessageId),
-      )
-      .map((item) => item.queuedMessageId!),
-  );
-  const selectedUserMessageByPreviousMessageId = new Map<string, AgentChatMessage>();
-  for (const message of activeBranchMessages) {
-    if (message.direction !== 'outbound') continue;
-    const key = message.previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
-    selectedUserMessageByPreviousMessageId.set(key, message);
-  }
-
-  const queuedQueueItems = queueItems
-    .filter((item) => {
-      if (getQueueItemMode(item) !== 'append_prompt') {
-        return false;
-      }
-      if (item.status !== 'queued' && item.status !== 'processing') return false;
-
-      const previousUserMessageId = item.previousUserMessageId ?? null;
-      const queuedMessageId = item.queuedMessageId ?? null;
-      const selectionKey = previousUserMessageId ?? ROOT_PREVIOUS_USER_MESSAGE_KEY;
-      const selectedMessage = selectedUserMessageByPreviousMessageId.get(selectionKey) ?? null;
-      const selectedMessageId = selectedMessage?.id ?? null;
-
-      if (
-        previousUserMessageId !== null &&
-        selectedMessageId &&
-        queuedMessageId &&
-        selectedMessageId !== queuedMessageId
-      ) {
-        return false;
-      }
-
-      if (
-        previousUserMessageId === null &&
-        selectedMessageId &&
-        queuedMessageId &&
-        selectedMessageId !== queuedMessageId
-      ) {
-        const siblingIds = selectedMessage?.siblingIds ?? [];
-        if (siblingIds.includes(queuedMessageId)) {
-          return false;
-        }
-        // Active path sometimes omits `siblingIds` (partial payloads); `siblingCount`
-        // still proves multiple root variants — hide other variants' append queue.
-        if (typeof selectedMessage?.siblingCount === 'number' && selectedMessage.siblingCount > 1) {
-          return false;
-        }
-      }
-
-      return (
-        previousUserMessageId === null || activeBranchUserMessageIds.has(previousUserMessageId)
-      );
-    })
-    .sort(compareByCreatedAt);
-  const notifyQueueItems = queueItems.filter(
-    (item) => item.status === 'failed' || item.status === 'cancelled',
-  );
-
-  const activeChildParentIds = new Set(
-    visibleMessages
-      .map((message) => message.parentId ?? null)
-      .filter((parentId): parentId is string => Boolean(parentId)),
-  );
-  const pendingBranchExecutionsByMessageId = new Map<string, AgentChatQueueItem[]>();
-  for (const item of queueItems) {
-    if (item.status !== 'queued' && item.status !== 'processing') continue;
-    if (getQueueItemMode(item) !== 'respond_to_message') continue;
-    const anchorId = item.targetMessageId;
-    if (!anchorId) continue;
-    const entries = pendingBranchExecutionsByMessageId.get(anchorId) ?? [];
-    entries.push(item);
-    pendingBranchExecutionsByMessageId.set(anchorId, entries);
-  }
-
-  const effectivePendingBranchExecutionsByMessageId = new Map<string, AgentChatQueueItem[]>();
-  for (const [messageId, items] of pendingBranchExecutionsByMessageId.entries()) {
-    effectivePendingBranchExecutionsByMessageId.set(messageId, [...items]);
-  }
-
-  const liveAppendQueueItemByMessageId = new Map<string, AgentChatQueueItem>();
-  for (const item of queueItems) {
-    if (getQueueItemMode(item) !== 'append_prompt') continue;
-    if (item.status !== 'queued' && item.status !== 'processing') continue;
-    const queuedMessageId = item.queuedMessageId ?? null;
-    if (!queuedMessageId) continue;
-    const existingItem = liveAppendQueueItemByMessageId.get(queuedMessageId);
-    if (!existingItem || existingItem.status !== 'processing') {
-      liveAppendQueueItemByMessageId.set(queuedMessageId, item);
-    }
-  }
-
-  const visibleConversationRuns = activeConversationRuns.filter(
-    (run) =>
-      run.status === 'running' &&
-      Boolean(run.responseParentId) &&
-      activeMessageIds.has(run.responseParentId!),
-  );
-  const activeConversationRun = visibleConversationRuns[0] ?? null;
-
-  for (const run of visibleConversationRuns) {
-    const messageId = run.responseParentId!;
-    const existingItems = effectivePendingBranchExecutionsByMessageId.get(messageId) ?? [];
-    const hasProcessingExecution = existingItems.some((item) => item.status === 'processing');
-    if (!hasProcessingExecution && activeAgentId && activeConvId) {
-      existingItems.push({
-        id: `run-${run.id}`,
-        agentId: activeAgentId,
-        conversationId: activeConvId,
-        mode: 'respond_to_message',
-        prompt: '',
-        status: 'processing',
-        attempts: 0,
-        createdAt: run.startedAt,
-        targetMessageId: messageId,
-        runId: run.id,
-      });
-      effectivePendingBranchExecutionsByMessageId.set(messageId, existingItems);
-    }
-  }
-
-  const queuedMessages = activeBranchUserMessages
-    .filter((message) => queuedStyleUserMessageIds.has(message.id))
-    .map((message) => {
-      const appendQueueItem = liveAppendQueueItemByMessageId.get(message.id) ?? null;
-      const pendingExecutions = effectivePendingBranchExecutionsByMessageId.get(message.id) ?? [];
-      const hasProcessingExecution =
-        appendQueueItem?.status === 'processing' ||
-        pendingExecutions.some((item) => item.status === 'processing');
-      const status: 'queued' | 'processing' = hasProcessingExecution ? 'processing' : 'queued';
-      return {
-        message,
-        status,
-        queueItem: appendQueueItem,
-      };
-    });
-
-  const queuedMessageIds = new Set(queuedMessages.map(({ message }) => message.id));
-  for (const item of queuedQueueItems) {
-    const queuedMessageId = item.queuedMessageId ?? null;
-    if (!queuedMessageId) continue;
-    if (activeBranchMessageIds.has(queuedMessageId)) continue;
-    if (queuedMessageIds.has(queuedMessageId)) continue;
-    const attachments = normalizeAgentChatAttachments(item.attachments);
-
-    queuedMessages.push({
-      message: {
-        id: queuedMessageId,
-        direction: 'outbound',
-        content: item.prompt,
-        createdAt: item.createdAt,
-        type: attachments?.length
-          ? attachments.every((attachment) => attachment.type === 'image')
-            ? 'image'
-            : 'file'
-          : 'text',
-        metadata: null,
-        attachments,
-        parentId: null,
-        previousUserMessageId: item.previousUserMessageId ?? null,
-      },
-      status: item.status === 'processing' ? 'processing' : 'queued',
-      queueItem: item,
-    });
-    queuedMessageIds.add(queuedMessageId);
-  }
-  queuedMessages.sort((a, b) => compareByCreatedAt(a.message, b.message));
-
-  function shouldHideBranchError(item: AgentChatQueueItem): boolean {
-    const anchorId = item.targetMessageId ?? item.queuedMessageId;
-    if (!anchorId) {
-      return false;
-    }
-    if (item.targetMessageId && activeChildParentIds.has(item.targetMessageId)) {
-      return true;
-    }
-
-    const pendingExecutions = effectivePendingBranchExecutionsByMessageId.get(anchorId) ?? [];
-    return pendingExecutions.some((pendingItem) => pendingItem.id !== item.id);
-  }
-
-  const errorsByMessageId = new Map<string, AgentChatQueueItem[]>();
-  for (const item of notifyQueueItems) {
-    if (shouldHideBranchError(item)) {
-      continue;
-    }
-    const anchorId = item.targetMessageId ?? item.queuedMessageId;
-    if (!anchorId || !activeMessageIds.has(anchorId)) continue;
-    const entries = errorsByMessageId.get(anchorId) ?? [];
-    entries.push(item);
-    errorsByMessageId.set(anchorId, entries);
-  }
-
-  const orphanErrorItems = notifyQueueItems.filter((item) => {
-    if (shouldHideBranchError(item)) {
-      return false;
-    }
-    const anchorId = item.targetMessageId ?? item.queuedMessageId;
-    if (!anchorId) return true;
-    if (hiddenPendingMessageIds.has(anchorId)) return true;
-    // If the anchor exists but isn't on the active path, the error belongs
-    // to a different branch and should be hidden — not shown as an orphan.
-    return false;
-  });
-
-  let activeProcessingTargetMessageId: string | null = null;
-  if (visibleConversationRuns.length > 0) {
-    activeProcessingTargetMessageId = visibleConversationRuns[0].responseParentId ?? null;
-  } else {
-    const processingQueueItem = queueItems.find((item) => {
-      if (item.status !== 'processing') return false;
-      if (getQueueItemMode(item) !== 'respond_to_message') return false;
-      const anchorId = item.targetMessageId;
-      return Boolean(anchorId && activeMessageIds.has(anchorId));
-    });
-    if (processingQueueItem) {
-      activeProcessingTargetMessageId = processingQueueItem.targetMessageId ?? null;
-    } else {
-      const queuedBranchItem = queueItems.find((item) => {
-        if (item.status !== 'queued') return false;
-        const anchorId =
-          getQueueItemMode(item) === 'respond_to_message'
-            ? item.targetMessageId
-            : item.queuedMessageId;
-        return Boolean(anchorId && activeMessageIds.has(anchorId));
-      });
-      if (queuedBranchItem) {
-        activeProcessingTargetMessageId =
-          (getQueueItemMode(queuedBranchItem) === 'respond_to_message'
-            ? queuedBranchItem.targetMessageId
-            : queuedBranchItem.queuedMessageId) ?? null;
-      } else if (activeConversationKey) {
-        const optimisticTargetId = optimisticResponseParentIds[activeConversationKey] ?? null;
-        activeProcessingTargetMessageId =
-          optimisticTargetId && activeMessageIds.has(optimisticTargetId)
-            ? optimisticTargetId
-            : null;
-      }
-    }
-  }
-
-  const hasQueuedAppendProcessing = queuedQueueItems.some((item) => item.status === 'processing');
-  const hasVisibleRespondProcessing =
-    visibleConversationRuns.length > 0 ||
-    queueItems.some(
-      (item) =>
-        item.status === 'processing' &&
-        getQueueItemMode(item) === 'respond_to_message' &&
-        Boolean(item.targetMessageId && activeBranchMessageIds.has(item.targetMessageId)),
-    );
-  const showStreamingBubble = hasQueuedAppendProcessing || hasVisibleRespondProcessing;
-
-  return {
-    visibleMessages,
-    queuedQueueItems,
-    queuedMessages,
-    notifyQueueItems,
-    effectivePendingBranchExecutionsByMessageId,
-    errorsByMessageId,
-    orphanErrorItems,
-    activeConversationRun,
-    activeProcessingTargetMessageId,
-    showStreamingBubble,
-  };
 }
 
 export function buildAgentChatMarkdownExport(options: {

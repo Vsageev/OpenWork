@@ -149,13 +149,8 @@ function canonicalView(entries: AgentConversationChatTurn[]): AgentConversationC
 function renderTranscript(viewData: AgentConversationChatView) {
   const view = buildAgentConversationViewModel({
     canonicalView: viewData,
-    messages: [],
-    queueItems: [],
-    activeConversationRuns: [],
     activeAgentId: agentId,
     activeConvId: conversationId,
-    activeConversationKey: `${agentId}:${conversationId}`,
-    optimisticResponseParentIds: {},
   });
   const root = document.createElement('section');
   root.dataset.testid = 'agent-chat-transcript';
@@ -179,6 +174,12 @@ function renderTranscript(viewData: AgentConversationChatView) {
       badge.textContent = 'Stopped';
       row.append(badge);
     }
+    if (message.turnStatus === 'queued') {
+      const badge = document.createElement('span');
+      badge.dataset.testid = 'turn-badge';
+      badge.textContent = 'Queued';
+      row.append(badge);
+    }
     const notices = view.errorsByMessageId.get(message.id) ?? [];
     for (const item of notices) {
       const notice = document.createElement('div');
@@ -200,21 +201,39 @@ function renderTranscript(viewData: AgentConversationChatView) {
     root.append(row);
   }
 
-  for (const { message, status, queueItem } of view.queuedMessages) {
-    const row = document.createElement('article');
-    row.dataset.testid = 'queued-message-row';
-    row.dataset.messageId = message.id;
-    row.dataset.queueItemId = queueItem?.id ?? '';
-    row.dataset.queueStatus = status;
-    row.dataset.turnType = message.turnType ?? '';
-    row.textContent = message.content;
-    for (const att of message.attachments ?? []) {
-      const chip = document.createElement('span');
-      chip.dataset.testid = 'attachment-chip';
-      chip.textContent = att.fileName;
-      row.append(chip);
+  if (view.queuedMessages.length > 0) {
+    const summary = document.createElement('div');
+    summary.dataset.testid = 'queue-summary';
+    summary.textContent = `${view.queuedMessages.length} message${
+      view.queuedMessages.length === 1 ? '' : 's'
+    } queued`;
+    root.append(summary);
+
+    for (const { message, status, queueItem } of view.queuedMessages) {
+      const row = document.createElement('article');
+      row.dataset.testid = 'queued-message-row';
+      row.dataset.messageId = message.id;
+      row.dataset.queueItemId = queueItem?.id ?? '';
+      row.dataset.queueStatus = status;
+      row.textContent = message.content;
+      const badge = document.createElement('span');
+      badge.dataset.testid = 'queued-turn-badge';
+      badge.textContent = status === 'processing' ? 'Processing' : 'Queued';
+      row.append(badge);
+
+      if (queueItem?.availableActions?.includes('edit_queue_item')) {
+        const edit = document.createElement('button');
+        edit.ariaLabel = 'Edit queued message';
+        row.append(edit);
+      }
+      if (queueItem?.availableActions?.includes('delete_queue_item')) {
+        const remove = document.createElement('button');
+        remove.ariaLabel = 'Remove queued message';
+        row.append(remove);
+      }
+
+      root.append(row);
     }
-    root.append(row);
   }
 
   document.body.replaceChildren(root);
@@ -283,7 +302,8 @@ describe('agent chat lifecycle browser matrix', () => {
     expect(rowIds(root, 'queued-message-row')).toEqual(['message-edit']);
     expect(
       root.querySelector('[data-message-id="message-edit"]')?.getAttribute('data-turn-type'),
-    ).toBe('edit');
+    ).toBeNull();
+    expect(root.querySelector('[data-message-id="message-edit"]')?.textContent).toContain('Queued');
   });
 
   it('keeps a follow-up on the edited branch after editing a prior prompt', () => {
@@ -326,7 +346,7 @@ describe('agent chat lifecycle browser matrix', () => {
     ).toBe('follow_up');
   });
 
-  it('renders multiple prompts queued behind an active run as queued rows', () => {
+  it('renders multiple prompts queued behind an active run at the bottom', () => {
     const { view, root } = renderTranscript(
       canonicalView([
         turn({
@@ -360,11 +380,17 @@ describe('agent chat lifecycle browser matrix', () => {
     );
 
     expect(rowIds(root, 'message-row')).toEqual(['message-active']);
-    expect(rowIds(root, 'queued-message-row')).toEqual(['message-queued-1', 'message-queued-2']);
+    expect(rowIds(root, 'queued-message-row')).toEqual([
+      'message-queued-1',
+      'message-queued-2',
+    ]);
     expect(view.queuedQueueItems.map((item) => item.id)).toEqual([
       'queue-queued-1',
       'queue-queued-2',
     ]);
+    expect(root.querySelector('[data-testid="queue-summary"]')?.textContent).toContain(
+      '2 messages queued',
+    );
   });
 
   it('renders upload caption attachments and then the follow-up turn', () => {

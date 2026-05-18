@@ -359,18 +359,25 @@ interface QueueItem {
   fallbackModel?: string | null;
   turnId?: string | null;
   turnStatus?: AgentConversationChatView['entries'][number]['status'];
+  queuePosition?: number | null;
+  execution?: {
+    turnId: string | null;
+    queue: {
+      id: string | null;
+      status: string;
+      position: number | null;
+      runId: string | null;
+      attempts: number | null;
+      maxAttempts: number | null;
+      nextAttemptAt: string | null;
+      startedAt: string | null;
+      completedAt: string | null;
+      usedFallback: boolean;
+      fallbackModel: string | null;
+    };
+    run: { id: string; turnId: string | null } | null;
+  };
   availableActions?: AgentConversationChatView['entries'][number]['availableActions'];
-}
-
-interface AgentRunSummary {
-  id: string;
-  agentId?: string;
-  conversationId: string | null;
-  responseParentId?: string | null;
-  status: 'running' | 'completed' | 'error';
-  startedAt: string;
-  finishedAt: string | null;
-  errorMessage: string | null;
 }
 
 interface EditMessageResponse {
@@ -2036,29 +2043,10 @@ function getLatestCanonicalUserMessageId(view: AgentConversationChatView | null)
   return null;
 }
 
-function getLegacyLastPersistedUserMessageId(
-  messages: ChatMessage[],
-  optimisticMessages: ChatMessage[],
-): string | null {
-  const optimisticIds = new Set(optimisticMessages.map((message) => message.id));
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.direction !== 'outbound') continue;
-    if (optimisticIds.has(message.id)) continue;
-    return message.id;
-  }
-  return null;
-}
-
 function getAppendParentUserMessageId(options: {
   canonicalView: AgentConversationChatView | null;
-  messages: ChatMessage[];
-  optimisticMessages: ChatMessage[];
 }): string | null {
-  return (
-    getLatestCanonicalUserMessageId(options.canonicalView) ??
-    getLegacyLastPersistedUserMessageId(options.messages, options.optimisticMessages)
-  );
+  return getLatestCanonicalUserMessageId(options.canonicalView);
 }
 
 function buildOptimisticChatMessage(params: {
@@ -2511,7 +2499,6 @@ export function AgentsPage() {
   const [pendingConversationKeys, setPendingConversationKeys] = useState<Set<string>>(new Set());
   const [runHandoffKeys, setRunHandoffKeys] = useState<Set<string>>(new Set());
   const [stoppingRun, setStoppingRun] = useState(false);
-  const [activeConversationRuns, setActiveConversationRuns] = useState<AgentRunSummary[]>([]);
   const [renamingConversation, setRenamingConversation] = useState<{
     agentId: string;
     conversationId: string;
@@ -2560,7 +2547,6 @@ export function AgentsPage() {
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [savingQueueItemId, setSavingQueueItemId] = useState<string | null>(null);
   const [deletingQueueItemIds, setDeletingQueueItemIds] = useState<Set<string>>(new Set());
-  const [clearingQueuedItems, setClearingQueuedItems] = useState(false);
 
   // ── Skills manager (page-level) ──
   const [skillsManagerOpen, setSkillsManagerOpen] = useState(false);
@@ -2738,7 +2724,6 @@ export function AgentsPage() {
       setQueueItems([]);
       setSavingQueueItemId(null);
       setDeletingQueueItemIds(new Set());
-      setClearingQueuedItems(false);
       setEditingMessage(null);
       setMobileChatOpen(!!(agentId && conversationId));
       // Expand the active agent so the selected conversation is visible in the sidebar
@@ -2903,24 +2888,10 @@ export function AgentsPage() {
     () =>
       buildAgentConversationViewModel({
         canonicalView: canonicalChatView,
-        messages,
-        queueItems,
-        activeConversationRuns,
         activeAgentId,
         activeConvId,
-        activeConversationKey,
-        optimisticResponseParentIds,
       }),
-    [
-      activeAgentId,
-      activeConvId,
-      activeConversationKey,
-      activeConversationRuns,
-      canonicalChatView,
-      messages,
-      optimisticResponseParentIds,
-      queueItems,
-    ],
+    [activeAgentId, activeConvId, canonicalChatView],
   );
   const activeMessageIds = useMemo(
     () => new Set(visibleMessages.map((message) => message.id)),
@@ -3333,10 +3304,9 @@ export function AgentsPage() {
         if (!isActiveConversation(agentId, conversationId)) return;
         if (requestToken !== activeMessagesRequestTokenRef.current) return;
         const conversationKey = agentConversationKey(agentId, conversationId);
+        const canonicalEntries = flattenCanonicalChatViewMessages(data);
         const optimisticMessages =
           optimisticMessagesByConversationRef.current[conversationKey] ?? [];
-        const canonicalEntries = flattenCanonicalChatViewMessages(data);
-        const mergedEntries = mergeMessagesWithOptimistic(canonicalEntries, optimisticMessages);
         if (optimisticMessages.length > 0) {
           const persistedIds = new Set(canonicalEntries.map((message) => message.id));
           const remainingOptimisticMessages = optimisticMessages.filter(
@@ -3347,7 +3317,7 @@ export function AgentsPage() {
         const handoffStartedAt = runHandoffStartedAtRef.current.get(conversationKey) ?? null;
         if (
           handoffStartedAt !== null &&
-          mergedEntries.some(
+          canonicalEntries.some(
             (message) =>
               message.direction === 'inbound' &&
               message.type !== 'system' &&
@@ -3357,13 +3327,13 @@ export function AgentsPage() {
           clearRunHandoff(agentId, conversationId);
         }
         setCanonicalChatView(data);
-        // Skip update if message list hasn't changed (avoids dropping optimistic
-        // temp messages and prevents unnecessary re-renders during polling).
+        // Skip update if message list hasn't changed and avoid unnecessary
+        // re-renders during polling.
         const prev = messagesRef2.current;
         if (
-          prev.length === mergedEntries.length &&
+          prev.length === canonicalEntries.length &&
           prev.every((m, i) => {
-            const next = mergedEntries[i];
+            const next = canonicalEntries[i];
             return (
               m.id === next.id &&
               m.content === next.content &&
@@ -3379,7 +3349,7 @@ export function AgentsPage() {
         ) {
           return;
         }
-        setActiveConversationMessages(agentId, conversationId, mergedEntries);
+        setActiveConversationMessages(agentId, conversationId, canonicalEntries);
       } catch {
         if (!isActiveConversation(agentId, conversationId)) return;
         setChatError('Failed to load messages');
@@ -3436,39 +3406,15 @@ export function AgentsPage() {
     [isActiveConversation, setActiveConversationQueueItems],
   );
 
-  const fetchConversationRun = useCallback(
-    async (agentId: string, conversationId: string) => {
-      try {
-        const params = new URLSearchParams({
-          agentId,
-          conversationId,
-          status: 'running',
-          limit: '50',
-        });
-        const data = await api<{ entries: AgentRunSummary[] }>(`/agent-runs?${params.toString()}`);
-        if (!isActiveConversation(agentId, conversationId)) return;
-
-        setActiveConversationRuns(data.entries);
-      } catch {
-        if (!isActiveConversation(agentId, conversationId)) return;
-        setActiveConversationRuns([]);
-      } finally {
-        // no-op
-      }
-    },
-    [isActiveConversation],
-  );
-
   const syncActiveConversation = useCallback(
     async (agentId: string, conversationId: string, options?: { silent?: boolean }) => {
       await Promise.all([
         fetchMessages(agentId, conversationId, options),
         fetchQueueItems(agentId, conversationId),
         fetchConversations(agentId),
-        fetchConversationRun(agentId, conversationId),
       ]);
     },
-    [fetchConversationRun, fetchConversations, fetchMessages, fetchQueueItems],
+    [fetchConversations, fetchMessages, fetchQueueItems],
   );
 
   useEffect(() => {
@@ -3514,42 +3460,6 @@ export function AgentsPage() {
         next.delete(itemId);
         return next;
       });
-    }
-  }
-
-  async function handleClearQueue() {
-    const agentId = activeAgentId;
-    const conversationId = activeConvId;
-    const queuedItemIds = queuedQueueItems.map((item) => item.id);
-    const removedMessageIds = queuedQueueItems.map((item) => item.queuedMessageId ?? null);
-    if (!agentId || !conversationId || queuedItemIds.length === 0) return;
-    setClearingQueuedItems(true);
-    try {
-      await Promise.all(
-        queuedItemIds.map((itemId) =>
-          api(`/agents/${agentId}/chat/queue/${itemId}`, {
-            method: 'DELETE',
-            body: JSON.stringify({ conversationId }),
-          }),
-        ),
-      );
-      setEditingMessage((prev) =>
-        prev?.kind === 'queue' && queuedItemIds.includes(prev.queueItemId) ? null : prev,
-      );
-      for (const removedMessageId of removedMessageIds) {
-        removeOptimisticMessage(agentId, conversationId, removedMessageId);
-      }
-      setActiveConversationQueueItems(agentId, conversationId, (prev) =>
-        prev.filter((item) => !queuedItemIds.includes(item.id)),
-      );
-      setChatError(null);
-      await syncActiveConversation(agentId, conversationId, { silent: true });
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Failed to clear queued messages';
-      setChatError(message);
-      toast.error(message);
-    } finally {
-      setClearingQueuedItems(false);
     }
   }
 
@@ -3751,16 +3661,6 @@ export function AgentsPage() {
       window.clearInterval(intervalId);
     };
   }, [agents, refreshAllConversations]);
-
-  useEffect(() => {
-    setActiveConversationRuns([]);
-
-    if (!activeAgentId || !activeConvId) {
-      return;
-    }
-
-    void fetchConversationRun(activeAgentId, activeConvId);
-  }, [activeAgentId, activeConvId, fetchConversationRun]);
 
   useEffect(() => {
     if (!activeAgentId || !activeConvId || streaming) return;
@@ -4008,7 +3908,6 @@ export function AgentsPage() {
           fetchMessages(result.agentId, result.conversationId, { silent: true }),
           fetchQueueItems(result.agentId, result.conversationId),
           fetchConversations(result.agentId),
-          fetchConversationRun(result.agentId, result.conversationId),
         ]);
         setHighlightedMessageId(result.messageId);
       } catch {
@@ -4016,7 +3915,6 @@ export function AgentsPage() {
       }
     },
     [
-      fetchConversationRun,
       fetchConversations,
       fetchMessages,
       fetchQueueItems,
@@ -4279,7 +4177,6 @@ export function AgentsPage() {
       clearRunHandoff(activeAgentId, activeConvId);
       clearConversationPending(activeAgentId, activeConvId);
       setOptimisticResponseParent(activeAgentId, activeConvId, null);
-      setActiveConversationRuns((prev) => prev.filter((run) => run.id !== stoppedRunId));
       setActiveConversationQueueItems(activeAgentId, activeConvId, (prev) =>
         prev.map((item) =>
           item.runId === stoppedRunId
@@ -4298,7 +4195,6 @@ export function AgentsPage() {
       await Promise.all([
         fetchMessages(activeAgentId, activeConvId),
         fetchConversations(activeAgentId),
-        fetchConversationRun(activeAgentId, activeConvId),
         fetchQueueItems(activeAgentId, activeConvId),
       ]);
     } catch {
@@ -4317,11 +4213,6 @@ export function AgentsPage() {
       const messageId = `upload-${Date.now()}-${generateId()}`;
       const previousUserMessageId = getAppendParentUserMessageId({
         canonicalView: canonicalChatView,
-        messages: messagesRef2.current,
-        optimisticMessages:
-          optimisticMessagesByConversationRef.current[
-            agentConversationKey(sentAgentId, sentConvId)
-          ] ?? [],
       });
       setChatError(null);
       requestAutoScrollToBottom();
@@ -4430,11 +4321,6 @@ export function AgentsPage() {
       const messageId = `direct-${Date.now()}-${generateId()}`;
       const previousUserMessageId = getAppendParentUserMessageId({
         canonicalView: canonicalChatView,
-        messages: messagesRef2.current,
-        optimisticMessages:
-          optimisticMessagesByConversationRef.current[
-            agentConversationKey(sentAgentId, sentConvId)
-          ] ?? [],
       });
       setChatError(null);
       requestAutoScrollToBottom();
@@ -4718,7 +4604,6 @@ export function AgentsPage() {
       await Promise.all([
         fetchConversations(sentAgentId),
         fetchQueueItems(sentAgentId, sentConvId),
-        fetchConversationRun(sentAgentId, sentConvId),
       ]);
     } catch (err) {
       clearRunHandoff(sentAgentId, sentConvId);
@@ -6307,6 +6192,26 @@ export function AgentsPage() {
                           effectivePendingBranchExecutionsByMessageId.get(msg.id) ?? [];
                         const editableBranchQueueItem =
                           pendingBranchExecutions.find((item) => item.status === 'queued') ?? null;
+                        const transcriptExecutionItem =
+                          msg.direction === 'outbound'
+                            ? (pendingBranchExecutions.find(
+                                (item) =>
+                                  item.status === 'queued' || item.status === 'processing',
+                              ) ?? null)
+                            : null;
+                        const isQueuedTranscriptMessage =
+                          transcriptExecutionItem?.status === 'queued';
+                        const isProcessingTranscriptMessage =
+                          transcriptExecutionItem?.status === 'processing';
+                        const transcriptExecutionItemId = transcriptExecutionItem?.id ?? null;
+                        const isSavingTranscriptExecutionItem =
+                          transcriptExecutionItemId != null &&
+                          savingQueueItemId === transcriptExecutionItemId;
+                        const isDeletingTranscriptExecutionItem =
+                          transcriptExecutionItemId != null &&
+                          deletingQueueItemIds.has(transcriptExecutionItemId);
+                        const isTranscriptExecutionBusy =
+                          isSavingTranscriptExecutionItem || isDeletingTranscriptExecutionItem;
 
                         return (
                           <Fragment key={msg.id}>
@@ -6315,8 +6220,17 @@ export function AgentsPage() {
                                 msg.direction === 'outbound'
                                   ? styles.messageRowUser
                                   : styles.messageRowAgent
-                              } ${highlightedMessageId === msg.id ? styles.messageRowHighlight : ''}`}
+                              } ${highlightedMessageId === msg.id ? styles.messageRowHighlight : ''} ${
+                                isQueuedTranscriptMessage ? styles.queuedMessageRow : ''
+                              }`}
+                              data-testid={
+                                isQueuedTranscriptMessage ? 'queued-message-row' : undefined
+                              }
                               data-message-id={msg.id}
+                              data-queue-item-id={transcriptExecutionItemId ?? ''}
+                              data-queue-status={transcriptExecutionItem?.status ?? ''}
+                              data-active-agent-id={activeAgentId ?? ''}
+                              data-active-conversation-id={activeConvId ?? ''}
                             >
                               <div className={styles.messageContent}>
                                 {/* Branch navigator */}
@@ -6411,6 +6325,28 @@ export function AgentsPage() {
                                       Stopped
                                     </span>
                                   )}
+                                  {transcriptExecutionItem && (
+                                    <span
+                                      className={`${styles.messageExecutionState} ${
+                                        isProcessingTranscriptMessage
+                                          ? styles.messageExecutionStateProcessing
+                                          : styles.messageExecutionStateQueued
+                                      }`}
+                                    >
+                                      {isProcessingTranscriptMessage ? (
+                                        <Loader size={11} className={styles.spinIcon} />
+                                      ) : (
+                                        <Clock size={11} aria-hidden />
+                                      )}
+                                      {isDeletingTranscriptExecutionItem
+                                        ? 'Removing…'
+                                        : isSavingTranscriptExecutionItem
+                                          ? 'Saving…'
+                                          : isProcessingTranscriptMessage
+                                            ? 'Processing…'
+                                            : `Queued #${transcriptExecutionItem.queuePosition ?? 1}`}
+                                    </span>
+                                  )}
                                   {isEditableChatMessage(msg) && (
                                     <button
                                       className={styles.editMsgBtn}
@@ -6436,6 +6372,47 @@ export function AgentsPage() {
                                       <Pencil size={12} />
                                     </button>
                                   )}
+                                  {isQueuedTranscriptMessage &&
+                                    transcriptExecutionItem?.availableActions?.includes(
+                                      'delete_queue_item',
+                                    ) && (
+                                      <Tooltip
+                                        label={
+                                          isTranscriptExecutionBusy
+                                            ? 'Please wait'
+                                            : 'Remove from queue'
+                                        }
+                                      >
+                                        <span
+                                          className={
+                                            isTranscriptExecutionBusy
+                                              ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                              : styles.queuedIconBtnWrap
+                                          }
+                                        >
+                                          <button
+                                            type="button"
+                                            className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
+                                            onClick={() =>
+                                              void handleDeleteQueueItem(transcriptExecutionItem.id)
+                                            }
+                                            disabled={
+                                              isTranscriptExecutionBusy ||
+                                              editingMessage?.isSubmitting
+                                            }
+                                            style={
+                                              isTranscriptExecutionBusy ||
+                                              editingMessage?.isSubmitting
+                                                ? { pointerEvents: 'none' }
+                                                : undefined
+                                            }
+                                            aria-label="Remove queued message"
+                                          >
+                                            <Trash2 size={12} />
+                                          </button>
+                                        </span>
+                                      </Tooltip>
+                                    )}
                                   {msg.direction === 'inbound' && (
                                     <>
                                       {monitorRunId && (
@@ -6661,38 +6638,6 @@ export function AgentsPage() {
                                   <Clock size={12} aria-hidden />
                                   {queueItemsLabel(queuedMessages.length)}
                                 </span>
-                                {queuedQueueItems.length > 1 && (
-                                  <Tooltip
-                                    label={
-                                      clearingQueuedItems
-                                        ? 'Removing queued messages'
-                                        : 'Remove all queued messages'
-                                    }
-                                  >
-                                    <span
-                                      className={
-                                        clearingQueuedItems
-                                          ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                          : styles.queuedIconBtnWrap
-                                      }
-                                    >
-                                      <button
-                                        type="button"
-                                        className={styles.inlineQueueClearAllBtn}
-                                        onClick={() => void handleClearQueue()}
-                                        disabled={clearingQueuedItems}
-                                        style={
-                                          clearingQueuedItems
-                                            ? { pointerEvents: 'none' }
-                                            : undefined
-                                        }
-                                        aria-label="Remove all queued messages"
-                                      >
-                                        Clear all
-                                      </button>
-                                    </span>
-                                  </Tooltip>
-                                )}
                               </div>
                             </div>
                           </div>
@@ -6703,8 +6648,7 @@ export function AgentsPage() {
                               queueItemId != null && savingQueueItemId === queueItemId;
                             const isDeletingQueuedItem =
                               queueItemId != null && deletingQueueItemIds.has(queueItemId);
-                            const isQueuedItemBusy =
-                              isSavingQueuedItem || isDeletingQueuedItem || clearingQueuedItems;
+                            const isQueuedItemBusy = isSavingQueuedItem || isDeletingQueuedItem;
                             const isProcessingQueuedItem = status === 'processing';
 
                             return (
@@ -6760,7 +6704,7 @@ export function AgentsPage() {
                                           ? 'Saving…'
                                           : isProcessingQueuedItem
                                             ? 'Processing…'
-                                            : `Queued #${idx + 1}`}
+                                            : `Queued #${queueItem?.queuePosition ?? idx + 1}`}
                                     </span>
                                     <span>
                                       {new Date(
@@ -6770,15 +6714,13 @@ export function AgentsPage() {
                                         minute: '2-digit',
                                       })}
                                     </span>
-                                    {(queueItem || isProcessingQueuedItem) && (
+                                    {queueItem && (
                                       <>
                                         <Tooltip
                                           label={
-                                            isProcessingQueuedItem
-                                              ? 'Edit message'
-                                              : isQueuedItemBusy
-                                                ? 'Please wait'
-                                                : 'Edit queued message'
+                                            isQueuedItemBusy
+                                              ? 'Please wait'
+                                              : 'Edit queued message'
                                           }
                                         >
                                           <span
@@ -6791,15 +6733,9 @@ export function AgentsPage() {
                                             <button
                                               type="button"
                                               className={styles.editMsgBtn}
-                                              onClick={() => {
-                                                if (isProcessingQueuedItem) {
-                                                  startEditingMessage(message);
-                                                  return;
-                                                }
-                                                if (queueItem) {
-                                                  startEditingQueuedMessage(message, queueItem);
-                                                }
-                                              }}
+                                              onClick={() =>
+                                                startEditingQueuedMessage(message, queueItem)
+                                              }
                                               disabled={
                                                 isQueuedItemBusy || editingMessage?.isSubmitting
                                               }
@@ -6808,54 +6744,46 @@ export function AgentsPage() {
                                                   ? { pointerEvents: 'none' }
                                                   : undefined
                                               }
-                                              aria-label={
-                                                isProcessingQueuedItem
-                                                  ? 'Edit message'
-                                                  : 'Edit queued message'
-                                              }
+                                              aria-label="Edit queued message"
                                             >
                                               <Pencil size={12} />
                                             </button>
                                           </span>
                                         </Tooltip>
-                                        {queueItem && (
-                                          <Tooltip
-                                            label={
-                                              isProcessingQueuedItem
-                                                ? 'Processing'
-                                                : isQueuedItemBusy
-                                                  ? 'Please wait'
-                                                  : 'Remove from queue'
+                                        <Tooltip
+                                          label={
+                                            isQueuedItemBusy
+                                              ? 'Please wait'
+                                              : 'Remove from queue'
+                                          }
+                                        >
+                                          <span
+                                            className={
+                                              isQueuedItemBusy
+                                                ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
+                                                : styles.queuedIconBtnWrap
                                             }
                                           >
-                                            <span
-                                              className={
-                                                isQueuedItemBusy
-                                                  ? `${styles.queuedIconBtnWrap} ${styles.queuedIconBtnWrapNotAllowed}`
-                                                  : styles.queuedIconBtnWrap
+                                            <button
+                                              type="button"
+                                              className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
+                                              onClick={() =>
+                                                void handleDeleteQueueItem(queueItem.id)
                                               }
+                                              disabled={
+                                                isQueuedItemBusy || editingMessage?.isSubmitting
+                                              }
+                                              style={
+                                                isQueuedItemBusy || editingMessage?.isSubmitting
+                                                  ? { pointerEvents: 'none' }
+                                                  : undefined
+                                              }
+                                              aria-label="Remove queued message"
                                             >
-                                              <button
-                                                type="button"
-                                                className={`${styles.copyBtn} ${styles.queueRemoveBtn}`}
-                                                onClick={() =>
-                                                  void handleDeleteQueueItem(queueItem.id)
-                                                }
-                                                disabled={
-                                                  isProcessingQueuedItem || isQueuedItemBusy
-                                                }
-                                                style={
-                                                  isProcessingQueuedItem || isQueuedItemBusy
-                                                    ? { pointerEvents: 'none' }
-                                                    : undefined
-                                                }
-                                                aria-label="Remove queued message"
-                                              >
-                                                <Trash2 size={12} />
-                                              </button>
-                                            </span>
-                                          </Tooltip>
-                                        )}
+                                              <Trash2 size={12} />
+                                            </button>
+                                          </span>
+                                        </Tooltip>
                                       </>
                                     )}
                                   </div>
@@ -6865,6 +6793,7 @@ export function AgentsPage() {
                           })}
                         </>
                       )}
+
                     </div>
                   )}
 

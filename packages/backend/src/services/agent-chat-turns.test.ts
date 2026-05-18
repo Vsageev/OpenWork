@@ -53,6 +53,7 @@ import {
   createReplacementAgentChatTurn,
   listAgentChatTurns,
   markAgentChatTurnStopped,
+  validateAgentChatTurnChains,
 } from './agent-chat-turns.js';
 
 describe('agent chat turns', () => {
@@ -448,5 +449,264 @@ describe('agent chat turns', () => {
     expect(parsedMetadata.activeBranches).toMatchObject({
       'user:message-root': 'message-latest-child',
     });
+  });
+
+  it('migrates message-only and parentId-only legacy chains with attachments idempotently', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({ agentId: 'agent-1' }),
+      lastMessageAt: '2026-05-16T12:04:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-root',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'file',
+      content: 'Attached prompt',
+      attachments: [{ type: 'file', storagePath: '/chat-uploads/spec.txt' }],
+      parentId: null,
+      previousUserMessageId: null,
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'assistant-root',
+      conversationId: 'conversation-1',
+      direction: 'inbound',
+      type: 'text',
+      content: 'Attached response',
+      parentId: 'message-root',
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-child',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      content: 'Parent id only follow-up',
+      parentId: 'assistant-root',
+      previousUserMessageId: null,
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'assistant-child',
+      conversationId: 'conversation-1',
+      direction: 'inbound',
+      type: 'text',
+      content: 'Second response',
+      parentId: 'message-child',
+      createdAt: '2026-05-16T12:03:00.000Z',
+    });
+
+    const first = backfillLegacyAgentChatTurns();
+    const turns = listAgentChatTurns('agent-1', 'conversation-1');
+    const second = backfillLegacyAgentChatTurns();
+
+    expect(first).toMatchObject({ migrated: 1, created: 2, invalid: 0 });
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({
+      userMessageId: 'message-root',
+      assistantMessageId: 'assistant-root',
+      source: 'legacy_message',
+    });
+    expect(turns[1]).toMatchObject({
+      parentTurnId: turns[0].id,
+      userMessageId: 'message-child',
+      assistantMessageId: 'assistant-child',
+      source: 'legacy_message',
+    });
+    expect(mocks.store.getById('messages', 'message-root')?.attachments).toEqual([
+      { type: 'file', storagePath: '/chat-uploads/spec.txt' },
+    ]);
+    expect(second).toMatchObject({ migrated: 0, created: 0, invalid: 0 });
+    expect(listAgentChatTurns('agent-1', 'conversation-1')).toHaveLength(2);
+  });
+
+  it('migrates queued-only, failed, and stopped legacy execution rows', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({ agentId: 'agent-1' }),
+      lastMessageAt: '2026-05-16T12:05:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-failed',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      content: 'Will fail',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-stopped',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      content: 'Will stop',
+      previousUserMessageId: 'message-failed',
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-only',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'queued',
+      prompt: 'Queued but no message yet',
+      createdAt: '2026-05-16T11:59:00.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-failed',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      triggerType: 'chat',
+      status: 'error',
+      errorMessage: 'Model failed',
+      responseParentId: 'message-failed',
+      startedAt: '2026-05-16T12:00:30.000Z',
+      finishedAt: '2026-05-16T12:01:00.000Z',
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-stopped',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      triggerType: 'chat',
+      status: 'error',
+      errorMessage: 'Killed by user',
+      killedByUser: true,
+      responseParentId: 'message-stopped',
+      startedAt: '2026-05-16T12:02:30.000Z',
+      finishedAt: '2026-05-16T12:03:00.000Z',
+    });
+
+    const report = backfillLegacyAgentChatTurns();
+    const turns = listAgentChatTurns('agent-1', 'conversation-1');
+
+    expect(report).toMatchObject({ migrated: 1, invalid: 0, updatedQueueItems: 1, updatedRuns: 2 });
+    expect(turns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          userMessageId: null,
+          status: 'queued',
+          source: 'legacy_queue',
+        }),
+        expect.objectContaining({
+          userMessageId: 'message-failed',
+          status: 'failed',
+          runId: 'run-failed',
+        }),
+        expect.objectContaining({
+          userMessageId: 'message-stopped',
+          status: 'stopped',
+          runId: 'run-stopped',
+        }),
+      ]),
+    );
+    expect(mocks.store.getById('agentChatQueue', 'queue-only')?.turnId).toBeTruthy();
+    expect(mocks.store.getById('agent_runs', 'run-failed')?.turnId).toBeTruthy();
+    expect(mocks.store.getById('agent_runs', 'run-stopped')?.turnId).toBeTruthy();
+  });
+
+  it('leaves mixed canonical conversations unchanged while migrating missing legacy rows', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({ agentId: 'agent-1' }),
+      lastMessageAt: '2026-05-16T12:03:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-canonical',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      content: 'Existing turn',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    createAgentChatTurn({
+      id: 'turn-canonical',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-canonical',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('messages', {
+      id: 'message-legacy',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      type: 'text',
+      content: 'Legacy missing turn',
+      previousUserMessageId: 'message-canonical',
+      createdAt: '2026-05-16T12:02:00.000Z',
+    });
+
+    const report = backfillLegacyAgentChatTurns();
+    const turns = listAgentChatTurns('agent-1', 'conversation-1');
+
+    expect(report).toMatchObject({ migrated: 1, created: 1, invalid: 0 });
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({ id: 'turn-canonical', userMessageId: 'message-canonical' });
+    expect(turns[1]).toMatchObject({
+      parentTurnId: 'turn-canonical',
+      userMessageId: 'message-legacy',
+    });
+  });
+
+  it('reports invalid legacy rows and broken turn chains without silently dropping ids', () => {
+    mocks.store.insert('conversations', {
+      id: 'conversation-1',
+      channelType: 'agent',
+      metadata: JSON.stringify({ agentId: 'agent-1' }),
+      lastMessageAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-bad',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'queued',
+      queuedMessageId: 'missing-message',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    mocks.store.insert('agentChatTurns', {
+      id: 'turn-broken',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      parentTurnId: 'missing-parent-turn',
+      userMessageId: null,
+      assistantMessageId: null,
+      status: 'completed',
+      runId: null,
+      source: 'user',
+      createdById: null,
+      turnType: 'follow_up',
+      supersedesTurnId: null,
+      metadata: {},
+      startedAt: null,
+      completedAt: null,
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+
+    const report = backfillLegacyAgentChatTurns();
+
+    expect(report.invalid).toBe(1);
+    expect(report.invalidRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conversationId: 'conversation-1',
+          queueItemId: 'queue-bad',
+          messageId: 'missing-message',
+          code: 'queue_user_message_missing',
+        }),
+        expect.objectContaining({
+          conversationId: 'conversation-1',
+          turnId: 'turn-broken',
+          code: 'turn_parent_missing',
+        }),
+      ]),
+    );
+    expect(validateAgentChatTurnChains().some((issue) => issue.code === 'turn_parent_missing')).toBe(
+      true,
+    );
   });
 });

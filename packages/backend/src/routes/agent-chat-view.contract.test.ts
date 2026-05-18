@@ -4,6 +4,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerErrorHandler } from '../plugins/error-handler.js';
 import { agentChatRoutes } from './agent-chat.js';
+import { backfillLegacyAgentChatTurns } from '../services/agent-chat-turns.js';
 
 type RecordMap = Map<string, Map<string, Record<string, unknown>>>;
 
@@ -140,6 +141,168 @@ function addTurn(id: string, patch: Record<string, unknown>) {
 describe('agent chat canonical view endpoint', () => {
   beforeEach(() => {
     mocks.store.reset();
+  });
+
+  it('shows no synthetic legacy rows before migration and real turn rows after backfill', async () => {
+    seedAgentConversation();
+    addMessage('legacy-user-1', {
+      content: 'Legacy prompt',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    addMessage('legacy-assistant-1', {
+      direction: 'inbound',
+      content: 'Legacy response',
+      parentId: 'legacy-user-1',
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+
+    const app = await buildRouteApp();
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/agents/agent-1/chat/conversations/conversation-1/view',
+    });
+    expect(before.statusCode).toBe(200);
+    expect(JSON.parse(before.body)).toMatchObject({ total: 0, entries: [] });
+
+    const report = backfillLegacyAgentChatTurns();
+    const after = await app.inject({
+      method: 'GET',
+      url: '/api/agents/agent-1/chat/conversations/conversation-1/view',
+    });
+
+    expect(report).toMatchObject({ migrated: 1, created: 1, invalid: 0 });
+    expect(after.statusCode).toBe(200);
+    expect(JSON.parse(after.body).entries).toEqual([
+      expect.objectContaining({
+        userMessage: expect.objectContaining({ id: 'legacy-user-1' }),
+        assistantMessage: expect.objectContaining({ id: 'legacy-assistant-1' }),
+      }),
+    ]);
+
+    await app.close();
+  });
+
+  it('does not let unlinked raw messages, queue rows, or runs synthesize canonical transcript state', async () => {
+    seedAgentConversation();
+    addMessage('turn-user', {
+      content: 'Only the turn-linked user message is visible',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    addMessage('raw-assistant-by-parent', {
+      direction: 'inbound',
+      content: 'must not attach by parentId',
+      parentId: 'turn-user',
+      metadata: JSON.stringify({ runId: 'run-by-response-parent' }),
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+    addMessage('raw-user-without-turn', {
+      content: 'must not become a transcript row',
+      createdAt: '2026-05-16T11:00:00.000Z',
+    });
+    addTurn('turn-canonical', {
+      userMessageId: 'turn-user',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:30.000Z',
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-by-message-id',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'processing',
+      queuedMessageId: 'turn-user',
+      runId: 'run-by-response-parent',
+      attempts: 1,
+      maxAttempts: 3,
+    });
+    mocks.store.insert('agentChatQueue', {
+      id: 'queue-standalone',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      mode: 'append_prompt',
+      status: 'queued',
+      queuedMessageId: 'raw-user-without-turn',
+      attempts: 0,
+      maxAttempts: 3,
+    });
+    mocks.store.insert('agent_runs', {
+      id: 'run-by-response-parent',
+      agentId: 'agent-1',
+      agentName: 'Test Agent',
+      triggerType: 'chat',
+      status: 'running',
+      conversationId: 'conversation-1',
+      responseParentId: 'turn-user',
+      startedAt: '2026-05-16T12:01:30.000Z',
+    });
+
+    const app = await buildRouteApp();
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/agents/agent-1/chat/conversations/conversation-1/view',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.entries).toHaveLength(1);
+    expect(body.entries[0]).toMatchObject({
+      id: 'turn-canonical',
+      status: 'completed',
+      userMessage: { id: 'turn-user' },
+      assistantMessage: null,
+      execution: {
+        queue: null,
+        run: null,
+      },
+    });
+    expect(body.entries.map((turn: Record<string, unknown>) => turn.id)).not.toContain(
+      'queue-standalone',
+    );
+    expect(
+      body.entries.map((turn: { userMessage?: { id?: string } | null }) => turn.userMessage?.id),
+    ).not.toContain('raw-user-without-turn');
+
+    await app.close();
+  });
+
+  it('ignores legacy message-id activeBranches when selecting canonical turn branches', async () => {
+    seedAgentConversation('conversation-1', {
+      activeBranches: { 'user:__root__': 'legacy-selected-user' },
+    });
+    addMessage('legacy-selected-user', {
+      content: 'legacy selected user key must not win',
+      createdAt: '2026-05-16T12:00:00.000Z',
+    });
+    addMessage('canonical-user', {
+      content: 'latest canonical turn wins without a turn key',
+      createdAt: '2026-05-16T12:01:00.000Z',
+    });
+    addTurn('turn-legacy-selected', {
+      userMessageId: 'legacy-selected-user',
+      status: 'completed',
+      createdAt: '2026-05-16T12:00:30.000Z',
+    });
+    addTurn('turn-canonical-latest', {
+      userMessageId: 'canonical-user',
+      status: 'completed',
+      createdAt: '2026-05-16T12:01:30.000Z',
+    });
+
+    const app = await buildRouteApp();
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/agents/agent-1/chat/conversations/conversation-1/view',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().entries).toEqual([
+      expect.objectContaining({
+        id: 'turn-canonical-latest',
+        userMessage: expect.objectContaining({ id: 'canonical-user' }),
+      }),
+    ]);
+
+    await app.close();
   });
 
   it('returns ordered turn rows with completed, queued, processing, failed, and stopped controls', async () => {
@@ -320,6 +483,45 @@ describe('agent chat canonical view endpoint', () => {
       id: 'assistant-1',
       content: 'completed response',
     });
+    expect(body.entries[1].execution.queue).toMatchObject({
+      id: 'queue-2',
+      turnId: 'turn-2',
+      position: 1,
+      runId: null,
+    });
+    expect(body.entries[2].execution.queue).toMatchObject({
+      id: 'queue-3',
+      turnId: 'turn-3',
+      position: 2,
+      runId: 'run-3',
+    });
+    expect(body.entries[2].execution.run).toMatchObject({
+      id: 'run-3',
+      turnId: 'turn-3',
+      status: 'running',
+    });
+
+    const queueResponse = await app.inject({
+      method: 'GET',
+      url: '/api/agents/agent-1/chat/conversations/conversation-1/queue',
+    });
+    expect(queueResponse.statusCode).toBe(200);
+    const queueBody = queueResponse.json();
+    expect(queueBody.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'queue-2',
+          turnId: 'turn-2',
+          queuePosition: 1,
+          execution: expect.objectContaining({
+            turnId: 'turn-2',
+            queue: expect.objectContaining({ id: 'queue-2', position: 1 }),
+          }),
+        }),
+      ]),
+    );
+    expect(queueBody.entries[0]).not.toHaveProperty('message');
+    expect(queueBody.entries[0]).not.toHaveProperty('userMessage');
 
     await app.close();
   });

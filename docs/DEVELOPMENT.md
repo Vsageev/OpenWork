@@ -5,6 +5,8 @@ General dev setup, commands, and troubleshooting. For module-specific guidance, 
 - [Runbook](./RUNBOOK.md) — stale process cleanup, common issues, quick fixes
 - [Backend Development](./backend-development.md) — routes, services, error handling, implementation patterns
 - [Design System](./design-system.md) — colors, typography, components, animation rules
+- [Agent Chat Turns ADR](./agent-chat-turns-adr.md) — canonical chat transcript model
+- [Agent Chat Cutover Checklist](./agent-chat-cutover-checklist.md) — staging/production migration validation
 
 ## Quick Start
 

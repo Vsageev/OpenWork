@@ -33,12 +33,10 @@ import {
   reorderQueueItems,
   getGlobalRunningAgentCount,
   getMaxConcurrentAgentLimit,
-  getActiveMessagePath,
   editMessageAndBranch,
   switchBranch,
   switchBranchTurn,
   activateMessagePathForSearchResult,
-  getPreviousUserMessageIdForConversationMessage,
   serializeAllConversationMessageEntries,
   enqueueAgentResponseToMessage,
   AgentChatError,
@@ -60,6 +58,131 @@ type ChatUploadAttachment = {
 };
 
 const MAX_CHAT_UPLOAD_ATTACHMENTS = 10;
+
+const chatViewStatusSchema = z.enum([
+  'queued',
+  'processing',
+  'completed',
+  'failed',
+  'stopped',
+  'superseded',
+]);
+const chatViewActionSchema = z.enum([
+  'edit_user_message',
+  'edit_queue_item',
+  'delete_queue_item',
+  'retry',
+  'stop',
+  'switch_branch',
+]);
+const chatViewMessageSchema = z
+  .object({
+    id: z.string(),
+    direction: z.enum(['inbound', 'outbound']),
+    type: z.string(),
+    content: z.string().nullable(),
+    status: z.string().nullable(),
+    metadata: z.unknown().nullable(),
+    attachments: z.unknown().nullable(),
+    createdAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+  })
+  .strict();
+const chatViewQueueSchema = z
+  .object({
+    id: z.string(),
+    turnId: z.string(),
+    status: z.string(),
+    position: z.number().nullable(),
+    runId: z.string().nullable(),
+    errorMessage: z.string().nullable(),
+    attempts: z.number().nullable(),
+    maxAttempts: z.number().nullable(),
+    nextAttemptAt: z.string().nullable(),
+    startedAt: z.string().nullable(),
+    completedAt: z.string().nullable(),
+    usedFallback: z.boolean(),
+    fallbackModel: z.string().nullable(),
+  })
+  .strict();
+const chatViewRunSchema = z
+  .object({
+    id: z.string(),
+    turnId: z.string().nullable(),
+    status: z.string(),
+    errorMessage: z.string().nullable(),
+    responseText: z.string().nullable(),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    durationMs: z.number().nullable(),
+  })
+  .strict();
+const chatViewSiblingSchema = z
+  .object({
+    turnId: z.string(),
+    userMessageId: z.string().nullable(),
+    status: chatViewStatusSchema,
+    turnType: z.string(),
+    supersedesTurnId: z.string().nullable(),
+    isSelected: z.boolean(),
+    createdAt: z.string().nullable(),
+  })
+  .strict();
+const chatViewTurnSchema = z
+  .object({
+    id: z.string(),
+    parentTurnId: z.string().nullable(),
+    status: chatViewStatusSchema,
+    turnType: z.string(),
+    userMessage: chatViewMessageSchema.nullable(),
+    assistantMessage: chatViewMessageSchema.nullable(),
+    execution: z
+      .object({
+        queue: chatViewQueueSchema.nullable(),
+        run: chatViewRunSchema.nullable(),
+      })
+      .strict(),
+    branch: z
+      .object({
+        parentTurnId: z.string().nullable(),
+        isSelected: z.boolean(),
+        siblingIndex: z.number(),
+        siblingCount: z.number(),
+        siblingIds: z.array(z.string()),
+        siblings: z.array(chatViewSiblingSchema),
+      })
+      .strict(),
+    edit: z
+      .object({
+        supersedesTurnId: z.string().nullable(),
+        supersededByTurnId: z.string().nullable(),
+        isSuperseded: z.boolean(),
+      })
+      .strict(),
+    availableActions: z.array(chatViewActionSchema),
+    createdAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+    startedAt: z.string().nullable(),
+    completedAt: z.string().nullable(),
+  })
+  .strict();
+const agentConversationChatViewResponseSchema = z
+  .object({
+    conversationId: z.string(),
+    agentId: z.string(),
+    total: z.number(),
+    entries: z.array(chatViewTurnSchema),
+    branches: z.array(
+      z
+        .object({
+          parentTurnId: z.string().nullable(),
+          selectedTurnId: z.string().nullable(),
+          turnIds: z.array(z.string()),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
 
 function chatAttachmentLimitExceededError() {
   return ApiError.badRequest(
@@ -120,17 +243,30 @@ function requireConversationExists(conversationId: string, agentId: string) {
   return conversation;
 }
 
-function serializeActivePathEntries(conversationId: string) {
-  return getActiveMessagePath(conversationId).map((msg) => ({
-    ...msg,
-    previousUserMessageId: getPreviousUserMessageIdForConversationMessage(conversationId, msg),
-    siblingIndex: msg._siblingIndex,
-    siblingCount: msg._siblingCount,
-    siblingIds: msg._siblingIds,
-    _siblingIndex: undefined,
-    _siblingCount: undefined,
-    _siblingIds: undefined,
-  }));
+function serializeCanonicalMessageEntries(agentId: string, conversationId: string) {
+  const view = getAgentConversationChatView(agentId, conversationId);
+  return view.entries.flatMap((turn) =>
+    [turn.userMessage, turn.assistantMessage].flatMap((message) => {
+      if (!message) return [];
+      return {
+        id: message.id,
+        direction: message.direction,
+        type: message.type,
+        content: message.content ?? '',
+        status: message.status,
+        metadata: message.metadata,
+        attachments: message.attachments,
+        createdAt: message.createdAt ?? turn.createdAt,
+        updatedAt: message.updatedAt,
+        parentId: message.direction === 'inbound' ? (turn.userMessage?.id ?? null) : null,
+        previousUserMessageId: null,
+        turnId: turn.id,
+        turnStatus: turn.status,
+        turnType: turn.turnType,
+        availableActions: turn.availableActions,
+      };
+    }),
+  );
 }
 
 function requirePromptRateLimit(requestUserId: string, agentId: string) {
@@ -300,6 +436,9 @@ export async function agentChatRoutes(app: FastifyInstance) {
         tags: ['Agent Chat'],
         summary: 'Get canonical chat turn view for an agent conversation',
         params: z.object({ id: z.string(), conversationId: z.string() }),
+        response: {
+          200: agentConversationChatViewResponseSchema,
+        },
       },
     },
     async (request, reply) => {
@@ -432,7 +571,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
       const entries =
         request.query.scope === 'all'
           ? serializeAllConversationMessageEntries(request.query.conversationId)
-          : serializeActivePathEntries(request.query.conversationId);
+          : serializeCanonicalMessageEntries(request.params.id, request.query.conversationId);
       const { limit, offset } = request.query;
       const paged = entries.slice(offset, offset + limit);
       return reply.send({ total: entries.length, limit, offset, entries: paged });
@@ -869,7 +1008,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
         const statusCode = willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
           message: newMessage,
-          entries: serializeActivePathEntries(request.params.cid),
+          entries: serializeCanonicalMessageEntries(request.params.id, request.params.cid),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {
@@ -976,7 +1115,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
         const statusCode = willQueueBehind ? 202 : 201;
         return reply.status(statusCode).send({
           message: newMessage,
-          entries: serializeActivePathEntries(request.params.cid),
+          entries: serializeCanonicalMessageEntries(request.params.id, request.params.cid),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {
@@ -1010,7 +1149,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
 
       try {
         activateMessagePathForSearchResult(request.params.cid, request.body.messageId);
-        const entries = serializeActivePathEntries(request.params.cid);
+        const entries = serializeCanonicalMessageEntries(request.params.id, request.params.cid);
         return reply.send({ entries });
       } catch (err) {
         rethrowAgentChatError(err);
@@ -1047,7 +1186,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
         } else {
           switchBranch(request.params.cid, request.body.messageId!);
         }
-        const entries = serializeActivePathEntries(request.params.cid);
+        const entries = serializeCanonicalMessageEntries(request.params.id, request.params.cid);
         return reply.send({ entries });
       } catch (err) {
         rethrowAgentChatError(err);
@@ -1134,7 +1273,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
         return reply.status(statusCode).send({
           status: 'queued',
           message: queued.userMessage,
-          entries: serializeActivePathEntries(conversationId),
+          entries: serializeCanonicalMessageEntries(request.params.id, conversationId),
           queueItem: queued.queueItem,
           queuedCount: queued.queuedCount,
           concurrency: {

@@ -28,7 +28,9 @@ interface ChatViewMessage {
 
 interface ChatViewExecutionQueue {
   id: string;
+  turnId: string;
   status: string;
+  position: number | null;
   runId: string | null;
   errorMessage: string | null;
   attempts: number | null;
@@ -42,6 +44,7 @@ interface ChatViewExecutionQueue {
 
 interface ChatViewExecutionRun {
   id: string;
+  turnId: string | null;
   status: string;
   errorMessage: string | null;
   responseText: string | null;
@@ -117,6 +120,7 @@ export function getAgentConversationChatView(
     .getAll('agentChatQueue')
     .filter((item) => item.agentId === agentId && item.conversationId === conversationId)
     .sort(compareCreated);
+  const queuePositionById = buildQueuePositionById(queueItems);
   const runs = store
     .getAll('agent_runs')
     .filter(
@@ -126,9 +130,8 @@ export function getAgentConversationChatView(
         run.triggerType === 'chat',
     )
     .sort(compareRunStarted);
-  const turns = getTurnsForView(agentId, conversationId, messagesById, queueItems, runs);
+  const turns = listAgentChatTurns(agentId, conversationId);
   const activeBranches = getActiveBranches(conversationId);
-  const turnsById = new Map(turns.map((turn) => [String(turn.id), turn]));
   const supersededByTurnId = new Map<string, string>();
   for (const turn of turns) {
     const supersedesTurnId = asString(turn.supersedesTurnId);
@@ -148,7 +151,6 @@ export function getAgentConversationChatView(
       parentTurnId,
       siblings,
       activeBranches,
-      turnsById,
     });
     if (!selected || typeof selected.id !== 'string') break;
     if (selectedTurnIds.has(selected.id)) break;
@@ -160,6 +162,7 @@ export function getAgentConversationChatView(
         siblings,
         messagesById,
         queueItems,
+        queuePositionById,
         runs,
         supersededByTurnId,
       }),
@@ -173,7 +176,6 @@ export function getAgentConversationChatView(
       parentTurnId: parentId,
       siblings,
       activeBranches,
-      turnsById,
     });
     return {
       parentTurnId: parentId,
@@ -191,150 +193,19 @@ export function getAgentConversationChatView(
   };
 }
 
-function getTurnsForView(
-  agentId: string,
-  conversationId: string,
-  messagesById: Map<string, StoreRecord>,
-  queueItems: StoreRecord[],
-  runs: StoreRecord[],
-): StoreRecord[] {
-  const turns = [...listAgentChatTurns(agentId, conversationId)];
-  const userMessageToTurnId = new Map<string, string>();
-  const runIds = new Set<string>();
-  const turnIds = new Set<string>();
-  for (const turn of turns) {
-    const turnId = asString(turn.id);
-    if (turnId) turnIds.add(turnId);
-    const userMessageId = asString(turn.userMessageId);
-    if (turnId && userMessageId) userMessageToTurnId.set(userMessageId, turnId);
-    const runId = asString(turn.runId);
-    if (runId) runIds.add(runId);
-  }
-
-  const syntheticByUserMessageId = new Map<string, string>();
-  const findParentTurnId = (userMessageId: string | null): string | null => {
-    if (!userMessageId) return null;
-    const message = messagesById.get(userMessageId);
-    const previousUserMessageId =
-      asString(message?.previousUserMessageId) ??
-      findPreviousOutboundAncestor(messagesById, asString(message?.parentId));
-    if (!previousUserMessageId) return null;
-    return (
-      userMessageToTurnId.get(previousUserMessageId) ??
-      syntheticByUserMessageId.get(previousUserMessageId) ??
-      null
-    );
-  };
-  const registerSynthetic = (turn: StoreRecord) => {
-    turns.push(turn);
-    const turnId = asString(turn.id);
-    const userMessageId = asString(turn.userMessageId);
-    if (turnId) turnIds.add(turnId);
-    if (turnId && userMessageId) {
-      userMessageToTurnId.set(userMessageId, turnId);
-      syntheticByUserMessageId.set(userMessageId, turnId);
-    }
-    const runId = asString(turn.runId);
-    if (runId) runIds.add(runId);
-  };
-
-  for (const queue of queueItems) {
-    const turnId = asString(queue.turnId);
-    if (turnId && turnIds.has(turnId)) continue;
-    const userMessageId = asString(queue.queuedMessageId) ?? asString(queue.targetMessageId);
-    const runId = asString(queue.lastRunId) ?? asString(queue.runId);
-    if (userMessageId && userMessageToTurnId.has(userMessageId)) continue;
-    if (!userMessageId && runId && runIds.has(runId)) continue;
-    const queueId = asString(queue.id);
-    if (!queueId) continue;
-    registerSynthetic({
-      id: `legacy-queue:${queueId}`,
-      agentId,
-      conversationId,
-      parentTurnId: findParentTurnId(userMessageId),
-      userMessageId,
-      assistantMessageId: asString(queue.responseMessageId),
-      status: queueStatusToTurnStatus(asString(queue.status)),
-      runId,
-      source: 'legacy_view_queue',
-      createdById: null,
-      turnType: queue.mode === 'respond_to_message' ? 'response' : 'follow_up',
-      supersedesTurnId: null,
-      metadata: {},
-      startedAt: asString(queue.startedAt),
-      completedAt: asString(queue.completedAt),
-      createdAt: asString(queue.createdAt),
-      updatedAt: asString(queue.updatedAt),
-    });
-  }
-
-  for (const run of runs) {
-    const runId = asString(run.id);
-    if (!runId || runIds.has(runId)) continue;
-    const userMessageId = asString(run.responseParentId);
-    if (userMessageId && userMessageToTurnId.has(userMessageId)) continue;
-    registerSynthetic({
-      id: `legacy-run:${runId}`,
-      agentId,
-      conversationId,
-      parentTurnId: findParentTurnId(userMessageId),
-      userMessageId,
-      assistantMessageId: findAssistantMessageIdForRun(runId, messagesById),
-      status: runStatusToTurnStatus(run),
-      runId,
-      source: 'legacy_view_run',
-      createdById: null,
-      turnType: 'follow_up',
-      supersedesTurnId: null,
-      metadata: {},
-      startedAt: asString(run.startedAt),
-      completedAt: asString(run.finishedAt),
-      createdAt: asString(run.createdAt) ?? asString(run.startedAt),
-      updatedAt: asString(run.updatedAt) ?? asString(run.finishedAt),
-    });
-  }
-
-  for (const message of [...messagesById.values()].sort(compareCreated)) {
-    if (message.direction !== 'outbound') continue;
-    const userMessageId = asString(message.id);
-    if (!userMessageId || userMessageToTurnId.has(userMessageId)) continue;
-    const assistantMessageId = findAssistantMessageIdForUserMessage(userMessageId, messagesById);
-    registerSynthetic({
-      id: `legacy-message:${userMessageId}`,
-      agentId,
-      conversationId,
-      parentTurnId: findParentTurnId(userMessageId),
-      userMessageId,
-      assistantMessageId,
-      status: 'completed',
-      runId: assistantMessageId ? getMessageRunId(messagesById.get(assistantMessageId)!) : null,
-      source: 'legacy_view_message',
-      createdById: null,
-      turnType: 'follow_up',
-      supersedesTurnId: null,
-      metadata: {},
-      startedAt: null,
-      completedAt: asString(messagesById.get(assistantMessageId ?? '')?.createdAt),
-      createdAt: asString(message.createdAt),
-      updatedAt: asString(message.updatedAt),
-    });
-  }
-
-  return turns.sort(compareCreated);
-}
-
 function buildChatViewTurn(options: {
   turn: StoreRecord;
   siblings: StoreRecord[];
   messagesById: Map<string, StoreRecord>;
   queueItems: StoreRecord[];
+  queuePositionById: Map<string, number>;
   runs: StoreRecord[];
   supersededByTurnId: Map<string, string>;
 }): ChatViewTurn {
-  const { turn, siblings, messagesById, queueItems, runs, supersededByTurnId } = options;
+  const { turn, siblings, messagesById, queueItems, queuePositionById, runs, supersededByTurnId } =
+    options;
   const userMessageId = asString(turn.userMessageId);
-  const assistantMessageId =
-    asString(turn.assistantMessageId) ?? findAssistantMessageIdForTurn(turn, messagesById, runs);
+  const assistantMessageId = asString(turn.assistantMessageId);
   const userMessage = userMessageId ? (messagesById.get(userMessageId) ?? null) : null;
   const assistantMessage = assistantMessageId
     ? (messagesById.get(assistantMessageId) ?? null)
@@ -357,7 +228,7 @@ function buildChatViewTurn(options: {
     userMessage: serializeMessage(userMessage),
     assistantMessage: serializeMessage(assistantMessage),
     execution: {
-      queue: serializeQueue(queue),
+      queue: serializeQueue(queue, queuePositionById),
       run: serializeRun(run),
     },
     branch: {
@@ -404,11 +275,18 @@ function serializeMessage(message: StoreRecord | null): ChatViewMessage | null {
   };
 }
 
-function serializeQueue(queue: StoreRecord | null): ChatViewExecutionQueue | null {
+function serializeQueue(
+  queue: StoreRecord | null,
+  queuePositionById: Map<string, number>,
+): ChatViewExecutionQueue | null {
   if (!queue || typeof queue.id !== 'string') return null;
+  const turnId = asString(queue.turnId);
+  if (!turnId) return null;
   return {
     id: queue.id,
+    turnId,
     status: asString(queue.status) ?? 'queued',
+    position: queuePositionById.get(queue.id) ?? null,
     runId: asString(queue.runId) ?? asString(queue.lastRunId),
     errorMessage: asString(queue.errorMessage),
     attempts: typeof queue.attempts === 'number' ? queue.attempts : null,
@@ -425,6 +303,7 @@ function serializeRun(run: StoreRecord | null): ChatViewExecutionRun | null {
   if (!run || typeof run.id !== 'string') return null;
   return {
     id: run.id,
+    turnId: asString(run.turnId),
     status: asString(run.status) ?? 'running',
     errorMessage: asString(run.errorMessage),
     responseText: asString(run.responseText),
@@ -432,6 +311,18 @@ function serializeRun(run: StoreRecord | null): ChatViewExecutionRun | null {
     finishedAt: asString(run.finishedAt),
     durationMs: typeof run.durationMs === 'number' ? run.durationMs : null,
   };
+}
+
+function buildQueuePositionById(queueItems: StoreRecord[]): Map<string, number> {
+  const positions = new Map<string, number>();
+  let nextPosition = 1;
+  for (const item of queueItems) {
+    if (item.status !== 'queued' && item.status !== 'processing') continue;
+    if (typeof item.id !== 'string') continue;
+    positions.set(item.id, nextPosition);
+    nextPosition += 1;
+  }
+  return positions;
 }
 
 function serializeSibling(
@@ -501,21 +392,12 @@ function selectTurnForParent(options: {
   parentTurnId: string | null;
   siblings: StoreRecord[];
   activeBranches: Record<string, string>;
-  turnsById: Map<string, StoreRecord>;
 }): StoreRecord | null {
-  const { parentTurnId, siblings, activeBranches, turnsById } = options;
-  const parentUserMessageId = parentTurnId
-    ? asString(turnsById.get(parentTurnId)?.userMessageId)
-    : null;
-  const selectedIds = [
-    activeBranches[`turn:${parentTurnId ?? ROOT_BRANCH_KEY}`],
-    activeBranches[`user:${parentUserMessageId ?? ROOT_BRANCH_KEY}`],
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const { parentTurnId, siblings, activeBranches } = options;
+  const selectedTurnId = activeBranches[`turn:${parentTurnId ?? ROOT_BRANCH_KEY}`];
 
-  for (const selectedId of selectedIds) {
-    const selected = siblings.find(
-      (turn) => turn.id === selectedId || turn.userMessageId === selectedId,
-    );
+  if (selectedTurnId) {
+    const selected = siblings.find((turn) => turn.id === selectedTurnId);
     if (selected) return selected;
   }
 
@@ -528,13 +410,7 @@ function selectTurnForParent(options: {
 
 function findQueueForTurn(turn: StoreRecord, queueItems: StoreRecord[]): StoreRecord | null {
   const turnId = asString(turn.id);
-  const userMessageId = asString(turn.userMessageId);
-  const matches = queueItems.filter(
-    (item) =>
-      item.turnId === turnId ||
-      (userMessageId &&
-        (item.queuedMessageId === userMessageId || item.targetMessageId === userMessageId)),
-  );
+  const matches = queueItems.filter((item) => item.turnId === turnId);
   return matches[matches.length - 1] ?? null;
 }
 
@@ -552,77 +428,8 @@ function findRunForTurn(
   }
 
   const turnId = asString(turn.id);
-  const userMessageId = asString(turn.userMessageId);
-  const matches = runs.filter(
-    (run) =>
-      (turnId && run.turnId === turnId) ||
-      (userMessageId && run.responseParentId === userMessageId),
-  );
+  const matches = runs.filter((run) => turnId && run.turnId === turnId);
   return matches[matches.length - 1] ?? null;
-}
-
-function findAssistantMessageIdForTurn(
-  turn: StoreRecord,
-  messagesById: Map<string, StoreRecord>,
-  runs: StoreRecord[],
-): string | null {
-  const userMessageId = asString(turn.userMessageId);
-  const runId = asString(turn.runId);
-  const messages = [...messagesById.values()].sort(compareCreated);
-  if (runId) {
-    const byRun = messages.find((message) => getMessageRunId(message) === runId);
-    if (typeof byRun?.id === 'string') return byRun.id;
-  }
-  if (userMessageId) {
-    const byParent = messages.find(
-      (message) => message.direction === 'inbound' && message.parentId === userMessageId,
-    );
-    if (typeof byParent?.id === 'string') return byParent.id;
-    const run = runs.find((candidate) => candidate.responseParentId === userMessageId);
-    const runResponse = run
-      ? messages.find((message) => getMessageRunId(message) === run.id)
-      : null;
-    if (typeof runResponse?.id === 'string') return runResponse.id;
-  }
-  return null;
-}
-
-function findAssistantMessageIdForRun(
-  runId: string,
-  messagesById: Map<string, StoreRecord>,
-): string | null {
-  const message = [...messagesById.values()]
-    .sort(compareCreated)
-    .find((candidate) => getMessageRunId(candidate) === runId);
-  return asString(message?.id);
-}
-
-function findAssistantMessageIdForUserMessage(
-  userMessageId: string,
-  messagesById: Map<string, StoreRecord>,
-): string | null {
-  const message = [...messagesById.values()]
-    .sort(compareCreated)
-    .find((candidate) => candidate.direction === 'inbound' && candidate.parentId === userMessageId);
-  return asString(message?.id);
-}
-
-function findPreviousOutboundAncestor(
-  messagesById: Map<string, StoreRecord>,
-  parentId: string | null,
-): string | null {
-  let currentId = parentId;
-  const visited = new Set<string>();
-  while (currentId && !visited.has(currentId)) {
-    visited.add(currentId);
-    const message = messagesById.get(currentId);
-    if (!message) return null;
-    if (message.direction === 'outbound' && typeof message.id === 'string') {
-      return message.id as string;
-    }
-    currentId = asString(message.parentId);
-  }
-  return null;
 }
 
 function resolveChatViewStatus(
@@ -650,34 +457,19 @@ function resolveChatViewStatus(
   return 'queued';
 }
 
-function queueStatusToTurnStatus(status: string | null): AgentChatTurnStatus {
-  if (status === 'processing') return 'running';
-  if (status === 'completed') return 'completed';
-  if (status === 'failed') return 'failed';
-  if (status === 'cancelled') return 'stopped';
-  return 'queued';
-}
-
-function runStatusToTurnStatus(run: StoreRecord): AgentChatTurnStatus {
-  if (run.killedByUser === true || run.errorMessage === 'Killed by user') return 'stopped';
-  if (run.status === 'queued') return 'queued';
-  if (run.status === 'running') return 'running';
-  if (run.status === 'completed') return 'completed';
-  return 'failed';
-}
-
-function getMessageRunId(message: StoreRecord): string | null {
-  const metadata = parseMetadata(message.metadata);
-  return typeof metadata?.runId === 'string' ? metadata.runId : null;
-}
-
 function getActiveBranches(conversationId: string): Record<string, string> {
   const conversation = store.getById('conversations', conversationId);
   const metadata = parseMetadata(conversation?.metadata);
   const activeBranches = metadata?.activeBranches;
-  return activeBranches && typeof activeBranches === 'object' && !Array.isArray(activeBranches)
-    ? (activeBranches as Record<string, string>)
-    : {};
+  if (!activeBranches || typeof activeBranches !== 'object' || Array.isArray(activeBranches)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(activeBranches).filter(
+      (entry): entry is [string, string] =>
+        entry[0].startsWith('turn:') && typeof entry[1] === 'string' && entry[1].length > 0,
+    ),
+  );
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> | null {
